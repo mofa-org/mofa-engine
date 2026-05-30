@@ -151,12 +151,14 @@ impl Engine {
         let result = backend.run(&model_id, &request.input).await;
 
         // On failure, try fallback
-        let output = match result {
-            Ok(out) => out,
+        let (output, actual_model_name, actual_backend) = match result {
+            Ok(out) => (out, info.name.clone(), info.backend.to_string()),
             Err(e) => {
                 warn!(model = %model_id, error = %e, "inference failed, trying fallback");
-                self.try_fallback(&info, &request.input).await
-                    .map_err(|_| e)?
+                match self.try_fallback(&info, &request.input).await {
+                    Ok((out, fallback_info)) => (out, fallback_info.name, fallback_info.backend.to_string()),
+                    Err(_) => return Err(e),
+                }
             }
         };
 
@@ -180,8 +182,8 @@ impl Engine {
 
         Ok(RunResponse {
             output,
-            model_used: info.name,
-            backend: info.backend.to_string(),
+            model_used: actual_model_name,
+            backend: actual_backend,
             duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
             request_id,
         })
@@ -280,7 +282,7 @@ impl Engine {
         }
     }
 
-    async fn try_fallback(&self, failed_info: &ModelInfo, input: &ModelInput) -> Result<ModelOutput, EngineError> {
+    async fn try_fallback(&self, failed_info: &ModelInfo, input: &ModelInput) -> Result<(ModelOutput, ModelInfo), EngineError> {
         let alternatives: Vec<ModelInfo> = self.models.iter()
             .filter(|e| {
                 let m = e.value();
@@ -306,7 +308,7 @@ impl Engine {
                             m.status = ModelStatus::Loaded;
                         }
                         self.idle_tracker.insert(alt.id.clone(), Instant::now());
-                        return Ok(output);
+                        return Ok((output, alt.clone()));
                     }
                     Err(e) => {
                         warn!(model = %alt.id, error = %e, "fallback run failed");

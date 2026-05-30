@@ -108,3 +108,58 @@ impl MemoryManagerTrait for MemoryManagerImpl {
         Ok(to_evict)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mofa_kernel::MemoryManager as MemoryManagerTrait;
+
+    #[tokio::test]
+    async fn test_reserve_and_release() {
+        let mm = MemoryManagerImpl::new(1024);
+        assert_eq!(mm.total_memory(), 1024);
+        assert_eq!(mm.available_memory(), 1024);
+
+        mm.reserve("model_a", 256).await.unwrap();
+        assert_eq!(mm.used_memory(), 256);
+        assert_eq!(mm.available_memory(), 768);
+
+        mm.reserve("model_b", 512).await.unwrap();
+        assert_eq!(mm.used_memory(), 768);
+
+        let freed = mm.release("model_a").await.unwrap();
+        assert_eq!(freed, 256);
+        assert_eq!(mm.used_memory(), 512);
+    }
+
+    #[tokio::test]
+    async fn test_insufficient_memory() {
+        let mm = MemoryManagerImpl::new(100);
+        let result = mm.reserve("big_model", 200).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_lru_eviction() {
+        let mm = MemoryManagerImpl::new(1000);
+        mm.reserve("model_a", 400).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        mm.reserve("model_b", 400).await.unwrap();
+
+        // model_a is older, should be evicted first
+        let evicted = mm.evict_for(500).await.unwrap();
+        assert_eq!(evicted, vec!["model_a"]);
+    }
+
+    #[tokio::test]
+    async fn test_resident_not_evicted() {
+        let mm = MemoryManagerImpl::new(1000);
+        mm.reserve("resident_model", 400).await.unwrap();
+        mm.set_resident("resident_model", true);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        mm.reserve("normal_model", 400).await.unwrap();
+
+        let evicted = mm.evict_for(500).await.unwrap();
+        assert_eq!(evicted, vec!["normal_model"]);
+    }
+}

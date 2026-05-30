@@ -78,6 +78,9 @@ impl ModelBackend for OllamaBackend {
         let mut infos = Vec::new();
         for m in list.models {
             let clean_name = m.name.split(':').next().unwrap_or(&m.name).to_string();
+            if clean_name.contains("embedding") {
+                continue;
+            }
             let id = format!("ollama:{clean_name}");
             let info = ModelInfo {
                 id: id.clone(),

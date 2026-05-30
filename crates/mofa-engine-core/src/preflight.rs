@@ -35,3 +35,37 @@ impl PreflightManager {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_predict_after_sufficient_observations() {
+        let pm = PreflightManager::new();
+        for _ in 0..5 {
+            pm.record_transition(ModelType::Llm, ModelType::Tts);
+        }
+        assert_eq!(pm.predict_next(ModelType::Llm), Some(ModelType::Tts));
+    }
+
+    #[test]
+    fn test_no_prediction_below_threshold() {
+        let pm = PreflightManager::new();
+        pm.record_transition(ModelType::Llm, ModelType::Tts);
+        pm.record_transition(ModelType::Llm, ModelType::Tts);
+        assert_eq!(pm.predict_next(ModelType::Llm), None);
+    }
+
+    #[test]
+    fn test_predict_most_common() {
+        let pm = PreflightManager::new();
+        for _ in 0..5 {
+            pm.record_transition(ModelType::Llm, ModelType::Tts);
+        }
+        for _ in 0..3 {
+            pm.record_transition(ModelType::Llm, ModelType::Asr);
+        }
+        assert_eq!(pm.predict_next(ModelType::Llm), Some(ModelType::Tts));
+    }
+}

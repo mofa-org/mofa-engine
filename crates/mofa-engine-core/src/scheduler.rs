@@ -84,3 +84,62 @@ impl Scheduler for SmartScheduler {
         // record for history learning — this is called by engine after each run
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_model(id: &str, name: &str, mt: ModelType, bt: BackendType, status: ModelStatus) -> ModelInfo {
+        ModelInfo {
+            id: id.to_string(),
+            name: name.to_string(),
+            model_type: mt,
+            backend: bt,
+            status,
+            memory_bytes: 1000,
+            priority: ModelPriority::Normal,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_select_by_name() {
+        let s = SmartScheduler::new();
+        let models = vec![
+            make_model("a", "gpt-4o", ModelType::Llm, BackendType::OpenAi, ModelStatus::Available),
+        ];
+        let id = s.select_model(None, Some("gpt-4o"), &models).await.unwrap();
+        assert_eq!(id, "a");
+    }
+
+    #[tokio::test]
+    async fn test_select_by_type_prefers_local() {
+        let s = SmartScheduler::new();
+        let models = vec![
+            make_model("cloud", "gpt-4o", ModelType::Llm, BackendType::OpenAi, ModelStatus::Available),
+            make_model("local", "qwen", ModelType::Llm, BackendType::Ollama, ModelStatus::Available),
+        ];
+        let id = s.select_model(Some(ModelType::Llm), None, &models).await.unwrap();
+        assert_eq!(id, "local");
+    }
+
+    #[tokio::test]
+    async fn test_select_by_type_prefers_loaded() {
+        let s = SmartScheduler::new();
+        let models = vec![
+            make_model("a", "qwen", ModelType::Llm, BackendType::Ollama, ModelStatus::Available),
+            make_model("b", "gpt-4o", ModelType::Llm, BackendType::OpenAi, ModelStatus::Loaded),
+        ];
+        let id = s.select_model(Some(ModelType::Llm), None, &models).await.unwrap();
+        assert_eq!(id, "b");
+    }
+
+    #[tokio::test]
+    async fn test_select_not_found() {
+        let s = SmartScheduler::new();
+        let models = vec![
+            make_model("a", "tts-1", ModelType::Tts, BackendType::OpenAi, ModelStatus::Available),
+        ];
+        let result = s.select_model(Some(ModelType::Asr), None, &models).await;
+        assert!(result.is_err());
+    }
+}
