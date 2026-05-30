@@ -1,0 +1,21 @@
+[package]
+name = "mofa-engine-sdk"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "HTTP API server, WebSocket, and dashboard serving for MoFA Engine"
+
+[dependencies]
+mofa-kernel = { workspace = true }
+mofa-engine-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+axum = { workspace = true }
+axum-extra = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+tokio-stream = { workspace = true }

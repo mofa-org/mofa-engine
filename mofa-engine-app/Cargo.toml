@@ -1,0 +1,15 @@
+[package]
+name = "mofa-engine"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "MoFA Engine binary entry point"
+
+[dependencies]
+mofa-engine-core = { workspace = true }
+mofa-engine-sdk = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }

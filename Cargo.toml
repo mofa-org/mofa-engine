@@ -1,40 +1,53 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
-    "crates/mofa-kernel",
-    "crates/mofa-engine-core",
-    "crates/mofa-engine-sdk",
-    "crates/mofa-engine-app",
+    "mofa-kernel",
+    "mofa-engine-core",
+    "mofa-engine-sdk",
+    "mofa-engine-app",
 ]
 
 [workspace.package]
-version = "0.1.0"
 edition = "2024"
-license = "Apache-2.0"
+version = "0.1.0"
+license = "MIT"
 
 [workspace.dependencies]
-mofa-kernel = { path = "crates/mofa-kernel" }
-mofa-engine-core = { path = "crates/mofa-engine-core" }
-mofa-engine-sdk = { path = "crates/mofa-engine-sdk" }
-
+# Async runtime
 tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+
+# Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"
+
+# HTTP
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+axum = { version = "0.8", features = ["ws"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Error handling
 thiserror = "2"
+anyhow = "1"
+
+# Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-async-trait = "0.1"
+
+# Utilities
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
-reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
-axum = { version = "0.8", features = ["ws"] }
-tower-http = { version = "0.6", features = ["cors", "trace"] }
-dashmap = "6"
-parking_lot = "0.12"
-bytes = "1"
-base64 = "0.22"
-toml = "0.8"
-dirs = "6"
 sysinfo = "0.34"
-futures = "0.3"
-tokio-stream = "0.1"
+clap = { version = "4", features = ["derive"] }
+dashmap = "6"
+dirs = "6"
+tempfile = "3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+
+# Internal crates
+mofa-kernel = { path = "mofa-kernel" }
+mofa-engine-core = { path = "mofa-engine-core" }
+mofa-engine-sdk = { path = "mofa-engine-sdk" }
