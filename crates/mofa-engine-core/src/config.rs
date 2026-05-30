@@ -37,7 +37,7 @@ pub struct OllamaConfig {
     pub url: String,
 }
 
-fn default_ollama_url() -> String { "http://localhost:11434".to_string() }
+fn default_ollama_url() -> String { "http://127.0.0.1:11434".to_string() }
 
 impl Default for OllamaConfig {
     fn default() -> Self {

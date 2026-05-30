@@ -15,7 +15,7 @@ impl Discovery {
         // Try Ollama
         let ollama_url = config.backends.ollama.as_ref()
             .map(|c| c.url.clone())
-            .unwrap_or_else(|| "http://localhost:11434".to_string());
+            .unwrap_or_else(|| "http://127.0.0.1:11434".to_string());
 
         let ollama = OllamaBackend::new(&ollama_url);
         match ollama.discover().await {

@@ -45,7 +45,12 @@ struct OllamaChatResponse {
 impl OllamaBackend {
     pub fn new(base_url: &str) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(300))
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap_or_else(|_| Client::new()),
             base_url: base_url.trim_end_matches('/').to_string(),
             models: DashMap::new(),
         }
