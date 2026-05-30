@@ -348,19 +348,13 @@ impl OpenAiCompatProvider {
             detail: format!("TTS read error: {e}"),
         })?;
 
-        // Write to temp file
-        let tmp = tempfile::Builder::new()
-            .suffix(".mp3")
-            .tempfile()
-            .map_err(|e| EngineError::Internal(format!("temp file error: {e}")))?;
-
-        let path = tmp.path().to_string_lossy().to_string();
+        // Write to a persistent temp file
+        let path = std::env::temp_dir()
+            .join(format!("mofa_tts_{}.mp3", uuid::Uuid::new_v4()));
         std::fs::write(&path, &bytes).map_err(|e| {
             EngineError::Internal(format!("write error: {e}"))
         })?;
-
-        // Keep the file alive (don't let tempfile delete it)
-        let _ = tmp.into_temp_path();
+        let path = path.to_string_lossy().to_string();
 
         let duration_ms = start.elapsed().as_millis() as u64;
         Ok(InferenceResponse {

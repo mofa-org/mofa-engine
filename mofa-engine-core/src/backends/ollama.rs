@@ -111,9 +111,13 @@ impl Provider for OllamaProvider {
             .filter_map(|m| {
                 let model_name = m.name.or(m.model)?;
 
-                // Skip embedding models
                 let lower = model_name.to_lowercase();
                 if lower.contains("embed") {
+                    return None;
+                }
+
+                // Skip Ollama cloud-proxy models — they require a paid subscription
+                if lower.contains(":cloud") || lower.contains("-cloud") {
                     return None;
                 }
 
@@ -216,20 +220,10 @@ impl Provider for OllamaProvider {
         })
     }
 
-    async fn warm(&self, model_id: &str) {
-        let model_name = model_id.split("::").nth(1).unwrap_or(model_id);
-        let body = OllamaChatRequest {
-            model: model_name.to_string(),
-            messages: vec![OllamaMessage {
-                role: "user".into(),
-                content: "hi".into(),
-            }],
-            stream: false,
-            keep_alive: Some("5m".into()),
-        };
-
-        let url = format!("{}/api/chat", self.base_url);
-        let _ = self.client.post(&url).json(&body).send().await;
+    async fn warm(&self, _model_id: &str) {
+        // Ollama loads models on-demand during inference.
+        // Explicit warming via /api/chat would block for the full
+        // model load time, so we skip it and let invoke() handle loading.
     }
 
     async fn evict(&self, model_id: &str) {

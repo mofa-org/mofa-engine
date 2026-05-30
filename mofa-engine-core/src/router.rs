@@ -27,6 +27,13 @@ impl Router {
                     continue;
                 }
 
+            // Hard filter: capability must match when specified
+            if let Some(cap) = desired_cap {
+                if model.capability != cap {
+                    continue;
+                }
+            }
+
             let score = Self::score(model, desired_cap, provider_kinds);
             if score <= 0 {
                 continue;
