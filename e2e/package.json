@@ -1,0 +1,15 @@
+{
+  "name": "mofa-engine-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "End-to-end tests for MoFA Engine dashboard",
+  "scripts": {
+    "test": "npx playwright test",
+    "test:headed": "npx playwright test --headed",
+    "test:debug": "npx playwright test --debug",
+    "test:list": "npx playwright test --list"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.52.0"
+  }
+}
