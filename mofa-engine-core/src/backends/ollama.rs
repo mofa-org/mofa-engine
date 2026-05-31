@@ -27,7 +27,7 @@ impl OllamaProvider {
         let client = Client::builder()
             .no_proxy()
             .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(300))
+            .timeout(Duration::from_secs(180))
             .build()
             .unwrap_or_default();
 

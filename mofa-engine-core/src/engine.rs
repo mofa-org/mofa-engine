@@ -221,7 +221,23 @@ impl Engine {
         self.memory.touch(model_id);
 
         let start = Instant::now();
-        let result = provider.invoke(model_id, req).await;
+        let invoke_timeout = std::time::Duration::from_secs(180);
+        let result = match tokio::time::timeout(invoke_timeout, provider.invoke(model_id, req)).await {
+            Ok(r) => r,
+            Err(_) => {
+                self.set_model_status(model_id, ModelStatus::Hot);
+                self.circuit_breakers.record_failure(provider_name);
+                let _ = self.event_tx.send(EngineEvent::RequestCompleted {
+                    request_id: req.request_id.clone(),
+                    duration_ms: invoke_timeout.as_millis() as u64,
+                    success: false,
+                });
+                return Err(EngineError::Timeout(format!(
+                    "provider '{}' did not respond within {}s",
+                    provider_name, invoke_timeout.as_secs()
+                )));
+            }
+        };
         let duration_ms = start.elapsed().as_millis() as u64;
 
         match &result {
