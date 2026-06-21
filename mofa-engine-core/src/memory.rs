@@ -30,10 +30,7 @@ impl MemoryManager {
             None => Self::detect_system_memory(),
         };
 
-        tracing::info!(
-            "memory budget: {} MB",
-            budget_bytes / (1024 * 1024)
-        );
+        tracing::info!("memory budget: {} MB", budget_bytes / (1024 * 1024));
 
         Self {
             budget_bytes,
@@ -110,10 +107,7 @@ impl MemoryManager {
     /// Return a snapshot of all allocations (model_id, bytes).
     pub fn snapshot(&self) -> Vec<(String, u64)> {
         let allocs = self.allocations.lock().unwrap_or_else(|e| e.into_inner());
-        allocs
-            .iter()
-            .map(|(id, a)| (id.clone(), a.bytes))
-            .collect()
+        allocs.iter().map(|(id, a)| (id.clone(), a.bytes)).collect()
     }
 }
 

@@ -6,6 +6,7 @@
 //! 3. `~/.config/mofa-engine/config.toml`
 //! 4. Auto-detection from environment variables
 
+use mofa_kernel::{EngineError, ProviderKind};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -44,7 +45,7 @@ impl Default for ListenConfig {
 }
 
 fn default_host() -> String {
-    "0.0.0.0".into()
+    "127.0.0.1".into()
 }
 
 fn default_port() -> u16 {
@@ -129,47 +130,91 @@ impl EngineConfig {
     ///
     /// Priority: explicit path > `./config.toml` > `~/.config/mofa-engine/config.toml` > env auto-detect.
     pub fn load(explicit_path: Option<&Path>) -> Self {
+        Self::load_checked(explicit_path).unwrap_or_else(|e| {
+            tracing::warn!("falling back to environment auto-detect after config error: {e}");
+            Self::from_env()
+        })
+    }
+
+    /// Load and validate configuration from the first available source.
+    pub fn load_checked(explicit_path: Option<&Path>) -> Result<Self, EngineError> {
         // 1. Explicit path
-        if let Some(path) = explicit_path
-            && let Some(cfg) = Self::from_toml_file(path) {
-                tracing::info!("loaded config from {}", path.display());
-                return cfg;
-            }
+        if let Some(path) = explicit_path {
+            let cfg = Self::from_toml_file(path)?;
+            tracing::info!("loaded config from {}", path.display());
+            cfg.validate()?;
+            return Ok(cfg);
+        }
 
         // 2. CWD config.toml
         let cwd_path = PathBuf::from("config.toml");
-        if let Some(cfg) = Self::from_toml_file(&cwd_path) {
+        if cwd_path.exists() {
+            let cfg = Self::from_toml_file(&cwd_path)?;
             tracing::info!("loaded config from ./config.toml");
-            return cfg;
+            cfg.validate()?;
+            return Ok(cfg);
         }
 
         // 3. ~/.config/mofa-engine/config.toml
         if let Some(config_dir) = dirs::config_dir() {
             let home_path = config_dir.join("mofa-engine").join("config.toml");
-            if let Some(cfg) = Self::from_toml_file(&home_path) {
+            if home_path.exists() {
+                let cfg = Self::from_toml_file(&home_path)?;
                 tracing::info!("loaded config from {}", home_path.display());
-                return cfg;
+                cfg.validate()?;
+                return Ok(cfg);
             }
         }
 
         // 4. Auto-detect from env
         tracing::info!("no config file found, auto-detecting from environment");
-        Self::from_env()
+        let cfg = Self::from_env();
+        cfg.validate()?;
+        Ok(cfg)
     }
 
     /// Try to parse a TOML config file, resolving `${ENV_VAR}` in api_key fields.
-    fn from_toml_file(path: &Path) -> Option<Self> {
-        let content = std::fs::read_to_string(path).ok()?;
-        let mut config: Self = toml::from_str(&content).ok()?;
+    fn from_toml_file(path: &Path) -> Result<Self, EngineError> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| EngineError::Config(format!("cannot read {}: {e}", path.display())))?;
+        let mut config: Self = toml::from_str(&content)
+            .map_err(|e| EngineError::Config(format!("invalid TOML in {}: {e}", path.display())))?;
 
         // Resolve env vars in api_key fields
         for provider in &mut config.providers {
             if let Some(ref key) = provider.api_key {
-                provider.api_key = Some(resolve_env_var(key));
+                provider.api_key = Some(resolve_env_var(key)?);
             }
         }
 
-        Some(config)
+        Ok(config)
+    }
+
+    /// Validate configuration before constructing the engine.
+    pub fn validate(&self) -> Result<(), EngineError> {
+        for provider in &self.providers {
+            if !provider.enabled {
+                continue;
+            }
+            provider.provider_kind()?;
+            if provider.kind == "openai_compatible"
+                && provider.api_key.as_deref().unwrap_or_default().is_empty()
+            {
+                return Err(EngineError::Config(format!(
+                    "provider '{}' requires a non-empty api_key",
+                    provider.name
+                )));
+            }
+            for model in &provider.models {
+                if mofa_kernel::Capability::from_str_loose(&model.capability).is_none() {
+                    return Err(EngineError::Config(format!(
+                        "provider '{}' model '{}' has unknown capability '{}'",
+                        provider.name, model.name, model.capability
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Auto-detect providers from well-known environment variables.
@@ -198,11 +243,36 @@ impl EngineConfig {
                 priority: 10,
                 cost_tier: "high".into(),
                 models: vec![
-                    ModelDef { name: "gpt-4o".into(), capability: "chat".into(), context_window: Some(128000), memory_mb: None },
-                    ModelDef { name: "gpt-4o-mini".into(), capability: "chat".into(), context_window: Some(128000), memory_mb: None },
-                    ModelDef { name: "tts-1".into(), capability: "tts".into(), context_window: None, memory_mb: None },
-                    ModelDef { name: "tts-1-hd".into(), capability: "tts".into(), context_window: None, memory_mb: None },
-                    ModelDef { name: "whisper-1".into(), capability: "asr".into(), context_window: None, memory_mb: None },
+                    ModelDef {
+                        name: "gpt-4o".into(),
+                        capability: "chat".into(),
+                        context_window: Some(128000),
+                        memory_mb: None,
+                    },
+                    ModelDef {
+                        name: "gpt-4o-mini".into(),
+                        capability: "chat".into(),
+                        context_window: Some(128000),
+                        memory_mb: None,
+                    },
+                    ModelDef {
+                        name: "tts-1".into(),
+                        capability: "tts".into(),
+                        context_window: None,
+                        memory_mb: None,
+                    },
+                    ModelDef {
+                        name: "tts-1-hd".into(),
+                        capability: "tts".into(),
+                        context_window: None,
+                        memory_mb: None,
+                    },
+                    ModelDef {
+                        name: "whisper-1".into(),
+                        capability: "asr".into(),
+                        context_window: None,
+                        memory_mb: None,
+                    },
                 ],
                 enabled: true,
             });
@@ -218,8 +288,18 @@ impl EngineConfig {
                 priority: 8,
                 cost_tier: "low".into(),
                 models: vec![
-                    ModelDef { name: "deepseek-chat".into(), capability: "chat".into(), context_window: Some(64000), memory_mb: None },
-                    ModelDef { name: "deepseek-reasoner".into(), capability: "chat".into(), context_window: Some(64000), memory_mb: None },
+                    ModelDef {
+                        name: "deepseek-chat".into(),
+                        capability: "chat".into(),
+                        context_window: Some(64000),
+                        memory_mb: None,
+                    },
+                    ModelDef {
+                        name: "deepseek-reasoner".into(),
+                        capability: "chat".into(),
+                        context_window: Some(64000),
+                        memory_mb: None,
+                    },
                 ],
                 enabled: true,
             });
@@ -235,9 +315,24 @@ impl EngineConfig {
                 priority: 8,
                 cost_tier: "medium".into(),
                 models: vec![
-                    ModelDef { name: "qwen-plus".into(), capability: "chat".into(), context_window: Some(131072), memory_mb: None },
-                    ModelDef { name: "qwen-turbo".into(), capability: "chat".into(), context_window: Some(131072), memory_mb: None },
-                    ModelDef { name: "qwen-max".into(), capability: "chat".into(), context_window: Some(32768), memory_mb: None },
+                    ModelDef {
+                        name: "qwen-plus".into(),
+                        capability: "chat".into(),
+                        context_window: Some(131072),
+                        memory_mb: None,
+                    },
+                    ModelDef {
+                        name: "qwen-turbo".into(),
+                        capability: "chat".into(),
+                        context_window: Some(131072),
+                        memory_mb: None,
+                    },
+                    ModelDef {
+                        name: "qwen-max".into(),
+                        capability: "chat".into(),
+                        context_window: Some(32768),
+                        memory_mb: None,
+                    },
                 ],
                 enabled: true,
             });
@@ -252,9 +347,12 @@ impl EngineConfig {
                 api_key: Some(key),
                 priority: 8,
                 cost_tier: "medium".into(),
-                models: vec![
-                    ModelDef { name: "meta/llama-3.1-8b-instruct".into(), capability: "chat".into(), context_window: Some(128000), memory_mb: None },
-                ],
+                models: vec![ModelDef {
+                    name: "meta/llama-3.1-8b-instruct".into(),
+                    capability: "chat".into(),
+                    context_window: Some(128000),
+                    memory_mb: None,
+                }],
                 enabled: true,
             });
         }
@@ -268,9 +366,12 @@ impl EngineConfig {
                 api_key: Some(key),
                 priority: 9,
                 cost_tier: "medium".into(),
-                models: vec![
-                    ModelDef { name: "sonar".into(), capability: "chat".into(), context_window: Some(128000), memory_mb: None },
-                ],
+                models: vec![ModelDef {
+                    name: "sonar".into(),
+                    capability: "chat".into(),
+                    context_window: Some(128000),
+                    memory_mb: None,
+                }],
                 enabled: true,
             });
         }
@@ -284,9 +385,12 @@ impl EngineConfig {
                 api_key: Some(key),
                 priority: 8,
                 cost_tier: "low".into(),
-                models: vec![
-                    ModelDef { name: "glm-4-flash".into(), capability: "chat".into(), context_window: Some(128000), memory_mb: None },
-                ],
+                models: vec![ModelDef {
+                    name: "glm-4-flash".into(),
+                    capability: "chat".into(),
+                    context_window: Some(128000),
+                    memory_mb: None,
+                }],
                 enabled: true,
             });
         }
@@ -300,12 +404,29 @@ impl EngineConfig {
 }
 
 /// Resolve `${ENV_VAR}` patterns in a string.
-fn resolve_env_var(s: &str) -> String {
+fn resolve_env_var(s: &str) -> Result<String, EngineError> {
     if let Some(rest) = s.strip_prefix("${")
-        && let Some(var_name) = rest.strip_suffix('}') {
-            return std::env::var(var_name).unwrap_or_default();
+        && let Some(var_name) = rest.strip_suffix('}')
+    {
+        return std::env::var(var_name).map_err(|_| {
+            EngineError::Config(format!("environment variable '{var_name}' is not set"))
+        });
+    }
+    Ok(s.to_string())
+}
+
+impl ProviderConfig {
+    /// Parse the configured provider kind.
+    pub fn provider_kind(&self) -> Result<ProviderKind, EngineError> {
+        match self.kind.as_str() {
+            "ollama" => Ok(ProviderKind::Ollama),
+            "openai_compatible" => Ok(ProviderKind::OpenAiCompatible),
+            other => Err(EngineError::Config(format!(
+                "unknown provider kind '{}' for provider '{}'",
+                other, self.name
+            ))),
         }
-    s.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -314,15 +435,24 @@ mod tests {
 
     #[test]
     fn resolve_env_var_plain() {
-        assert_eq!(resolve_env_var("plain-key"), "plain-key");
+        assert_eq!(resolve_env_var("plain-key").unwrap(), "plain-key");
     }
 
     #[test]
     fn resolve_env_var_syntax() {
         // SAFETY: this test runs single-threaded and restores the env var.
         unsafe { std::env::set_var("TEST_MOFA_KEY", "resolved-value") };
-        assert_eq!(resolve_env_var("${TEST_MOFA_KEY}"), "resolved-value");
+        assert_eq!(
+            resolve_env_var("${TEST_MOFA_KEY}").unwrap(),
+            "resolved-value"
+        );
         unsafe { std::env::remove_var("TEST_MOFA_KEY") };
+    }
+
+    #[test]
+    fn unresolved_env_var_errors() {
+        unsafe { std::env::remove_var("MISSING_MOFA_KEY") };
+        assert!(resolve_env_var("${MISSING_MOFA_KEY}").is_err());
     }
 
     #[test]
@@ -357,5 +487,24 @@ mod tests {
         let parsed: EngineConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.providers.len(), 1);
         assert_eq!(parsed.providers[0].name, "test");
+    }
+
+    #[test]
+    fn validate_rejects_unknown_provider_kind() {
+        let cfg = EngineConfig {
+            listen: ListenConfig::default(),
+            memory: MemoryConfig::default(),
+            providers: vec![ProviderConfig {
+                name: "bad".into(),
+                kind: "bad_kind".into(),
+                base_url: "http://localhost".into(),
+                api_key: None,
+                priority: 1,
+                cost_tier: "free".into(),
+                models: vec![],
+                enabled: true,
+            }],
+        };
+        assert!(cfg.validate().is_err());
     }
 }

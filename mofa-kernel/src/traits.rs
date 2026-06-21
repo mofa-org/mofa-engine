@@ -3,20 +3,37 @@
 use async_trait::async_trait;
 
 use crate::error::EngineError;
-use crate::types::{InferenceRequest, InferenceResponse, ModelCard, ProviderKind};
+use crate::types::{
+    BackendFeature, BackendHealth, InferenceRequest, InferenceResponse, LifecycleResult, ModelCard,
+    ProviderKind,
+};
 
 /// A model provider backend.
 ///
-/// Implementations discover available models, manage their lifecycle,
-/// and invoke inference. All methods are async and the trait is
-/// object-safe (`Send + Sync`).
+/// Providers own backend-specific protocol details. The engine owns routing,
+/// lifecycle policy, memory admission, fallback, and observability.
 #[async_trait]
 pub trait Provider: Send + Sync {
+    /// Provider name used in canonical model identifiers.
+    fn name(&self) -> &str;
+
+    /// What kind of provider this is.
+    fn kind(&self) -> ProviderKind;
+
+    /// Static backend features.
+    fn features(&self) -> Vec<BackendFeature>;
+
     /// Discover all models this provider can serve.
-    async fn discover(&self) -> Vec<ModelCard>;
+    async fn discover(&self) -> Result<Vec<ModelCard>, EngineError>;
 
     /// Check if the provider is reachable and healthy.
-    async fn health(&self) -> bool;
+    async fn health(&self) -> Result<BackendHealth, EngineError>;
+
+    /// Load or warm a model so it is ready for inference.
+    async fn load(&self, model_id: &str) -> Result<LifecycleResult, EngineError>;
+
+    /// Evict a model from memory/cache when the backend supports it.
+    async fn unload(&self, model_id: &str) -> Result<LifecycleResult, EngineError>;
 
     /// Run inference on a specific model.
     async fn invoke(
@@ -24,15 +41,6 @@ pub trait Provider: Send + Sync {
         model_id: &str,
         request: &InferenceRequest,
     ) -> Result<InferenceResponse, EngineError>;
-
-    /// Pre-warm a model so it is ready for fast inference.
-    async fn warm(&self, model_id: &str);
-
-    /// Evict a model from memory / cache.
-    async fn evict(&self, model_id: &str);
-
-    /// What kind of provider this is.
-    fn kind(&self) -> ProviderKind;
 }
 
 #[cfg(test)]

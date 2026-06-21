@@ -27,16 +27,15 @@ async fn main() -> anyhow::Result<()> {
     // Initialise tracing
     fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .with_target(false)
         .init();
 
     let cli = Cli::parse();
 
-    // Load configuration
-    let mut config = EngineConfig::load(cli.config.as_deref());
+    // Load and validate configuration.
+    let mut config = EngineConfig::load_checked(cli.config.as_deref())?;
 
     // CLI port override
     if let Some(port) = cli.port {
@@ -46,13 +45,10 @@ async fn main() -> anyhow::Result<()> {
     let host = config.listen.host.clone();
     let port = config.listen.port;
 
-    tracing::info!(
-        "MoFA Engine v{} starting",
-        env!("CARGO_PKG_VERSION")
-    );
+    tracing::info!("MoFA Engine v{} starting", env!("CARGO_PKG_VERSION"));
 
     // Create engine
-    let engine = Engine::new(config).await;
+    let engine = Engine::try_new(config).await?;
 
     // Start server
     start_server(engine, &host, port)

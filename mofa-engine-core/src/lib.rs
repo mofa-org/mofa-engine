@@ -4,13 +4,13 @@
 //! memory management, circuit breaker, preflight prediction,
 //! and the main `Engine` orchestrator.
 
-pub mod config;
 pub mod backends;
-pub mod router;
-pub mod memory;
 pub mod circuit_breaker;
-pub mod preflight;
+pub mod config;
 pub mod engine;
+pub mod memory;
+pub mod preflight;
+pub mod router;
 
 pub use config::EngineConfig;
 pub use engine::Engine;

@@ -70,11 +70,12 @@ impl ProviderBreaker {
             CircuitState::Open => {
                 // Check if cool-down period has elapsed
                 if let Some(last) = self.last_failure
-                    && last.elapsed() >= Duration::from_secs(self.config.cool_down_secs) {
-                        self.state = CircuitState::HalfOpen;
-                        tracing::info!("circuit breaker → half_open (cool-down elapsed)");
-                        return true;
-                    }
+                    && last.elapsed() >= Duration::from_secs(self.config.cool_down_secs)
+                {
+                    self.state = CircuitState::HalfOpen;
+                    tracing::info!("circuit breaker → half_open (cool-down elapsed)");
+                    return true;
+                }
                 false
             }
             CircuitState::HalfOpen => {
@@ -99,10 +100,7 @@ impl ProviderBreaker {
             CircuitState::Closed => {
                 if self.failure_count >= self.config.failure_threshold {
                     self.state = CircuitState::Open;
-                    tracing::warn!(
-                        "circuit breaker → open (failures: {})",
-                        self.failure_count
-                    );
+                    tracing::warn!("circuit breaker → open (failures: {})", self.failure_count);
                 }
             }
             CircuitState::HalfOpen => {

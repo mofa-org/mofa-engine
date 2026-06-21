@@ -1,12 +1,12 @@
 //! Generic OpenAI-compatible provider backend.
 //!
-//! Works with any API that follows the OpenAI chat/completions contract:
-//! OpenAI, DeepSeek, DashScope, NVIDIA NIM, Perplexity, Zhipu, etc.
+//! Works with APIs that follow OpenAI-style chat, TTS, and ASR contracts.
 
 use async_trait::async_trait;
 use mofa_kernel::{
-    Capability, CostTier, EngineError, InferenceRequest, InferenceResponse, ModelCard,
-    ModelStatus, Provider, ProviderKind,
+    BackendFeature, BackendHealth, Capability, CostTier, EngineError, InferenceRequest,
+    InferenceResponse, LifecycleResult, ModelAvailability, ModelCard, ModelResidency, Provider,
+    ProviderKind, canonical_model_id, model_id_name,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -16,17 +16,17 @@ use crate::config::ModelDef;
 
 /// A provider for any OpenAI-compatible API.
 pub struct OpenAiCompatProvider {
-    /// Display name
+    /// Display name.
     name: String,
-    /// Base URL (e.g. `https://api.openai.com/v1`)
+    /// Base URL.
     base_url: String,
-    /// Bearer token
+    /// Bearer token.
     api_key: String,
-    /// Configured models
+    /// Configured models.
     models: Vec<ModelDef>,
-    /// Cost tier for all models from this provider
+    /// Cost tier for all models from this provider.
     cost_tier: CostTier,
-    /// HTTP client
+    /// HTTP client.
     client: Client,
 }
 
@@ -55,8 +55,6 @@ impl OpenAiCompatProvider {
         }
     }
 }
-
-// ── OpenAI chat/completions request/response ────────────────────────────
 
 #[derive(Debug, Serialize)]
 struct ChatCompletionRequest {
@@ -88,8 +86,6 @@ struct ChatUsage {
     total_tokens: Option<u32>,
 }
 
-// ── TTS request ─────────────────────────────────────────────────────────
-
 #[derive(Debug, Serialize)]
 struct TtsRequest {
     model: String,
@@ -100,30 +96,44 @@ struct TtsRequest {
 
 #[async_trait]
 impl Provider for OpenAiCompatProvider {
-    async fn discover(&self) -> Vec<ModelCard> {
-        self.models
-            .iter()
-            .map(|m| {
-                let cap = Capability::from_str_loose(&m.capability)
-                    .unwrap_or(Capability::Chat);
-                let id = format!("{}::{}", self.name, m.name);
-
-                ModelCard {
-                    id,
-                    name: m.name.clone(),
-                    provider: self.name.clone(),
-                    capability: cap,
-                    status: ModelStatus::Cold,
-                    cost_tier: self.cost_tier,
-                    context_window: m.context_window.unwrap_or(4096),
-                    memory_estimate_bytes: m.memory_mb.unwrap_or(0) * 1024 * 1024,
-                }
-            })
-            .collect()
+    fn name(&self) -> &str {
+        &self.name
     }
 
-    async fn health(&self) -> bool {
-        // Try /models endpoint first
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::OpenAiCompatible
+    }
+
+    fn features(&self) -> Vec<BackendFeature> {
+        vec![BackendFeature::Discovery]
+    }
+
+    async fn discover(&self) -> Result<Vec<ModelCard>, EngineError> {
+        let cards = self
+            .models
+            .iter()
+            .filter_map(|m| {
+                let cap = Capability::from_str_loose(&m.capability)?;
+                let mut card =
+                    ModelCard::new(self.name.clone(), m.name.clone(), cap, self.cost_tier);
+                card.id = canonical_model_id(&self.name, &m.name);
+                card.availability = ModelAvailability::Configured;
+                card.residency = ModelResidency::Remote;
+                card.context_window = m.context_window.unwrap_or(4096);
+                card.memory_estimate_bytes = m.memory_mb.unwrap_or(0) * 1024 * 1024;
+                card.execution.max_concurrency = 32;
+                card.refresh_status();
+                Some(card)
+            })
+            .collect();
+        Ok(cards)
+    }
+
+    async fn health(&self) -> Result<BackendHealth, EngineError> {
+        if self.api_key.is_empty() {
+            return Ok(BackendHealth::Unavailable);
+        }
+
         let models_url = format!("{}/models", self.base_url);
         let resp = self
             .client
@@ -134,16 +144,40 @@ impl Provider for OpenAiCompatProvider {
 
         if let Ok(r) = resp {
             if r.status().is_success() {
-                return true;
+                return Ok(BackendHealth::Healthy);
             }
-            // DashScope quirk: /models may 404, try a minimal chat request
-            if r.status().as_u16() == 404 {
-                return self.health_via_chat().await;
+            if r.status().as_u16() == 404 && self.health_via_chat().await {
+                return Ok(BackendHealth::Healthy);
             }
+            if r.status().is_server_error() {
+                return Ok(BackendHealth::Degraded);
+            }
+            return Ok(BackendHealth::Unavailable);
         }
 
-        // Network error — try chat fallback
-        self.health_via_chat().await
+        if self.health_via_chat().await {
+            Ok(BackendHealth::Healthy)
+        } else {
+            Ok(BackendHealth::Unavailable)
+        }
+    }
+
+    async fn load(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
+        Ok(LifecycleResult {
+            model_id: canonical_model_id(&self.name, model_id_name(model_id)),
+            residency: ModelResidency::Remote,
+            memory_bytes: Some(0),
+            changed: false,
+        })
+    }
+
+    async fn unload(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
+        Ok(LifecycleResult {
+            model_id: canonical_model_id(&self.name, model_id_name(model_id)),
+            residency: ModelResidency::Remote,
+            memory_bytes: Some(0),
+            changed: false,
+        })
     }
 
     async fn invoke(
@@ -151,41 +185,42 @@ impl Provider for OpenAiCompatProvider {
         model_id: &str,
         request: &InferenceRequest,
     ) -> Result<InferenceResponse, EngineError> {
-        let model_name = model_id.split("::").nth(1).unwrap_or(model_id);
-
+        let model_name = model_id_name(model_id);
         let capability = request.capability.unwrap_or(Capability::Chat);
         let start = std::time::Instant::now();
+
+        let supports = self.models.iter().any(|m| {
+            m.name == model_name && Capability::from_str_loose(&m.capability) == Some(capability)
+        });
+        if !supports {
+            return Err(EngineError::UnsupportedOperation(format!(
+                "provider '{}' model '{}' does not support {capability}",
+                self.name, model_name
+            )));
+        }
 
         match capability {
             Capability::Chat => self.invoke_chat(model_name, request, start).await,
             Capability::Tts => self.invoke_tts(model_name, request, start).await,
             Capability::Asr => self.invoke_asr(model_name, request, start).await,
-            _ => self.invoke_chat(model_name, request, start).await,
+            other => Err(EngineError::UnsupportedOperation(format!(
+                "provider '{}' does not support {other}",
+                self.name
+            ))),
         }
-    }
-
-    async fn warm(&self, _model_id: &str) {
-        // Cloud providers are always warm — no-op
-    }
-
-    async fn evict(&self, _model_id: &str) {
-        // Cloud providers don't need eviction — no-op
-    }
-
-    fn kind(&self) -> ProviderKind {
-        ProviderKind::OpenAiCompatible
     }
 }
 
 impl OpenAiCompatProvider {
-    /// Health check fallback via a minimal chat completion.
     async fn health_via_chat(&self) -> bool {
-        let first_chat_model = self
+        let Some(first_chat_model) = self
             .models
             .iter()
-            .find(|m| m.capability == "chat")
+            .find(|m| Capability::from_str_loose(&m.capability) == Some(Capability::Chat))
             .map(|m| m.name.clone())
-            .unwrap_or_else(|| "gpt-4o-mini".into());
+        else {
+            return false;
+        };
 
         let body = ChatCompletionRequest {
             model: first_chat_model,
@@ -208,7 +243,6 @@ impl OpenAiCompatProvider {
         )
     }
 
-    /// Invoke chat completion.
     async fn invoke_chat(
         &self,
         model_name: &str,
@@ -286,10 +320,11 @@ impl OpenAiCompatProvider {
             duration_ms,
             request_id: request.request_id.clone(),
             tokens_used: tokens,
+            fallback_used: false,
+            routing_reason: None,
         })
     }
 
-    /// Invoke TTS (text-to-speech) — returns a path to the generated audio file.
     async fn invoke_tts(
         &self,
         model_name: &str,
@@ -301,11 +336,13 @@ impl OpenAiCompatProvider {
             .first()
             .map(|m| m.content.clone())
             .or_else(|| {
-                request.params.get("input").and_then(|v| v.as_str()).map(String::from)
+                request
+                    .params
+                    .get("input")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
             })
-            .ok_or_else(|| {
-                EngineError::InvalidRequest("TTS requires text input".into())
-            })?;
+            .ok_or_else(|| EngineError::InvalidRequest("TTS requires text input".into()))?;
 
         let voice = request
             .params
@@ -348,12 +385,9 @@ impl OpenAiCompatProvider {
             detail: format!("TTS read error: {e}"),
         })?;
 
-        // Write to a persistent temp file
-        let path = std::env::temp_dir()
-            .join(format!("mofa_tts_{}.mp3", uuid::Uuid::new_v4()));
-        std::fs::write(&path, &bytes).map_err(|e| {
-            EngineError::Internal(format!("write error: {e}"))
-        })?;
+        let path = std::env::temp_dir().join(format!("mofa_tts_{}.mp3", uuid::Uuid::new_v4()));
+        std::fs::write(&path, &bytes)
+            .map_err(|e| EngineError::Internal(format!("write error: {e}")))?;
         let path = path.to_string_lossy().to_string();
 
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -365,19 +399,21 @@ impl OpenAiCompatProvider {
             duration_ms,
             request_id: request.request_id.clone(),
             tokens_used: None,
+            fallback_used: false,
+            routing_reason: None,
         })
     }
 
-    /// Invoke ASR (speech-to-text) via multipart upload.
     async fn invoke_asr(
         &self,
         model_name: &str,
         request: &InferenceRequest,
         start: std::time::Instant,
     ) -> Result<InferenceResponse, EngineError> {
-        let file_path = request.input_file.as_deref().ok_or_else(|| {
-            EngineError::InvalidRequest("ASR requires input_file".into())
-        })?;
+        let file_path = request
+            .input_file
+            .as_deref()
+            .ok_or_else(|| EngineError::InvalidRequest("ASR requires input_file".into()))?;
 
         let file_bytes = std::fs::read(file_path).map_err(|e| {
             EngineError::InvalidRequest(format!("cannot read file '{file_path}': {e}"))
@@ -424,11 +460,10 @@ impl OpenAiCompatProvider {
             text: Option<String>,
         }
 
-        let asr: AsrResponse =
-            resp.json().await.map_err(|e| EngineError::ProviderError {
-                provider: self.name.clone(),
-                detail: format!("ASR parse error: {e}"),
-            })?;
+        let asr: AsrResponse = resp.json().await.map_err(|e| EngineError::ProviderError {
+            provider: self.name.clone(),
+            detail: format!("ASR parse error: {e}"),
+        })?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
         Ok(InferenceResponse {
@@ -439,6 +474,8 @@ impl OpenAiCompatProvider {
             duration_ms,
             request_id: request.request_id.clone(),
             tokens_used: None,
+            fallback_used: false,
+            routing_reason: None,
         })
     }
 }
@@ -447,8 +484,8 @@ impl OpenAiCompatProvider {
 mod tests {
     use super::*;
 
-    #[test]
-    fn discover_returns_configured_models() {
+    #[tokio::test]
+    async fn discover_returns_configured_models() {
         let provider = OpenAiCompatProvider::new(
             "test",
             "https://api.example.com/v1",
@@ -470,28 +507,19 @@ mod tests {
             CostTier::Medium,
         );
 
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        let cards = rt.block_on(provider.discover());
+        let cards = provider.discover().await.unwrap();
         assert_eq!(cards.len(), 2);
-        assert_eq!(cards[0].id, "test::model-a");
+        assert_eq!(cards[0].id, "test/model-a");
         assert_eq!(cards[0].capability, Capability::Chat);
+        assert_eq!(cards[0].residency, ModelResidency::Remote);
         assert_eq!(cards[1].capability, Capability::Tts);
         assert_eq!(cards[1].memory_estimate_bytes, 512 * 1024 * 1024);
     }
 
     #[test]
     fn kind_is_openai_compat() {
-        let p = OpenAiCompatProvider::new(
-            "x",
-            "https://example.com",
-            "key",
-            vec![],
-            CostTier::Low,
-        );
+        let p = OpenAiCompatProvider::new("x", "https://example.com", "key", vec![], CostTier::Low);
         assert_eq!(p.kind(), ProviderKind::OpenAiCompatible);
+        assert_eq!(p.name(), "x");
     }
 }
