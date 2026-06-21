@@ -327,21 +327,16 @@ pub struct Message {
 }
 
 /// Named-model fallback behavior.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FallbackPolicy {
     /// Capability requests can fail over; named requests are strict.
+    #[default]
     CapabilityOnly,
     /// Never fail over.
     Disabled,
     /// Allow fallback even for named requests.
     AllowNamed,
-}
-
-impl Default for FallbackPolicy {
-    fn default() -> Self {
-        Self::CapabilityOnly
-    }
 }
 
 /// A request to the engine for inference.
