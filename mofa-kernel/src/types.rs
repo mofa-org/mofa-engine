@@ -304,8 +304,12 @@ pub fn canonical_model_id(provider: &str, model: &str) -> String {
 }
 
 /// Extract the provider segment from a canonical model identifier.
+/// Accepts both the canonical `provider/model` and legacy `provider::model` forms.
 pub fn model_id_provider(model_id: &str) -> Option<&str> {
-    model_id.split_once('/').map(|(provider, _)| provider)
+    model_id
+        .split_once('/')
+        .map(|(provider, _)| provider)
+        .or_else(|| model_id.split_once("::").map(|(provider, _)| provider))
 }
 
 /// Extract the model-name segment from a canonical model identifier.

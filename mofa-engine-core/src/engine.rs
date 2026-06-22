@@ -284,7 +284,14 @@ impl Engine {
         let Some(target) = req.model.as_deref() else {
             return Ok(());
         };
-        if target.contains('/') || target.contains("::") {
+        // The `::` form is always an unambiguous qualifier.
+        if target.contains("::") {
+            return Ok(());
+        }
+        // Treat `provider/model` as qualified only when the prefix is a registered provider.
+        if let Some((maybe_provider, _)) = target.split_once('/')
+            && self.providers.iter().any(|p| p.name == maybe_provider)
+        {
             return Ok(());
         }
         let matches = self

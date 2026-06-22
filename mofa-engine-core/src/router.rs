@@ -114,7 +114,14 @@ impl Router {
         let Some(target) = target else {
             return true;
         };
-        model.name == target || model.id == target
+        if model.name == target || model.id == target {
+            return true;
+        }
+        // Also accept the legacy `provider::name` form.
+        if let Some((provider, name)) = target.split_once("::") {
+            return provider == model.provider && name == model.name;
+        }
+        false
     }
 
     fn score(
@@ -140,13 +147,21 @@ impl Router {
     }
 
     fn residency_score(residency: ModelResidency, legacy_status: ModelStatus) -> i64 {
-        match residency {
-            ModelResidency::Loaded | ModelResidency::Remote => 1000,
+        // Remote models are cloud-backed; score them below local-loaded so that
+        // locality and cost can tip routing toward a local provider.
+        // We do NOT apply the legacy-status override for Remote because its
+        // derived status is always Hot, which would otherwise push it back to 900.
+        if residency == ModelResidency::Remote {
+            return 50;
+        }
+        let primary = match residency {
+            ModelResidency::Loaded => 1000,
             ModelResidency::Loading => 500,
             ModelResidency::Unloaded | ModelResidency::Unknown => 100,
             ModelResidency::Unloading => 10,
-        }
-        .max(match legacy_status {
+            ModelResidency::Remote => unreachable!(),
+        };
+        primary.max(match legacy_status {
             ModelStatus::Hot => 900,
             ModelStatus::Warming => 500,
             ModelStatus::Cold => 100,
@@ -301,7 +316,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "will add a fix soon"]
     fn prefers_local_over_cloud() {
         let models = vec![
             make_model(
