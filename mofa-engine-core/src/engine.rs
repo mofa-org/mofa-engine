@@ -340,8 +340,14 @@ impl Engine {
             model_id: model_id.to_string(),
         });
 
-        self.ensure_loaded(model_id, provider_name, &provider)
-            .await?;
+        if let Err(e) = self.ensure_loaded(model_id, provider_name, &provider).await {
+            let _ = self.event_tx.send(EngineEvent::RequestCompleted {
+                request_id: req.request_id.clone(),
+                duration_ms: 0,
+                success: false,
+            });
+            return Err(e);
+        }
         self.begin_execution(model_id);
 
         let start = Instant::now();
@@ -406,10 +412,17 @@ impl Engine {
         }
 
         self.set_model_residency(model_id, ModelResidency::Loading);
-        let load_result = provider.load(model_id).await.inspect_err(|_| {
-            self.circuit_breakers.record_failure(provider_name);
-            self.set_model_residency(model_id, ModelResidency::Unloaded);
-        })?;
+        let load_result = tokio::time::timeout(Duration::from_secs(30), provider.load(model_id))
+            .await
+            .map_err(|_| {
+                self.circuit_breakers.record_failure(provider_name);
+                self.set_model_residency(model_id, ModelResidency::Unloaded);
+                EngineError::Timeout(format!("load timeout for {provider_name}/{model_id}"))
+            })?
+            .inspect_err(|_| {
+                self.circuit_breakers.record_failure(provider_name);
+                self.set_model_residency(model_id, ModelResidency::Unloaded);
+            })?;
 
         self.set_model_residency(model_id, load_result.residency);
         if matches!(load_result.residency, ModelResidency::Loaded)
@@ -419,6 +432,14 @@ impl Engine {
                 .memory_bytes
                 .unwrap_or(card.memory_estimate_bytes);
             if bytes > 0 {
+                if !self.memory.can_fit(bytes) {
+                    let _ = provider.unload(model_id).await;
+                    self.set_model_residency(model_id, ModelResidency::Unloaded);
+                    return Err(EngineError::MemoryPressure {
+                        need: bytes,
+                        available: self.memory.available_bytes(),
+                    });
+                }
                 self.memory.allocate(model_id, bytes);
                 let _ = self.event_tx.send(EngineEvent::MemoryChanged {
                     used_bytes: self.memory.used_bytes(),
