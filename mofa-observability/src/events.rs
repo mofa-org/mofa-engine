@@ -95,6 +95,12 @@ pub struct EventEnvelope {
     pub request_id: Option<String>,
     /// App or user session (if provided by caller).
     pub session_id: Option<String>,
+    /// OpenTelemetry trace ID (128-bit hex string).
+    pub trace_id: Option<String>,
+    /// OpenTelemetry span ID (64-bit hex string).
+    pub span_id: Option<String>,
+    /// OpenTelemetry span end timestamp (Unix ms).
+    pub span_end_timestamp: Option<u64>,
     /// The event payload.
     pub event: EngineEvent,
 }
@@ -111,6 +117,9 @@ impl EventEnvelope {
             timestamp_ms,
             request_id: None,
             session_id: None,
+            trace_id: None,
+            span_id: None,
+            span_end_timestamp: None,
             event,
         }
     }
@@ -124,6 +133,19 @@ impl EventEnvelope {
     /// Attach a session ID.
     pub fn with_session_id(mut self, id: impl Into<String>) -> Self {
         self.session_id = Some(id.into());
+        self
+    }
+
+    /// Attach OpenTelemetry tracing context.
+    pub fn with_trace(mut self, trace_id: impl Into<String>, span_id: impl Into<String>) -> Self {
+        self.trace_id = Some(trace_id.into());
+        self.span_id = Some(span_id.into());
+        self
+    }
+
+    /// Set span end timestamp.
+    pub fn with_span_end(mut self, timestamp_ms: u64) -> Self {
+        self.span_end_timestamp = Some(timestamp_ms);
         self
     }
 }
