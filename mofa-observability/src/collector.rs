@@ -7,8 +7,8 @@
 //! - Single writer (collector task), multiple readers (Prometheus scrapes).
 //! - No blocking I/O. No disk. Just in-memory atomics behind a RwLock.
 //! - Bounded event channel with drop-oldest backpressure.
-//!
-//! Reference: observability_plan.md §4
+//! - Memory gauge reconciles against absolute values from eviction events
+//!   to prevent cumulative drift under event loss.
 
 use crate::events::*;
 use std::collections::HashMap;
@@ -174,11 +174,9 @@ impl GaugeFamily {
 
 /// All metric state. One instance per engine.
 /// The collector writes, the Prometheus renderer reads.
-///
-/// Reference: observability_plan.md §4.2–4.4
 #[derive(Debug, Clone)]
 pub struct MetricsState {
-    // ── Counters (§4.2) ──────────────────────────────────────────────────
+    // ── Counters ─────────────────────────────────────────────────────────
     pub requests_total: CounterFamily,
     pub model_loads_total: CounterFamily,
     pub model_unloads_total: CounterFamily,
@@ -191,12 +189,12 @@ pub struct MetricsState {
     pub tokens_output_total: CounterFamily,
     pub events_dropped_total: CounterFamily,
 
-    // ── Histograms (§4.3) ────────────────────────────────────────────────
+    // ── Histograms ───────────────────────────────────────────────────────
     pub request_duration_seconds: HistogramFamily,
     pub model_load_seconds: HistogramFamily,
     pub ttft_seconds: HistogramFamily,
 
-    // ── Gauges (§4.4) ────────────────────────────────────────────────────
+    // ── Gauges ───────────────────────────────────────────────────────────
     pub memory_used_bytes: GaugeFamily,
     pub memory_budget_bytes: GaugeFamily,
     pub models_loaded: GaugeFamily,
@@ -395,8 +393,14 @@ impl MetricsState {
                 self.models_loaded.dec(Labels::new());
             }
 
-            EngineEvent::EvictionTriggered(_) => {
+            EngineEvent::EvictionTriggered(e) => {
                 self.evictions_total.inc(Labels::new());
+
+                // Reconcile memory gauge against the absolute post-eviction value.
+                // This corrects any cumulative drift caused by dropped ModelUnloaded
+                // events under channel backpressure. The running sum is replaced with
+                // the authoritative value from the eviction subsystem.
+                self.memory_used_bytes.set(Labels::new(), e.memory_after_bytes as f64);
             }
 
             EngineEvent::PreflightSignal(e) => {
@@ -1010,7 +1014,7 @@ mod tests {
             }
         }
 
-        // 7 capabilities × 2 statuses = 14 series. Within §4.5 bounds.
+        // 7 capabilities × 2 statuses = 14 series. Within defined cardinality bounds.
         assert_eq!(state.requests_total.values.len(), 14);
     }
 }

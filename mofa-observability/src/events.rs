@@ -7,8 +7,6 @@
 //! - Zero side effects: events are data, not actions.
 //! - Privacy: no prompt text, file contents, API keys, or user-identifying info. Ever.
 //! - Bounded enums: capability, reason, source, status use enums, not free-form strings.
-//!
-//! Reference: observability_plan.md §3
 
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -86,7 +84,6 @@ impl std::fmt::Display for SignalSource {
 // ─── Event Envelope ──────────────────────────────────────────────────────────
 
 /// Every event carries this standard envelope.
-/// Reference: observability_plan.md §3.1
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEnvelope {
     /// Unix timestamp in milliseconds.
@@ -153,7 +150,6 @@ impl EventEnvelope {
 // ─── Engine Event (discriminated union) ──────────────────────────────────────
 
 /// All possible engine events. The collector pattern-matches on this.
-/// Reference: observability_plan.md §3.2
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EngineEvent {
@@ -350,7 +346,7 @@ pub struct FailoverTriggered {
 //   - source → SignalSource enum (2 variants)
 //   - status → bool (success/failure)
 //
-// Reference: observability_plan.md §3.3
+// Reference: see privacy contract in module-level doc comment above.
 
 #[cfg(test)]
 mod tests {
@@ -570,6 +566,108 @@ mod tests {
             let envelope = EventEnvelope::now(event);
             let json = serde_json::to_string(&envelope);
             assert!(json.is_ok(), "Failed to serialize: {:?}", envelope);
+        }
+    }
+
+    /// Privacy contract: serialized events must never contain prompt text,
+    /// file contents, API keys, credentials, or user-identifying information.
+    /// This test enforces the contract by serializing every event variant and
+    /// asserting that no forbidden field names appear in the JSON output.
+    #[test]
+    fn test_privacy_contract_no_forbidden_fields() {
+        let forbidden_fields = [
+            "prompt", "text", "generated_text", "response_text",
+            "file_path", "file_content", "file_contents",
+            "api_key", "api_secret", "token", "auth_token", "access_token",
+            "password", "credential", "credentials",
+            "user_id", "username", "email", "ip_address",
+        ];
+
+        let events = vec![
+            EngineEvent::RequestReceived(RequestReceived {
+                capability: Capability::Chat,
+                model: Some("test-model".into()),
+                hint: Some("test-hint".into()),
+            }),
+            EngineEvent::RoutingDecision(RoutingDecision {
+                capability: Capability::Chat,
+                candidates_count: 3,
+                selected_model: "qwen2.5:7b".into(),
+                selected_backend: "ollama".into(),
+                is_fallback: false,
+                reason: "local_first".into(),
+            }),
+            EngineEvent::RequestCompleted(RequestCompleted {
+                model_id: "qwen2.5:7b".into(),
+                backend: "ollama".into(),
+                capability: Capability::Chat,
+                duration_ms: 1500,
+                ttft_ms: Some(115),
+                tokens_in: Some(50),
+                tokens_out: Some(277),
+                model_was_hot: Some(true),
+                success: true,
+                error_code: None,
+            }),
+            EngineEvent::ModelLoaded(ModelLoaded {
+                model_id: "qwen2.5:7b".into(),
+                backend: "ollama".into(),
+                capability: Capability::Chat,
+                load_duration_ms: 1532,
+                memory_bytes: 4_700_000_000,
+            }),
+            EngineEvent::ModelUnloaded(ModelUnloaded {
+                model_id: "gemma3:4b".into(),
+                reason: UnloadReason::IdleTimeout,
+                memory_freed_bytes: 3_300_000_000,
+            }),
+            EngineEvent::EvictionTriggered(EvictionTriggered {
+                evicted_model: "gemma3:4b".into(),
+                memory_before_bytes: 8_000_000_000,
+                memory_after_bytes: 4_700_000_000,
+                budget_bytes: 11_000_000_000,
+            }),
+            EngineEvent::PreflightSignal(PreflightSignal {
+                predicted_capability: Capability::Tts,
+                confidence: 0.95,
+                source: SignalSource::History,
+            }),
+            EngineEvent::PreflightHit(PreflightHit {
+                predicted_capability: Capability::Tts,
+                cold_start_avoided_ms: 2404,
+            }),
+            EngineEvent::PreflightMiss(PreflightMiss {
+                predicted_capability: Capability::Tts,
+                actual_capability: Capability::Chat,
+            }),
+            EngineEvent::ProviderDiscovered(ProviderDiscovered {
+                provider_name: "ollama".into(),
+                models_found: 3,
+                capabilities: vec![Capability::Chat, Capability::Vlm],
+            }),
+            EngineEvent::FailoverTriggered(FailoverTriggered {
+                failed_model: "qwen2.5:7b".into(),
+                failed_backend: "ollama".into(),
+                fallback_model: "gemma3:4b".into(),
+                fallback_backend: "ollama".into(),
+            }),
+        ];
+
+        for event in events {
+            let envelope = EventEnvelope::now(event);
+            let json = serde_json::to_string(&envelope).expect("serialize failed");
+            let json_lower = json.to_lowercase();
+
+            for field in &forbidden_fields {
+                // Check for the field as a JSON key: "field_name":
+                let pattern = format!("\"{}\":", field);
+                assert!(
+                    !json_lower.contains(&pattern),
+                    "Privacy violation: forbidden field '{}' found in serialized event: {}",
+                    field,
+                    json
+                );
+            }
         }
     }
 }
