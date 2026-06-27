@@ -1,0 +1,81 @@
+{
+  "title": "MoFA Preflight & Routing",
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "timezone": "browser",
+  "panels": [
+    {
+      "type": "gauge",
+      "title": "Prediction Accuracy",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 6 },
+      "targets": [
+        {
+          "expr": "sum(rate(mofa_preflight_hits_total[1h])) / (sum(rate(mofa_preflight_hits_total[1h])) + sum(rate(mofa_preflight_misses_total[1h]))) * 100",
+          "legendFormat": "Accuracy %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 70 },
+              { "color": "green", "value": 90 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Predictions by Source",
+      "gridPos": { "x": 6, "y": 0, "w": 10, "h": 6 },
+      "targets": [
+        {
+          "expr": "sum(rate(mofa_preflight_predictions_total[5m])) by (source)",
+          "legendFormat": "{{source}}"
+        }
+      ]
+    },
+    {
+      "type": "piechart",
+      "title": "Hit vs Miss",
+      "gridPos": { "x": 16, "y": 0, "w": 8, "h": 6 },
+      "targets": [
+        {
+          "expr": "sum(mofa_preflight_hits_total)",
+          "legendFormat": "Hits"
+        },
+        {
+          "expr": "sum(mofa_preflight_misses_total)",
+          "legendFormat": "Misses"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Failover Rate",
+      "gridPos": { "x": 0, "y": 6, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "expr": "sum(rate(mofa_failovers_total[5m]))",
+          "legendFormat": "Failovers / sec"
+        }
+      ]
+    },
+    {
+      "type": "piechart",
+      "title": "Requests by Backend",
+      "gridPos": { "x": 12, "y": 6, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "expr": "sum(rate(mofa_requests_total[5m])) by (backend)",
+          "legendFormat": "{{backend}}"
+        }
+      ]
+    }
+  ]
+}
