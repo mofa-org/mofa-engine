@@ -159,8 +159,16 @@ impl Engine {
                         })
                         .map(|entry| entry.key().clone())
                         .collect::<Vec<_>>();
+                    let had_stale = !stale.is_empty();
                     for id in stale {
                         self.models.remove(&id);
+                        self.memory.deallocate(&id);
+                    }
+                    if had_stale {
+                        let _ = self.event_tx.send(EngineEvent::MemoryChanged {
+                            used_bytes: self.memory.used_bytes(),
+                            total_bytes: self.memory.budget_bytes(),
+                        });
                     }
 
                     let count = cards.len();
@@ -433,6 +441,9 @@ impl Engine {
                 .unwrap_or(card.memory_estimate_bytes);
             if bytes > 0 {
                 if !self.memory.can_fit(bytes) {
+                    self.evict_to_fit(model_id, bytes).await;
+                }
+                if !self.memory.can_fit(bytes) {
                     let _ = provider.unload(model_id).await;
                     self.set_model_residency(model_id, ModelResidency::Unloaded);
                     return Err(EngineError::MemoryPressure {
@@ -448,6 +459,48 @@ impl Engine {
             }
         }
         Ok(())
+    }
+
+    /// Evict least-recently-used idle models until `bytes` can fit, or until
+    /// nothing more can be freed. Models with in-flight requests and the
+    /// incoming model itself are never evicted.
+    async fn evict_to_fit(&self, incoming_id: &str, bytes: u64) {
+        let mut last_victim: Option<String> = None;
+        while !self.memory.can_fit(bytes) {
+            let protected = self.protected_model_ids(incoming_id);
+            let Some(victim) = self.memory.lru_candidate(&protected) else {
+                break;
+            };
+            // Defensive: if the previous eviction freed nothing, stop instead of spinning.
+            if last_victim.as_deref() == Some(victim.as_str()) {
+                break;
+            }
+
+            let provider = self
+                .models
+                .get(&victim)
+                .and_then(|card| self.find_provider(&card.provider));
+            if let Some(provider) = provider {
+                let _ = provider.unload(&victim).await;
+            }
+            // Frees the allocation and emits ModelResidencyChanged/MemoryChanged.
+            self.set_model_residency(&victim, ModelResidency::Unloaded);
+            tracing::info!("evicted '{victim}' to admit {bytes} bytes");
+            last_victim = Some(victim);
+        }
+    }
+
+    /// Model IDs that must never be evicted: the incoming model plus any model
+    /// with in-flight requests.
+    fn protected_model_ids(&self, incoming_id: &str) -> Vec<String> {
+        let mut protected = vec![incoming_id.to_string()];
+        protected.extend(
+            self.models
+                .iter()
+                .filter(|card| card.execution.active_requests > 0)
+                .map(|card| card.key().clone()),
+        );
+        protected
     }
 
     fn find_provider(&self, name: &str) -> Option<Arc<dyn Provider>> {
@@ -480,16 +533,32 @@ impl Engine {
 
     fn begin_execution(&self, model_id: &str) {
         if let Some(mut card) = self.models.get_mut(model_id) {
+            let old_status = card.status;
             card.execution.active_requests = card.execution.active_requests.saturating_add(1);
             card.refresh_status();
+            if old_status != card.status {
+                let _ = self.event_tx.send(EngineEvent::ModelStatusChanged {
+                    model_id: model_id.to_string(),
+                    old: old_status,
+                    new: card.status,
+                });
+            }
         }
         self.memory.touch(model_id);
     }
 
     fn end_execution(&self, model_id: &str) {
         if let Some(mut card) = self.models.get_mut(model_id) {
+            let old_status = card.status;
             card.execution.active_requests = card.execution.active_requests.saturating_sub(1);
             card.refresh_status();
+            if old_status != card.status {
+                let _ = self.event_tx.send(EngineEvent::ModelStatusChanged {
+                    model_id: model_id.to_string(),
+                    old: old_status,
+                    new: card.status,
+                });
+            }
         }
         self.memory.touch(model_id);
     }
@@ -501,16 +570,29 @@ impl Engine {
             if old_residency != new_residency {
                 card.residency = new_residency;
                 card.refresh_status();
+                let new_status = card.status;
+                // Release the shard guard before touching the memory manager / event bus.
+                drop(card);
                 let _ = self.event_tx.send(EngineEvent::ModelResidencyChanged {
                     model_id: model_id.to_string(),
                     old: old_residency,
                     new: new_residency,
                 });
-                if old_status != card.status {
+                if old_status != new_status {
                     let _ = self.event_tx.send(EngineEvent::ModelStatusChanged {
                         model_id: model_id.to_string(),
                         old: old_status,
-                        new: card.status,
+                        new: new_status,
+                    });
+                }
+                // A model that stops being resident releases its memory budget.
+                if old_residency == ModelResidency::Loaded
+                    && new_residency != ModelResidency::Loaded
+                {
+                    self.memory.deallocate(model_id);
+                    let _ = self.event_tx.send(EngineEvent::MemoryChanged {
+                        used_bytes: self.memory.used_bytes(),
+                        total_bytes: self.memory.budget_bytes(),
                     });
                 }
             }
@@ -819,5 +901,61 @@ mod tests {
 
         let err = engine.invoke(chat_request(Some("same"))).await.unwrap_err();
         assert!(matches!(err, EngineError::InvalidRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn memory_pressure_evicts_lru_idle_model() {
+        let provider = Arc::new(MockProvider::new("mock"));
+        let engine = engine_with_provider(provider); // 100 MB budget
+
+        // Two resident, idle models at 40 MB each (80 MB used).
+        for name in ["old", "new"] {
+            let mut card = ModelCard::new("mock", name, Capability::Chat, CostTier::Low);
+            card.residency = ModelResidency::Loaded;
+            card.refresh_status();
+            let id = card.id.clone();
+            engine.models.insert(id.clone(), card);
+            engine.memory.allocate(&id, 40 * 1024 * 1024);
+        }
+        // Touch "new" so "old" is the least-recently-used victim.
+        engine.memory.touch("mock/new");
+        assert_eq!(engine.memory.used_bytes(), 80 * 1024 * 1024);
+
+        // Admitting another 40 MB needs 20 MB freed → evict exactly the LRU model.
+        engine.evict_to_fit("mock/incoming", 40 * 1024 * 1024).await;
+
+        assert!(engine.memory.can_fit(40 * 1024 * 1024));
+        assert_eq!(
+            engine.models.get("mock/old").unwrap().residency,
+            ModelResidency::Unloaded
+        );
+        assert_eq!(
+            engine.models.get("mock/new").unwrap().residency,
+            ModelResidency::Loaded
+        );
+    }
+
+    #[tokio::test]
+    async fn busy_models_are_never_evicted() {
+        let provider = Arc::new(MockProvider::new("mock"));
+        let engine = engine_with_provider(provider); // 100 MB budget
+
+        // A single resident model with an in-flight request, filling the budget.
+        let mut card = ModelCard::new("mock", "busy", Capability::Chat, CostTier::Low);
+        card.residency = ModelResidency::Loaded;
+        card.execution.active_requests = 1;
+        card.refresh_status();
+        let id = card.id.clone();
+        engine.models.insert(id.clone(), card);
+        engine.memory.allocate(&id, 90 * 1024 * 1024);
+
+        // It cannot be evicted, so the budget stays full.
+        engine.evict_to_fit("mock/incoming", 40 * 1024 * 1024).await;
+
+        assert!(!engine.memory.can_fit(40 * 1024 * 1024));
+        assert_eq!(
+            engine.models.get("mock/busy").unwrap().residency,
+            ModelResidency::Loaded
+        );
     }
 }

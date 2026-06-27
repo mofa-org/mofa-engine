@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 /// Capabilities that a model can provide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Capability {
     /// Text chat / completion.
@@ -30,8 +30,8 @@ impl std::fmt::Display for Capability {
             Self::Chat => "chat",
             Self::Tts => "tts",
             Self::Asr => "asr",
-            Self::ImageGen => "imagegen",
-            Self::VideoGen => "videogen",
+            Self::ImageGen => "image_gen",
+            Self::VideoGen => "video_gen",
             Self::Vlm => "vlm",
             Self::Embedding => "embedding",
         };
@@ -144,7 +144,7 @@ impl ExecutionState {
 
 /// Runtime status retained for compatibility with the prototype API and dashboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ModelStatus {
     /// Not loaded, needs warming.
@@ -184,7 +184,7 @@ impl ModelStatus {
 
 /// Cost tier for routing preference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum CostTier {
     /// Free (local models).

@@ -81,7 +81,7 @@ components:
       properties:
         capability:
           type: string
-          enum: [chat, tts, asr, imagegen, videogen, vlm, embedding]
+          enum: [chat, tts, asr, image_gen, video_gen, vlm, embedding]
         model:
           type: string
           description: Canonical `provider/model` ID or unique short model name.
@@ -118,9 +118,9 @@ components:
       type: object
       properties:
         text:
-          type: string
+          type: [string, "null"]
         file:
-          type: string
+          type: [string, "null"]
         model_used:
           type: string
         provider:
@@ -130,11 +130,11 @@ components:
         request_id:
           type: string
         tokens_used:
-          type: integer
+          type: [integer, "null"]
         fallback_used:
           type: boolean
         routing_reason:
-          type: string
+          type: [string, "null"]
     ErrorInfo:
       type: object
       required: [code, message, retryable]
