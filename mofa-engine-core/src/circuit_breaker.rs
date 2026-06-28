@@ -50,6 +50,9 @@ struct ProviderBreaker {
     state: CircuitState,
     failure_count: u32,
     last_failure: Option<Instant>,
+    /// Whether a half-open probe has been admitted and is awaiting its outcome.
+    /// Guarantees that exactly one probe is in flight while half-open.
+    probe_in_flight: bool,
     config: CircuitBreakerConfig,
 }
 
@@ -59,27 +62,37 @@ impl ProviderBreaker {
             state: CircuitState::Closed,
             failure_count: 0,
             last_failure: None,
+            probe_in_flight: false,
             config,
         }
     }
 
     /// Check if a request is allowed through.
+    ///
+    /// In `HalfOpen`, admits exactly one probe at a time: the first caller after
+    /// the cool-down wins, and concurrent callers fail fast until that probe's
+    /// outcome is recorded (which moves the circuit to `Closed` or `Open`).
     fn allow_request(&mut self) -> bool {
         match self.state {
             CircuitState::Closed => true,
             CircuitState::Open => {
-                // Check if cool-down period has elapsed
+                // Check if cool-down period has elapsed.
                 if let Some(last) = self.last_failure
                     && last.elapsed() >= Duration::from_secs(self.config.cool_down_secs)
                 {
                     self.state = CircuitState::HalfOpen;
-                    tracing::info!("circuit breaker → half_open (cool-down elapsed)");
+                    self.probe_in_flight = true;
+                    tracing::info!("circuit breaker → half_open (admitting one probe)");
                     return true;
                 }
                 false
             }
             CircuitState::HalfOpen => {
-                // Allow exactly one probe request
+                // A probe is already being tested; reject everyone else.
+                if self.probe_in_flight {
+                    return false;
+                }
+                self.probe_in_flight = true;
                 true
             }
         }
@@ -88,6 +101,7 @@ impl ProviderBreaker {
     /// Record a successful request.
     fn record_success(&mut self) {
         self.failure_count = 0;
+        self.probe_in_flight = false;
         self.state = CircuitState::Closed;
     }
 
@@ -104,12 +118,13 @@ impl ProviderBreaker {
                 }
             }
             CircuitState::HalfOpen => {
-                // Probe failed — back to Open
+                // Probe failed — back to Open and release the probe slot.
                 self.state = CircuitState::Open;
+                self.probe_in_flight = false;
                 tracing::warn!("circuit breaker → open (probe failed)");
             }
             CircuitState::Open => {
-                // Already open
+                // Already open.
             }
         }
     }
@@ -226,6 +241,53 @@ mod tests {
         reg.allow_request("p"); // → HalfOpen
         reg.record_success("p");
         assert_eq!(reg.state("p"), CircuitState::Closed);
+    }
+
+    #[test]
+    fn half_open_admits_exactly_one_probe() {
+        let cfg = CircuitBreakerConfig {
+            failure_threshold: 1,
+            cool_down_secs: 0,
+        };
+        let reg = CircuitBreakerRegistry::new(cfg);
+
+        reg.record_failure("p");
+        assert_eq!(reg.state("p"), CircuitState::Open);
+        std::thread::sleep(Duration::from_millis(10));
+
+        // First caller after cool-down wins the single probe slot.
+        assert!(reg.allow_request("p"));
+        assert_eq!(reg.state("p"), CircuitState::HalfOpen);
+
+        // Concurrent callers while the probe is in flight are rejected.
+        assert!(!reg.allow_request("p"));
+        assert!(!reg.allow_request("p"));
+
+        // Once the probe succeeds, the circuit closes and admits traffic again.
+        reg.record_success("p");
+        assert_eq!(reg.state("p"), CircuitState::Closed);
+        assert!(reg.allow_request("p"));
+    }
+
+    #[test]
+    fn half_open_probe_slot_is_released_on_reopen() {
+        let cfg = CircuitBreakerConfig {
+            failure_threshold: 1,
+            cool_down_secs: 0,
+        };
+        let reg = CircuitBreakerRegistry::new(cfg);
+
+        reg.record_failure("p");
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(reg.allow_request("p")); // → HalfOpen, probe in flight
+        assert!(!reg.allow_request("p")); // rejected while in flight
+        reg.record_failure("p"); // probe fails → Open, slot released
+        assert_eq!(reg.state("p"), CircuitState::Open);
+
+        // After another cool-down, a fresh single probe is admitted.
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(reg.allow_request("p"));
+        assert!(!reg.allow_request("p"));
     }
 
     #[test]

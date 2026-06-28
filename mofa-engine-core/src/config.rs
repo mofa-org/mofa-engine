@@ -19,6 +19,12 @@ pub struct EngineConfig {
     /// Memory management settings
     #[serde(default)]
     pub memory: MemoryConfig,
+    /// Operation timeout settings
+    #[serde(default)]
+    pub timeouts: TimeoutConfig,
+    /// Preflight (predictive warming) settings
+    #[serde(default)]
+    pub preflight: PreflightConfig,
     /// Provider definitions
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
@@ -73,6 +79,142 @@ impl Default for MemoryConfig {
 
 fn default_idle_timeout() -> u64 {
     120
+}
+
+/// Timeouts for the distinct phases of a request, all in seconds.
+///
+/// These bound the time spent waiting in the admission queue, loading a model,
+/// running inference, and the request as a whole, plus the per-provider
+/// discovery and health probes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeoutConfig {
+    /// Overall budget for a single `invoke`, spanning queueing, loading, and
+    /// inference across every candidate attempted.
+    #[serde(default = "default_request_timeout")]
+    pub request_secs: u64,
+    /// Maximum time a request may wait for a concurrency permit before failing.
+    #[serde(default = "default_queue_timeout")]
+    pub queue_secs: u64,
+    /// Maximum time to load/warm a single model.
+    #[serde(default = "default_load_timeout")]
+    pub load_secs: u64,
+    /// Maximum time for a single inference call to a provider.
+    #[serde(default = "default_inference_timeout")]
+    pub inference_secs: u64,
+    /// Maximum time for a single provider discovery probe.
+    #[serde(default = "default_discovery_timeout")]
+    pub discovery_secs: u64,
+    /// Maximum time for a single provider health probe.
+    #[serde(default = "default_health_timeout")]
+    pub health_secs: u64,
+}
+
+impl Default for TimeoutConfig {
+    fn default() -> Self {
+        Self {
+            request_secs: default_request_timeout(),
+            queue_secs: default_queue_timeout(),
+            load_secs: default_load_timeout(),
+            inference_secs: default_inference_timeout(),
+            discovery_secs: default_discovery_timeout(),
+            health_secs: default_health_timeout(),
+        }
+    }
+}
+
+impl TimeoutConfig {
+    /// Overall request budget as a `Duration`.
+    pub fn request(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.request_secs)
+    }
+    /// Queue-wait budget as a `Duration`.
+    pub fn queue(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.queue_secs)
+    }
+    /// Load budget as a `Duration`.
+    pub fn load(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.load_secs)
+    }
+    /// Inference budget as a `Duration`.
+    pub fn inference(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.inference_secs)
+    }
+    /// Discovery probe budget as a `Duration`.
+    pub fn discovery(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.discovery_secs)
+    }
+    /// Health probe budget as a `Duration`.
+    pub fn health(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.health_secs)
+    }
+}
+
+fn default_request_timeout() -> u64 {
+    240
+}
+fn default_queue_timeout() -> u64 {
+    30
+}
+fn default_load_timeout() -> u64 {
+    60
+}
+fn default_inference_timeout() -> u64 {
+    180
+}
+fn default_discovery_timeout() -> u64 {
+    8
+}
+fn default_health_timeout() -> u64 {
+    5
+}
+
+/// Preflight (predictive warming) configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreflightConfig {
+    /// Master switch for all predictive warming.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Whether the engine learns capability transition history.
+    #[serde(default = "default_true")]
+    pub history_learning: bool,
+    /// Whether the engine speculatively warms models from hints/history/subscriptions.
+    #[serde(default = "default_true")]
+    pub speculative_warming: bool,
+    /// Minimum confidence (0.0–1.0) a history prediction needs before it warms a model.
+    #[serde(default = "default_confidence_threshold")]
+    pub confidence_threshold: f64,
+    /// Minimum number of observed transitions before history is trusted.
+    #[serde(default = "default_min_samples")]
+    pub min_samples: u64,
+    /// Default lifetime of a capability subscription, in seconds.
+    #[serde(default = "default_subscription_ttl")]
+    pub subscription_ttl_secs: u64,
+}
+
+impl Default for PreflightConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            history_learning: default_true(),
+            speculative_warming: default_true(),
+            confidence_threshold: default_confidence_threshold(),
+            min_samples: default_min_samples(),
+            subscription_ttl_secs: default_subscription_ttl(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_confidence_threshold() -> f64 {
+    0.6
+}
+fn default_min_samples() -> u64 {
+    3
+}
+fn default_subscription_ttl() -> u64 {
+    3600
 }
 
 /// Configuration for a single provider.
@@ -192,6 +334,12 @@ impl EngineConfig {
 
     /// Validate configuration before constructing the engine.
     pub fn validate(&self) -> Result<(), EngineError> {
+        if !(0.0..=1.0).contains(&self.preflight.confidence_threshold) {
+            return Err(EngineError::Config(format!(
+                "preflight.confidence_threshold must be within 0.0..=1.0, got {}",
+                self.preflight.confidence_threshold
+            )));
+        }
         for provider in &self.providers {
             if !provider.enabled {
                 continue;
@@ -398,6 +546,8 @@ impl EngineConfig {
         EngineConfig {
             listen: ListenConfig::default(),
             memory: MemoryConfig::default(),
+            timeouts: TimeoutConfig::default(),
+            preflight: PreflightConfig::default(),
             providers,
         }
     }
@@ -472,6 +622,8 @@ mod tests {
         let cfg = EngineConfig {
             listen: ListenConfig::default(),
             memory: MemoryConfig::default(),
+            timeouts: TimeoutConfig::default(),
+            preflight: PreflightConfig::default(),
             providers: vec![ProviderConfig {
                 name: "test".into(),
                 kind: "ollama".into(),
@@ -490,10 +642,43 @@ mod tests {
     }
 
     #[test]
+    fn example_config_is_valid() {
+        // The shipped example must always parse and validate so docs cannot drift.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../config.example.toml");
+        let content = std::fs::read_to_string(path).expect("config.example.toml should exist");
+        let cfg: EngineConfig = toml::from_str(&content).expect("example config should parse");
+        cfg.validate().expect("example config should validate");
+        assert!(cfg.providers.iter().any(|p| p.name == "ollama"));
+        assert_eq!(cfg.timeouts.queue_secs, 30);
+        assert!(cfg.preflight.enabled);
+    }
+
+    #[test]
+    fn timeout_and_preflight_defaults_apply_from_partial_toml() {
+        // A config that omits [timeouts] and [preflight] must still parse with defaults.
+        let cfg: EngineConfig = toml::from_str("[memory]\nbudget_mb = 1024\n").unwrap();
+        assert_eq!(cfg.timeouts.queue_secs, 30);
+        assert_eq!(cfg.timeouts.inference_secs, 180);
+        assert!(cfg.preflight.enabled);
+        assert!(cfg.preflight.speculative_warming);
+        assert_eq!(cfg.preflight.min_samples, 3);
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_confidence() {
+        let mut cfg = EngineConfig::from_env();
+        cfg.preflight.confidence_threshold = 1.5;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
     fn validate_rejects_unknown_provider_kind() {
         let cfg = EngineConfig {
             listen: ListenConfig::default(),
             memory: MemoryConfig::default(),
+            timeouts: TimeoutConfig::default(),
+            preflight: PreflightConfig::default(),
             providers: vec![ProviderConfig {
                 name: "bad".into(),
                 kind: "bad_kind".into(),

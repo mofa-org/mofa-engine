@@ -1,0 +1,60 @@
+# MoFA Engine example configuration.
+#
+# Copy to `config.toml` (current directory) or
+# `~/.config/mofa-engine/config.toml`. Any section may be omitted; defaults
+# shown below are applied. API keys support `${ENV_VAR}` substitution.
+
+[listen]
+host = "127.0.0.1"   # loopback by default; remote access is opt-in
+port = 8420
+
+[memory]
+# Omit budget_mb to auto-detect (70% of system RAM).
+budget_mb = 12288
+idle_timeout_secs = 120   # unload a resident model after this many idle seconds
+
+[timeouts]
+request_secs = 240     # overall budget for one /v1/invoke, across all candidates
+queue_secs = 30        # max wait for a concurrency permit
+load_secs = 60         # max time to load/warm one model
+inference_secs = 180   # max time for one provider inference call
+discovery_secs = 8     # per-provider discovery probe
+health_secs = 5        # per-provider health probe
+
+[preflight]
+enabled = true              # master switch for predictive warming
+history_learning = true     # learn capability transition history
+speculative_warming = true  # warm models from hints/history/subscriptions
+confidence_threshold = 0.6  # min confidence (0.0-1.0) before a history prediction warms
+min_samples = 3             # min observed transitions before history is trusted
+subscription_ttl_secs = 3600
+
+# Local Ollama (auto-discovered models). Priority is lower = preferred.
+[[providers]]
+name = "ollama"
+kind = "ollama"
+base_url = "http://127.0.0.1:11434"
+priority = 1
+cost_tier = "free"
+
+# Cloud OpenAI-compatible backend. Models are declared explicitly.
+[[providers]]
+name = "openai"
+kind = "openai_compatible"
+base_url = "https://api.openai.com/v1"
+api_key = "${OPENAI_API_KEY}"
+priority = 10
+cost_tier = "high"
+
+  [[providers.models]]
+  name = "gpt-4o"
+  capability = "chat"
+  context_window = 128000
+
+  [[providers.models]]
+  name = "tts-1"
+  capability = "tts"
+
+  [[providers.models]]
+  name = "whisper-1"
+  capability = "asr"

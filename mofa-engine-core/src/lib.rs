@@ -11,6 +11,7 @@ pub mod engine;
 pub mod memory;
 pub mod preflight;
 pub mod router;
+pub mod subscription;
 
 pub use config::EngineConfig;
 pub use engine::Engine;

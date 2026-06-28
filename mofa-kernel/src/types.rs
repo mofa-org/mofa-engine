@@ -476,6 +476,27 @@ pub enum EngineEvent {
         /// Total budget bytes.
         total_bytes: u64,
     },
+    /// A model was evicted from local memory.
+    ModelEvicted {
+        /// Model identifier.
+        model_id: String,
+        /// Why it was evicted, e.g. `memory_pressure` or `idle_timeout`.
+        reason: String,
+    },
+    /// Predictive (Preflight) warming started for a model.
+    PreflightWarmStarted {
+        /// Model identifier being warmed.
+        model_id: String,
+        /// What triggered the warm: `hint`, `subscription`, or `history`.
+        source: String,
+    },
+    /// Predictive (Preflight) warming finished.
+    PreflightWarmCompleted {
+        /// Model identifier that was warmed.
+        model_id: String,
+        /// Whether the warm succeeded.
+        success: bool,
+    },
     /// Provider health changed.
     ProviderHealthChanged {
         /// Provider name.
