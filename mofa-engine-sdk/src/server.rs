@@ -15,10 +15,10 @@ use axum::{
     routing::{get, post},
 };
 use mofa_engine_core::Engine;
-use mofa_kernel::InferenceRequest;
+use mofa_kernel::{ErrorInfo, InferenceRequest};
 use serde::Serialize;
-use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
@@ -51,6 +51,7 @@ pub async fn start_server(
         .route("/v1/invoke", post(invoke_handler))
         .route("/v1/status", get(status_handler))
         .route("/v1/events", get(events_handler))
+        .route("/v1/discovery/refresh", post(refresh_handler))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -80,9 +81,7 @@ async fn health_handler(State(state): State<AppState>) -> Json<HealthResponse> {
     })
 }
 
-async fn capabilities_handler(
-    State(state): State<AppState>,
-) -> Json<Vec<mofa_kernel::ModelCard>> {
+async fn capabilities_handler(State(state): State<AppState>) -> Json<Vec<mofa_kernel::ModelCard>> {
     let caps = state.engine.capabilities().await;
     Json(caps)
 }
@@ -90,7 +89,7 @@ async fn capabilities_handler(
 async fn invoke_handler(
     State(state): State<AppState>,
     Json(req): Json<InferenceRequest>,
-) -> Result<Json<mofa_kernel::InferenceResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<mofa_kernel::InferenceResponse>, (StatusCode, Json<ErrorInfo>)> {
     match state.engine.invoke(req).await {
         Ok(resp) => Ok(Json(resp)),
         Err(e) => {
@@ -99,29 +98,23 @@ async fn invoke_handler(
                 mofa_kernel::EngineError::InvalidRequest(_) => StatusCode::BAD_REQUEST,
                 mofa_kernel::EngineError::CircuitOpen(_) => StatusCode::SERVICE_UNAVAILABLE,
                 mofa_kernel::EngineError::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
+                mofa_kernel::EngineError::UnsupportedOperation(_) => StatusCode::BAD_REQUEST,
+                mofa_kernel::EngineError::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
-            Err((
-                status,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            ))
+            Err((status, Json(e.info())))
         }
     }
 }
 
-/// Error response body.
-#[derive(Serialize)]
-struct ErrorResponse {
-    error: String,
-}
-
-async fn status_handler(
-    State(state): State<AppState>,
-) -> Json<mofa_kernel::EngineStatus> {
+async fn status_handler(State(state): State<AppState>) -> Json<mofa_kernel::EngineStatus> {
     let status = state.engine.status().await;
     Json(status)
+}
+
+async fn refresh_handler(State(state): State<AppState>) -> Json<mofa_kernel::EngineStatus> {
+    state.engine.refresh_resources().await;
+    Json(state.engine.status().await)
 }
 
 async fn events_handler(
@@ -160,14 +153,5 @@ mod tests {
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"status\":\"ok\""));
-    }
-
-    #[test]
-    fn error_response_serializes() {
-        let resp = ErrorResponse {
-            error: "something broke".into(),
-        };
-        let json = serde_json::to_string(&resp).unwrap();
-        assert!(json.contains("something broke"));
     }
 }

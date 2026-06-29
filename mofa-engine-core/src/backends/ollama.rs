@@ -4,20 +4,22 @@
 
 use async_trait::async_trait;
 use mofa_kernel::{
-    Capability, CostTier, EngineError, InferenceRequest, InferenceResponse, ModelCard,
-    ModelStatus, Provider, ProviderKind,
+    BackendFeature, BackendHealth, Capability, CostTier, EngineError, InferenceRequest,
+    InferenceResponse, LifecycleResult, ModelAvailability, ModelCard, ModelResidency, Provider,
+    ProviderKind, canonical_model_id, model_id_name,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::time::Duration;
 
 /// Provider for a local Ollama instance.
 pub struct OllamaProvider {
-    /// Display name
+    /// Display name.
     name: String,
-    /// Base URL (e.g. `http://127.0.0.1:11434`)
+    /// Base URL.
     base_url: String,
-    /// HTTP client
+    /// HTTP client.
     client: Client,
 }
 
@@ -37,10 +39,31 @@ impl OllamaProvider {
             client,
         }
     }
+
+    async fn loaded_models(&self) -> HashSet<String> {
+        let url = format!("{}/api/ps", self.base_url);
+        let Ok(resp) = self.client.get(&url).send().await else {
+            return HashSet::new();
+        };
+        let Ok(ps) = resp.json::<OllamaPsResponse>().await else {
+            return HashSet::new();
+        };
+        ps.models
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|m| m.name.or(m.model))
+            .collect()
+    }
 }
 
 #[derive(Debug, Deserialize)]
 struct OllamaTagsResponse {
+    models: Option<Vec<OllamaModel>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct OllamaPsResponse {
     models: Option<Vec<OllamaModel>>,
 }
 
@@ -87,58 +110,177 @@ struct OllamaChatResponse {
 
 #[async_trait]
 impl Provider for OllamaProvider {
-    async fn discover(&self) -> Vec<ModelCard> {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::Ollama
+    }
+
+    fn features(&self) -> Vec<BackendFeature> {
+        vec![
+            BackendFeature::Discovery,
+            BackendFeature::Load,
+            BackendFeature::Unload,
+            BackendFeature::ResidencyInspection,
+            BackendFeature::MemoryReporting,
+        ]
+    }
+
+    async fn discover(&self) -> Result<Vec<ModelCard>, EngineError> {
         let url = format!("{}/api/tags", self.base_url);
-        let resp = match self.client.get(&url).send().await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("ollama discover failed: {e}");
-                return vec![];
-            }
-        };
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("discover failed: {e}"),
+            })?;
 
-        let tags: OllamaTagsResponse = match resp.json().await {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!("ollama tags parse failed: {e}");
-                return vec![];
-            }
-        };
+        if !resp.status().is_success() {
+            let status = resp.status();
+            return Err(EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("discover HTTP {status}"),
+            });
+        }
 
-        let models = tags.models.unwrap_or_default();
-        models
+        let tags: OllamaTagsResponse =
+            resp.json().await.map_err(|e| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("tags parse failed: {e}"),
+            })?;
+        let loaded = self.loaded_models().await;
+
+        let cards = tags
+            .models
+            .unwrap_or_default()
             .into_iter()
             .filter_map(|m| {
                 let model_name = m.name.or(m.model)?;
-
                 let lower = model_name.to_lowercase();
-                if lower.contains("embed") {
+                if lower.contains("embed") || lower.contains(":cloud") || lower.contains("-cloud") {
                     return None;
                 }
 
-                // Skip Ollama cloud-proxy models — they require a paid subscription
-                if lower.contains(":cloud") || lower.contains("-cloud") {
-                    return None;
-                }
-
-                let id = format!("{}::{}", self.name, model_name);
-                Some(ModelCard {
-                    id,
-                    name: model_name,
-                    provider: self.name.clone(),
-                    capability: Capability::Chat,
-                    status: ModelStatus::Cold,
-                    cost_tier: CostTier::Free,
-                    context_window: 4096,
-                    memory_estimate_bytes: m.size.unwrap_or(0),
-                })
+                let mut card = ModelCard::new(
+                    self.name.clone(),
+                    model_name.clone(),
+                    Capability::Chat,
+                    CostTier::Free,
+                );
+                card.id = canonical_model_id(&self.name, &model_name);
+                card.availability = ModelAvailability::Discovered;
+                card.residency = if loaded.contains(&model_name) {
+                    ModelResidency::Loaded
+                } else {
+                    ModelResidency::Unloaded
+                };
+                card.context_window = 4096;
+                card.memory_estimate_bytes = m.size.unwrap_or(0);
+                card.refresh_status();
+                Some(card)
             })
-            .collect()
+            .collect();
+
+        Ok(cards)
     }
 
-    async fn health(&self) -> bool {
+    async fn health(&self) -> Result<BackendHealth, EngineError> {
         let url = format!("{}/", self.base_url);
-        matches!(self.client.get(&url).send().await, Ok(r) if r.status().is_success())
+        match self.client.get(&url).send().await {
+            Ok(r) if r.status().is_success() => Ok(BackendHealth::Healthy),
+            Ok(r) if r.status().is_server_error() => Ok(BackendHealth::Degraded),
+            Ok(_) => Ok(BackendHealth::Unavailable),
+            Err(e) => Err(EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: e.to_string(),
+            }),
+        }
+    }
+
+    async fn load(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
+        let model_name = model_id_name(model_id);
+        let body = OllamaChatRequest {
+            model: model_name.to_string(),
+            messages: vec![OllamaMessage {
+                role: "user".into(),
+                content: " ".into(),
+            }],
+            stream: false,
+            keep_alive: Some("5m".into()),
+        };
+        let url = format!("{}/api/chat", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("load failed: {e}"),
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("load HTTP {status}: {text}"),
+            });
+        }
+
+        Ok(LifecycleResult {
+            model_id: canonical_model_id(&self.name, model_name),
+            residency: ModelResidency::Loaded,
+            memory_bytes: None,
+            changed: true,
+        })
+    }
+
+    async fn unload(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
+        let model_name = model_id_name(model_id);
+        let body = OllamaChatRequest {
+            model: model_name.to_string(),
+            messages: vec![OllamaMessage {
+                role: "user".into(),
+                content: " ".into(),
+            }],
+            stream: false,
+            keep_alive: Some("0".into()),
+        };
+
+        let url = format!("{}/api/chat", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("unload failed: {e}"),
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("unload HTTP {status}: {text}"),
+            });
+        }
+
+        Ok(LifecycleResult {
+            model_id: canonical_model_id(&self.name, model_name),
+            residency: ModelResidency::Unloaded,
+            memory_bytes: Some(0),
+            changed: true,
+        })
     }
 
     async fn invoke(
@@ -146,11 +288,7 @@ impl Provider for OllamaProvider {
         model_id: &str,
         request: &InferenceRequest,
     ) -> Result<InferenceResponse, EngineError> {
-        // Extract model name from "provider::model" format
-        let model_name = model_id
-            .split("::")
-            .nth(1)
-            .unwrap_or(model_id);
+        let model_name = model_id_name(model_id);
 
         let messages: Vec<OllamaMessage> = request
             .messages
@@ -162,9 +300,7 @@ impl Provider for OllamaProvider {
             .collect();
 
         if messages.is_empty() {
-            return Err(EngineError::InvalidRequest(
-                "no messages provided".into(),
-            ));
+            return Err(EngineError::InvalidRequest("no messages provided".into()));
         }
 
         let body = OllamaChatRequest {
@@ -204,10 +340,7 @@ impl Provider for OllamaProvider {
             })?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
-        let text = chat_resp
-            .message
-            .map(|m| m.content)
-            .unwrap_or_default();
+        let text = chat_resp.message.map(|m| m.content).unwrap_or_default();
 
         Ok(InferenceResponse {
             text: Some(text),
@@ -217,33 +350,9 @@ impl Provider for OllamaProvider {
             duration_ms,
             request_id: request.request_id.clone(),
             tokens_used: chat_resp.eval_count,
+            fallback_used: false,
+            routing_reason: None,
         })
-    }
-
-    async fn warm(&self, _model_id: &str) {
-        // Ollama loads models on-demand during inference.
-        // Explicit warming via /api/chat would block for the full
-        // model load time, so we skip it and let invoke() handle loading.
-    }
-
-    async fn evict(&self, model_id: &str) {
-        let model_name = model_id.split("::").nth(1).unwrap_or(model_id);
-        let body = OllamaChatRequest {
-            model: model_name.to_string(),
-            messages: vec![OllamaMessage {
-                role: "user".into(),
-                content: "hi".into(),
-            }],
-            stream: false,
-            keep_alive: Some("0".into()),
-        };
-
-        let url = format!("{}/api/chat", self.base_url);
-        let _ = self.client.post(&url).json(&body).send().await;
-    }
-
-    fn kind(&self) -> ProviderKind {
-        ProviderKind::Ollama
     }
 }
 
@@ -252,16 +361,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn provider_name() {
+    fn provider_metadata() {
         let p = OllamaProvider::new("test-ollama", "http://localhost:11434");
         assert_eq!(p.kind(), ProviderKind::Ollama);
-        assert_eq!(p.name, "test-ollama");
+        assert_eq!(p.name(), "test-ollama");
+        assert!(p.features().contains(&BackendFeature::Discovery));
     }
 
     #[test]
-    fn model_id_parse() {
-        let id = "ollama::llama3:8b";
-        let name = id.split("::").nth(1).unwrap_or(id);
-        assert_eq!(name, "llama3:8b");
+    fn model_id_parse_accepts_old_and_new_format() {
+        assert_eq!(model_id_name("ollama/llama3:8b"), "llama3:8b");
+        assert_eq!(model_id_name("ollama::llama3:8b"), "llama3:8b");
     }
 }

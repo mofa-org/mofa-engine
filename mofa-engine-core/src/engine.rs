@@ -1,94 +1,113 @@
 //! The main engine orchestrator.
 //!
-//! `Engine` ties together providers, routing, memory management,
-//! circuit breaking, and preflight prediction into a single
-//! `Arc<Engine>` that is shared across the HTTP server.
+//! `Engine` ties together providers, routing, discovery, health, lifecycle,
+//! circuit breaking, memory accounting, and observability.
 
+use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use mofa_kernel::{
-    Capability, CostTier, EngineError, EngineEvent, EngineStatus, InferenceRequest,
-    InferenceResponse, ModelCard, ModelStatus, Provider, ProviderHealth, ProviderKind,
+    BackendHealth, BackendStatus, CostTier, EngineError, EngineEvent, EngineStatus, FallbackPolicy,
+    InferenceRequest, InferenceResponse, ModelCard, ModelResidency, Provider, ProviderHealth,
+    ProviderKind,
 };
 use tokio::sync::broadcast;
 
 use crate::backends::{OllamaProvider, OpenAiCompatProvider};
-use crate::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerRegistry};
+use crate::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerRegistry, CircuitState};
 use crate::config::EngineConfig;
 use crate::memory::MemoryManager;
 use crate::preflight::PreflightPredictor;
-use crate::router::Router;
+use crate::router::{Router, RoutingProvider};
+
+#[derive(Clone)]
+struct RegisteredProvider {
+    name: String,
+    kind: ProviderKind,
+    priority: u8,
+    provider: Arc<dyn Provider>,
+}
 
 /// The main MoFA Engine orchestrator.
 pub struct Engine {
-    /// Named providers
-    providers: Vec<(String, Arc<dyn Provider>)>,
-    /// Cached model cards (refreshed on discover)
+    /// Named providers.
+    providers: Vec<RegisteredProvider>,
+    /// Cached model cards.
     models: DashMap<String, ModelCard>,
-    /// Provider kind lookup
-    provider_kinds: Vec<(String, ProviderKind)>,
-    /// Memory manager
+    /// Latest backend health by provider.
+    backend_health: DashMap<String, BackendHealth>,
+    /// Memory manager.
     memory: MemoryManager,
-    /// Circuit breaker registry
+    /// Circuit breaker registry.
     circuit_breakers: CircuitBreakerRegistry,
-    /// Preflight predictor
+    /// Preflight predictor.
     preflight: PreflightPredictor,
-    /// Event broadcast channel
+    /// Event broadcast channel.
     event_tx: broadcast::Sender<EngineEvent>,
-    /// Engine start time
+    /// Engine start time.
     started_at: Instant,
 }
 
 impl Engine {
     /// Create and initialize a new engine from configuration.
+    ///
+    /// Panics if configuration is invalid. Application entrypoints should prefer
+    /// `try_new`; tests keep using this helper for concise setup.
     pub async fn new(config: EngineConfig) -> Arc<Self> {
+        Self::try_new(config)
+            .await
+            .expect("engine configuration should be valid")
+    }
+
+    /// Create and initialize a new engine from validated configuration.
+    pub async fn try_new(config: EngineConfig) -> Result<Arc<Self>, EngineError> {
+        config.validate()?;
+
         let (event_tx, _) = broadcast::channel(256);
         let memory = MemoryManager::new(config.memory.budget_mb);
-        let circuit_breakers =
-            CircuitBreakerRegistry::new(CircuitBreakerConfig::default());
+        let circuit_breakers = CircuitBreakerRegistry::new(CircuitBreakerConfig::default());
         let preflight = PreflightPredictor::new();
 
-        let mut providers: Vec<(String, Arc<dyn Provider>)> = Vec::new();
-        let mut provider_kinds: Vec<(String, ProviderKind)> = Vec::new();
-
+        let mut providers = Vec::new();
         for pc in &config.providers {
             if !pc.enabled {
                 tracing::info!("provider '{}' is disabled, skipping", pc.name);
                 continue;
             }
 
-            match pc.kind.as_str() {
-                "ollama" => {
-                    let p = OllamaProvider::new(&pc.name, &pc.base_url);
-                    provider_kinds.push((pc.name.clone(), ProviderKind::Ollama));
-                    providers.push((pc.name.clone(), Arc::new(p)));
+            let kind = pc.provider_kind()?;
+            let cost_tier = CostTier::from_str_loose(&pc.cost_tier);
+            let provider: Arc<dyn Provider> = match kind {
+                ProviderKind::Ollama => Arc::new(OllamaProvider::new(&pc.name, &pc.base_url)),
+                ProviderKind::OpenAiCompatible => Arc::new(OpenAiCompatProvider::new(
+                    &pc.name,
+                    &pc.base_url,
+                    pc.api_key.clone().unwrap_or_default(),
+                    pc.models.clone(),
+                    cost_tier,
+                )),
+                _ => {
+                    return Err(EngineError::Config(format!(
+                        "provider '{}' uses unsupported provider kind",
+                        pc.name
+                    )));
                 }
-                "openai_compatible" => {
-                    let key = pc.api_key.clone().unwrap_or_default();
-                    let cost = CostTier::from_str_loose(&pc.cost_tier);
-                    let p = OpenAiCompatProvider::new(
-                        &pc.name,
-                        &pc.base_url,
-                        key,
-                        pc.models.clone(),
-                        cost,
-                    );
-                    provider_kinds
-                        .push((pc.name.clone(), ProviderKind::OpenAiCompatible));
-                    providers.push((pc.name.clone(), Arc::new(p)));
-                }
-                other => {
-                    tracing::warn!("unknown provider kind '{other}', skipping");
-                }
-            }
+            };
+
+            providers.push(RegisteredProvider {
+                name: pc.name.clone(),
+                kind,
+                priority: pc.priority,
+                provider,
+            });
         }
 
         let engine = Arc::new(Self {
             providers,
             models: DashMap::new(),
-            provider_kinds,
+            backend_health: DashMap::new(),
             memory,
             circuit_breakers,
             preflight,
@@ -96,98 +115,225 @@ impl Engine {
             started_at: Instant::now(),
         });
 
-        // Initial discovery
-        engine.discover_all().await;
-
-        engine
+        engine.refresh_resources().await;
+        Ok(engine)
     }
 
-    /// Discover models from all providers.
+    /// Refresh provider health and model discovery.
+    pub async fn refresh_resources(&self) {
+        self.refresh_health().await;
+        self.discover_all().await;
+    }
+
+    /// Discover models from all providers with bounded per-provider timeouts.
     async fn discover_all(&self) {
-        for (name, provider) in &self.providers {
-            tracing::info!("discovering models from provider '{name}'");
-            let cards = provider.discover().await;
-            let count = cards.len();
-            for card in cards {
-                self.models.insert(card.id.clone(), card);
-            }
-            tracing::info!("discovered {count} models from '{name}'");
-        }
-    }
-
-    /// Return all known model cards.
-    pub async fn capabilities(&self) -> Vec<ModelCard> {
-        self.models.iter().map(|e| e.value().clone()).collect()
-    }
-
-    /// Run inference: route → circuit-check → warm → invoke → fallback.
-    pub async fn invoke(
-        &self,
-        req: InferenceRequest,
-    ) -> Result<InferenceResponse, EngineError> {
-        let all_models: Vec<ModelCard> =
-            self.models.iter().map(|e| e.value().clone()).collect();
-
-        // Primary routing
-        let selected = Router::select(&all_models, &req, &self.provider_kinds)
-            .ok_or_else(|| {
-                let cap_str = req
-                    .capability
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "any".into());
-                EngineError::NoCapableModel(cap_str)
-            })?;
-
-        let model_id = selected.id.clone();
-        let provider_name = selected.provider.clone();
-
-        // Try primary, then fallback
-        match self.try_invoke(&model_id, &provider_name, &req).await {
-            Ok(resp) => Ok(resp),
-            Err(primary_err) => {
-                tracing::warn!(
-                    "primary model '{model_id}' failed: {primary_err}, trying fallback"
-                );
-
-                // Find a fallback from a different provider
-                let fallback = all_models
-                    .iter()
-                    .filter(|m| m.provider != provider_name && m.id != model_id)
-                    .filter(|m| {
-                        req.capability
-                            .is_none_or(|cap| m.capability == cap)
-                    })
-                    .filter(|m| {
-                        m.status != ModelStatus::Failed && m.status != ModelStatus::Busy
-                    })
-                    .max_by_key(|m| match m.status {
-                        ModelStatus::Hot => 3,
-                        ModelStatus::Warming => 2,
-                        ModelStatus::Cold => 1,
-                        _ => 0,
-                    });
-
-                if let Some(fb) = fallback {
-                    let fb_id = fb.id.clone();
-                    let fb_provider = fb.provider.clone();
-                    self.try_invoke(&fb_id, &fb_provider, &req)
+        let handles = self
+            .providers
+            .iter()
+            .map(|registered| {
+                let name = registered.name.clone();
+                let provider = Arc::clone(&registered.provider);
+                tokio::spawn(async move {
+                    let result = tokio::time::timeout(Duration::from_secs(8), provider.discover())
                         .await
-                        .map_err(|_| primary_err)
-                } else {
-                    Err(primary_err)
+                        .map_err(|_| EngineError::Timeout(format!("discovery timeout for {name}")))
+                        .and_then(|inner| inner);
+                    (name, result)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            let Ok((name, result)) = handle.await else {
+                continue;
+            };
+
+            match result {
+                Ok(cards) => {
+                    let discovered_ids = cards.iter().map(|c| c.id.clone()).collect::<HashSet<_>>();
+                    let stale = self
+                        .models
+                        .iter()
+                        .filter(|entry| {
+                            entry.provider == name && !discovered_ids.contains(entry.key())
+                        })
+                        .map(|entry| entry.key().clone())
+                        .collect::<Vec<_>>();
+                    let had_stale = !stale.is_empty();
+                    for id in stale {
+                        self.models.remove(&id);
+                        self.memory.deallocate(&id);
+                    }
+                    if had_stale {
+                        let _ = self.event_tx.send(EngineEvent::MemoryChanged {
+                            used_bytes: self.memory.used_bytes(),
+                            total_bytes: self.memory.budget_bytes(),
+                        });
+                    }
+
+                    let count = cards.len();
+                    for mut card in cards {
+                        card.refresh_status();
+                        self.models.insert(card.id.clone(), card);
+                    }
+                    let _ = self.event_tx.send(EngineEvent::DiscoveryCompleted {
+                        provider: name.clone(),
+                        models: count,
+                        success: true,
+                    });
+                    tracing::info!("discovered {count} models from '{name}'");
+                }
+                Err(e) => {
+                    tracing::warn!("discovery from '{name}' failed: {e}");
+                    let _ = self.event_tx.send(EngineEvent::DiscoveryCompleted {
+                        provider: name,
+                        models: 0,
+                        success: false,
+                    });
                 }
             }
         }
     }
 
-    /// Attempt to invoke a specific model, handling circuit breaker and warming.
+    async fn refresh_health(&self) {
+        let handles = self
+            .providers
+            .iter()
+            .map(|registered| {
+                let name = registered.name.clone();
+                let provider = Arc::clone(&registered.provider);
+                tokio::spawn(async move {
+                    let health = tokio::time::timeout(Duration::from_secs(5), provider.health())
+                        .await
+                        .map_err(|_| EngineError::Timeout(format!("health timeout for {name}")))
+                        .and_then(|inner| inner)
+                        .unwrap_or(BackendHealth::Unavailable);
+                    (name, health)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            let Ok((name, health)) = handle.await else {
+                continue;
+            };
+            let previous = self.backend_health.insert(name.clone(), health);
+            if previous != Some(health) {
+                let _ = self.event_tx.send(EngineEvent::ProviderHealthChanged {
+                    provider: name,
+                    health,
+                });
+            }
+        }
+    }
+
+    /// Return all known model cards.
+    pub async fn capabilities(&self) -> Vec<ModelCard> {
+        let mut models = self
+            .models
+            .iter()
+            .map(|e| e.value().clone())
+            .collect::<Vec<_>>();
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+        models
+    }
+
+    /// Run inference: route → circuit-check → load → invoke → optional fallback.
+    pub async fn invoke(&self, req: InferenceRequest) -> Result<InferenceResponse, EngineError> {
+        self.reject_ambiguous_short_name(&req)?;
+
+        let all_models = self.capabilities().await;
+        let providers = self.routing_providers();
+        let selected = Router::route(&all_models, &req, &providers).ok_or_else(|| {
+            let cap_str = req
+                .capability
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "any".into());
+            EngineError::NoCapableModel(cap_str)
+        })?;
+
+        let model_id = selected.model.id.clone();
+        let provider_name = selected.model.provider.clone();
+        let routing_reason = selected.reason.clone();
+
+        match self
+            .try_invoke(&model_id, &provider_name, &req, Some(routing_reason))
+            .await
+        {
+            Ok(resp) => Ok(resp),
+            Err(primary_err) if self.can_fallback(&req) => {
+                tracing::warn!("primary model '{model_id}' failed: {primary_err}, trying fallback");
+                let mut fallback_req = req.clone();
+                fallback_req.model = None;
+                let fallback_models = self
+                    .capabilities()
+                    .await
+                    .into_iter()
+                    .filter(|m| m.id != model_id && m.provider != provider_name)
+                    .collect::<Vec<_>>();
+                let Some(fallback) = Router::route(&fallback_models, &fallback_req, &providers)
+                else {
+                    return Err(primary_err);
+                };
+                let fb_id = fallback.model.id.clone();
+                let fb_provider = fallback.model.provider.clone();
+                let mut resp = self
+                    .try_invoke(&fb_id, &fb_provider, &fallback_req, Some(fallback.reason))
+                    .await
+                    .map_err(|_| primary_err)?;
+                resp.fallback_used = true;
+                Ok(resp)
+            }
+            Err(primary_err) => Err(primary_err),
+        }
+    }
+
+    fn reject_ambiguous_short_name(&self, req: &InferenceRequest) -> Result<(), EngineError> {
+        let Some(target) = req.model.as_deref() else {
+            return Ok(());
+        };
+        // The `::` form is always an unambiguous qualifier.
+        if target.contains("::") {
+            return Ok(());
+        }
+        // Treat `provider/model` as qualified only when the prefix is a registered provider.
+        if let Some((maybe_provider, _)) = target.split_once('/')
+            && self.providers.iter().any(|p| p.name == maybe_provider)
+        {
+            return Ok(());
+        }
+        let matches = self
+            .models
+            .iter()
+            .filter(|entry| entry.name == target)
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            return Err(EngineError::InvalidRequest(format!(
+                "model name '{target}' is ambiguous; use one of: {}",
+                matches.join(", ")
+            )));
+        }
+        Ok(())
+    }
+
+    fn can_fallback(&self, req: &InferenceRequest) -> bool {
+        match (req.model.is_some(), req.fallback_policy) {
+            (_, FallbackPolicy::Disabled) => false,
+            (true, FallbackPolicy::CapabilityOnly) => false,
+            (true, FallbackPolicy::AllowNamed) => true,
+            (false, _) => true,
+        }
+    }
+
+    /// Attempt to invoke a specific model, handling circuit breaker and loading.
     async fn try_invoke(
         &self,
         model_id: &str,
         provider_name: &str,
         req: &InferenceRequest,
+        routing_reason: Option<String>,
     ) -> Result<InferenceResponse, EngineError> {
-        // Circuit breaker check
         if !self.circuit_breakers.allow_request(provider_name) {
             return Err(EngineError::CircuitOpen(provider_name.into()));
         }
@@ -196,164 +342,311 @@ impl Engine {
             EngineError::Internal(format!("provider '{provider_name}' not found"))
         })?;
 
-        // Emit RequestStarted
         let _ = self.event_tx.send(EngineEvent::RequestStarted {
             request_id: req.request_id.clone(),
             capability: req.capability,
             model_id: model_id.to_string(),
         });
 
-        // Ensure model is warm
-        let status = self
-            .models
-            .get(model_id)
-            .map(|m| m.status)
-            .unwrap_or(ModelStatus::Cold);
-
-        if status == ModelStatus::Cold {
-            self.set_model_status(model_id, ModelStatus::Warming);
-            provider.warm(model_id).await;
-            self.set_model_status(model_id, ModelStatus::Hot);
+        if let Err(e) = self.ensure_loaded(model_id, provider_name, &provider).await {
+            let _ = self.event_tx.send(EngineEvent::RequestCompleted {
+                request_id: req.request_id.clone(),
+                duration_ms: 0,
+                success: false,
+            });
+            return Err(e);
         }
-
-        // Mark busy
-        self.set_model_status(model_id, ModelStatus::Busy);
-        self.memory.touch(model_id);
+        self.begin_execution(model_id);
 
         let start = Instant::now();
-        let invoke_timeout = std::time::Duration::from_secs(180);
-        let result = match tokio::time::timeout(invoke_timeout, provider.invoke(model_id, req)).await {
-            Ok(r) => r,
+        let invoke_timeout = Duration::from_secs(180);
+        let result = tokio::time::timeout(invoke_timeout, provider.invoke(model_id, req)).await;
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        self.end_execution(model_id);
+
+        match result {
+            Ok(Ok(mut resp)) => {
+                resp.routing_reason = routing_reason;
+                self.circuit_breakers.record_success(provider_name);
+                if let Some(cap) = req.capability {
+                    self.preflight.record(cap);
+                }
+                let _ = self.event_tx.send(EngineEvent::RequestCompleted {
+                    request_id: req.request_id.clone(),
+                    duration_ms,
+                    success: true,
+                });
+                Ok(resp)
+            }
+            Ok(Err(e)) => {
+                self.circuit_breakers.record_failure(provider_name);
+                let _ = self.event_tx.send(EngineEvent::RequestCompleted {
+                    request_id: req.request_id.clone(),
+                    duration_ms,
+                    success: false,
+                });
+                Err(e)
+            }
             Err(_) => {
-                self.set_model_status(model_id, ModelStatus::Hot);
                 self.circuit_breakers.record_failure(provider_name);
                 let _ = self.event_tx.send(EngineEvent::RequestCompleted {
                     request_id: req.request_id.clone(),
                     duration_ms: invoke_timeout.as_millis() as u64,
                     success: false,
                 });
-                return Err(EngineError::Timeout(format!(
+                Err(EngineError::Timeout(format!(
                     "provider '{}' did not respond within {}s",
-                    provider_name, invoke_timeout.as_secs()
-                )));
+                    provider_name,
+                    invoke_timeout.as_secs()
+                )))
             }
-        };
-        let duration_ms = start.elapsed().as_millis() as u64;
+        }
+    }
 
-        match &result {
-            Ok(_) => {
-                self.circuit_breakers.record_success(provider_name);
-                self.set_model_status(model_id, ModelStatus::Hot);
+    async fn ensure_loaded(
+        &self,
+        model_id: &str,
+        provider_name: &str,
+        provider: &Arc<dyn Provider>,
+    ) -> Result<(), EngineError> {
+        let residency = self
+            .models
+            .get(model_id)
+            .map(|m| m.residency)
+            .unwrap_or(ModelResidency::Unknown);
+        if matches!(residency, ModelResidency::Loaded | ModelResidency::Remote) {
+            return Ok(());
+        }
 
-                // Record preflight transition
-                if let Some(cap) = req.capability {
-                    self.preflight.record(cap);
-                }
-
-                let _ = self.event_tx.send(EngineEvent::RequestCompleted {
-                    request_id: req.request_id.clone(),
-                    duration_ms,
-                    success: true,
-                });
-
-                // Process hint — warm predicted model in background
-                if let Some(ref hint) = req.hint_next
-                    && let Some(next_cap) = Capability::from_str_loose(hint) {
-                        self.warm_for_capability(next_cap).await;
-                    }
-            }
-            Err(_) => {
+        self.set_model_residency(model_id, ModelResidency::Loading);
+        let load_result = tokio::time::timeout(Duration::from_secs(30), provider.load(model_id))
+            .await
+            .map_err(|_| {
                 self.circuit_breakers.record_failure(provider_name);
-                self.set_model_status(model_id, ModelStatus::Hot); // back to Hot, not Failed (transient)
+                self.set_model_residency(model_id, ModelResidency::Unloaded);
+                EngineError::Timeout(format!("load timeout for {provider_name}/{model_id}"))
+            })?
+            .inspect_err(|_| {
+                self.circuit_breakers.record_failure(provider_name);
+                self.set_model_residency(model_id, ModelResidency::Unloaded);
+            })?;
 
-                let _ = self.event_tx.send(EngineEvent::RequestCompleted {
-                    request_id: req.request_id.clone(),
-                    duration_ms,
-                    success: false,
+        self.set_model_residency(model_id, load_result.residency);
+        if matches!(load_result.residency, ModelResidency::Loaded)
+            && let Some(card) = self.models.get(model_id)
+        {
+            let bytes = load_result
+                .memory_bytes
+                .unwrap_or(card.memory_estimate_bytes);
+            if bytes > 0 {
+                if !self.memory.can_fit(bytes) {
+                    self.evict_to_fit(model_id, bytes).await;
+                }
+                if !self.memory.can_fit(bytes) {
+                    let _ = provider.unload(model_id).await;
+                    self.set_model_residency(model_id, ModelResidency::Unloaded);
+                    return Err(EngineError::MemoryPressure {
+                        need: bytes,
+                        available: self.memory.available_bytes(),
+                    });
+                }
+                self.memory.allocate(model_id, bytes);
+                let _ = self.event_tx.send(EngineEvent::MemoryChanged {
+                    used_bytes: self.memory.used_bytes(),
+                    total_bytes: self.memory.budget_bytes(),
                 });
             }
         }
-
-        result
+        Ok(())
     }
 
-    /// Find a provider by name.
+    /// Evict least-recently-used idle models until `bytes` can fit, or until
+    /// nothing more can be freed. Models with in-flight requests and the
+    /// incoming model itself are never evicted.
+    async fn evict_to_fit(&self, incoming_id: &str, bytes: u64) {
+        let mut last_victim: Option<String> = None;
+        while !self.memory.can_fit(bytes) {
+            let protected = self.protected_model_ids(incoming_id);
+            let Some(victim) = self.memory.lru_candidate(&protected) else {
+                break;
+            };
+            // Defensive: if the previous eviction freed nothing, stop instead of spinning.
+            if last_victim.as_deref() == Some(victim.as_str()) {
+                break;
+            }
+
+            let provider = self
+                .models
+                .get(&victim)
+                .and_then(|card| self.find_provider(&card.provider));
+            if let Some(provider) = provider {
+                let _ = provider.unload(&victim).await;
+            }
+            // Frees the allocation and emits ModelResidencyChanged/MemoryChanged.
+            self.set_model_residency(&victim, ModelResidency::Unloaded);
+            tracing::info!("evicted '{victim}' to admit {bytes} bytes");
+            last_victim = Some(victim);
+        }
+    }
+
+    /// Model IDs that must never be evicted: the incoming model plus any model
+    /// with in-flight requests.
+    fn protected_model_ids(&self, incoming_id: &str) -> Vec<String> {
+        let mut protected = vec![incoming_id.to_string()];
+        protected.extend(
+            self.models
+                .iter()
+                .filter(|card| card.execution.active_requests > 0)
+                .map(|card| card.key().clone()),
+        );
+        protected
+    }
+
     fn find_provider(&self, name: &str) -> Option<Arc<dyn Provider>> {
         self.providers
             .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, p)| Arc::clone(p))
+            .find(|registered| registered.name == name)
+            .map(|registered| Arc::clone(&registered.provider))
     }
 
-    /// Update a model's status and emit an event.
-    fn set_model_status(&self, model_id: &str, new_status: ModelStatus) {
+    fn routing_providers(&self) -> Vec<RoutingProvider> {
+        self.providers
+            .iter()
+            .map(|registered| {
+                let health = self
+                    .backend_health
+                    .get(&registered.name)
+                    .map(|h| *h)
+                    .unwrap_or(BackendHealth::Unknown);
+                RoutingProvider {
+                    name: registered.name.clone(),
+                    kind: registered.kind,
+                    priority: registered.priority,
+                    health,
+                    circuit_open: self.circuit_breakers.state(&registered.name)
+                        == CircuitState::Open,
+                }
+            })
+            .collect()
+    }
+
+    fn begin_execution(&self, model_id: &str) {
         if let Some(mut card) = self.models.get_mut(model_id) {
-            let old = card.status;
-            if old != new_status {
-                card.status = new_status;
+            let old_status = card.status;
+            card.execution.active_requests = card.execution.active_requests.saturating_add(1);
+            card.refresh_status();
+            if old_status != card.status {
                 let _ = self.event_tx.send(EngineEvent::ModelStatusChanged {
                     model_id: model_id.to_string(),
-                    old,
-                    new: new_status,
+                    old: old_status,
+                    new: card.status,
                 });
             }
         }
+        self.memory.touch(model_id);
     }
 
-    /// Pre-warm the best model for a given capability.
-    async fn warm_for_capability(&self, capability: Capability) {
-        let all_models: Vec<ModelCard> =
-            self.models.iter().map(|e| e.value().clone()).collect();
-
-        let candidate = all_models
-            .iter().find(|m| m.capability == capability && m.status == ModelStatus::Cold);
-
-        if let Some(model) = candidate
-            && let Some(provider) = self.find_provider(&model.provider) {
-                tracing::info!(
-                    "preflight warming '{}' for {capability}",
-                    model.id
-                );
-                let model_id = model.id.clone();
-                self.set_model_status(&model_id, ModelStatus::Warming);
-                provider.warm(&model_id).await;
-                self.set_model_status(&model_id, ModelStatus::Hot);
+    fn end_execution(&self, model_id: &str) {
+        if let Some(mut card) = self.models.get_mut(model_id) {
+            let old_status = card.status;
+            card.execution.active_requests = card.execution.active_requests.saturating_sub(1);
+            card.refresh_status();
+            if old_status != card.status {
+                let _ = self.event_tx.send(EngineEvent::ModelStatusChanged {
+                    model_id: model_id.to_string(),
+                    old: old_status,
+                    new: card.status,
+                });
             }
+        }
+        self.memory.touch(model_id);
+    }
+
+    fn set_model_residency(&self, model_id: &str, new_residency: ModelResidency) {
+        if let Some(mut card) = self.models.get_mut(model_id) {
+            let old_residency = card.residency;
+            let old_status = card.status;
+            if old_residency != new_residency {
+                card.residency = new_residency;
+                card.refresh_status();
+                let new_status = card.status;
+                // Release the shard guard before touching the memory manager / event bus.
+                drop(card);
+                let _ = self.event_tx.send(EngineEvent::ModelResidencyChanged {
+                    model_id: model_id.to_string(),
+                    old: old_residency,
+                    new: new_residency,
+                });
+                if old_status != new_status {
+                    let _ = self.event_tx.send(EngineEvent::ModelStatusChanged {
+                        model_id: model_id.to_string(),
+                        old: old_status,
+                        new: new_status,
+                    });
+                }
+                // A model that stops being resident releases its memory budget.
+                if old_residency == ModelResidency::Loaded
+                    && new_residency != ModelResidency::Loaded
+                {
+                    self.memory.deallocate(model_id);
+                    let _ = self.event_tx.send(EngineEvent::MemoryChanged {
+                        used_bytes: self.memory.used_bytes(),
+                        total_bytes: self.memory.budget_bytes(),
+                    });
+                }
+            }
+        }
     }
 
     /// Get a snapshot of the engine status.
     pub async fn status(&self) -> EngineStatus {
-        let all_models: Vec<ModelCard> =
-            self.models.iter().map(|e| e.value().clone()).collect();
-
+        let all_models = self.capabilities().await;
         let total_models = all_models.len();
         let loaded_models = all_models
             .iter()
-            .filter(|m| m.status == ModelStatus::Hot || m.status == ModelStatus::Busy)
+            .filter(|m| matches!(m.residency, ModelResidency::Loaded | ModelResidency::Remote))
             .count();
 
-        let providers_count = self.providers.len();
-        let uptime_secs = self.started_at.elapsed().as_secs();
-
-        let mut provider_health = Vec::new();
-        for (name, _) in &self.providers {
-            let state = self.circuit_breakers.state(name);
-            provider_health.push(ProviderHealth {
-                name: name.clone(),
-                healthy: state == crate::circuit_breaker::CircuitState::Closed,
-                circuit_state: state.to_string(),
-            });
-        }
+        let backends = self.backend_statuses();
+        let provider_health = backends
+            .iter()
+            .map(|backend| ProviderHealth {
+                name: backend.name.clone(),
+                healthy: backend.health.is_routable()
+                    && backend.circuit_state != CircuitState::Open.to_string(),
+                circuit_state: backend.circuit_state.clone(),
+            })
+            .collect();
 
         EngineStatus {
             total_models,
             loaded_models,
-            providers: providers_count,
+            providers: self.providers.len(),
             memory_used_bytes: self.memory.used_bytes(),
             memory_budget_bytes: self.memory.budget_bytes(),
-            uptime_secs,
+            uptime_secs: self.started_at.elapsed().as_secs(),
             provider_health,
+            backends,
         }
+    }
+
+    /// Get backend status snapshots.
+    pub fn backend_statuses(&self) -> Vec<BackendStatus> {
+        self.providers
+            .iter()
+            .map(|registered| BackendStatus {
+                name: registered.name.clone(),
+                kind: registered.kind,
+                health: self
+                    .backend_health
+                    .get(&registered.name)
+                    .map(|h| *h)
+                    .unwrap_or(BackendHealth::Unknown),
+                circuit_state: self.circuit_breakers.state(&registered.name).to_string(),
+                features: registered.provider.features(),
+            })
+            .collect()
     }
 
     /// Subscribe to engine events.
@@ -361,8 +654,7 @@ impl Engine {
         self.event_tx.subscribe()
     }
 
-    /// Get the listen configuration from the original config.
-    /// (This is a convenience — the caller typically has the config already.)
+    /// Engine uptime in seconds.
     pub fn uptime_secs(&self) -> u64 {
         self.started_at.elapsed().as_secs()
     }
@@ -371,6 +663,13 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use mofa_kernel::{
+        BackendFeature, Capability, ExecutionState, LifecycleResult, Message, ModelAvailability,
+        canonical_model_id,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use crate::config::{EngineConfig, ListenConfig, MemoryConfig, ProviderConfig};
 
     fn minimal_config() -> EngineConfig {
@@ -381,6 +680,127 @@ mod tests {
                 idle_timeout_secs: 60,
             },
             providers: vec![],
+        }
+    }
+
+    #[derive(Default)]
+    struct MockProvider {
+        name: String,
+        discover_calls: AtomicUsize,
+    }
+
+    impl MockProvider {
+        fn new(name: &str) -> Self {
+            Self {
+                name: name.into(),
+                discover_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for MockProvider {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn kind(&self) -> ProviderKind {
+            ProviderKind::OpenAiCompatible
+        }
+
+        fn features(&self) -> Vec<BackendFeature> {
+            vec![BackendFeature::Discovery]
+        }
+
+        async fn discover(&self) -> Result<Vec<ModelCard>, EngineError> {
+            self.discover_calls.fetch_add(1, Ordering::SeqCst);
+            let mut card = ModelCard::new(&self.name, "mock-chat", Capability::Chat, CostTier::Low);
+            card.id = canonical_model_id(&self.name, "mock-chat");
+            card.availability = ModelAvailability::Configured;
+            card.residency = ModelResidency::Remote;
+            card.execution = ExecutionState {
+                active_requests: 0,
+                max_concurrency: 4,
+            };
+            card.refresh_status();
+            Ok(vec![card])
+        }
+
+        async fn health(&self) -> Result<BackendHealth, EngineError> {
+            Ok(BackendHealth::Healthy)
+        }
+
+        async fn load(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
+            Ok(LifecycleResult {
+                model_id: model_id.into(),
+                residency: ModelResidency::Remote,
+                memory_bytes: Some(0),
+                changed: false,
+            })
+        }
+
+        async fn unload(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
+            Ok(LifecycleResult {
+                model_id: model_id.into(),
+                residency: ModelResidency::Remote,
+                memory_bytes: Some(0),
+                changed: false,
+            })
+        }
+
+        async fn invoke(
+            &self,
+            model_id: &str,
+            request: &InferenceRequest,
+        ) -> Result<InferenceResponse, EngineError> {
+            Ok(InferenceResponse {
+                text: Some("ok".into()),
+                file: None,
+                model_used: mofa_kernel::model_id_name(model_id).into(),
+                provider: self.name.clone(),
+                duration_ms: 1,
+                request_id: request.request_id.clone(),
+                tokens_used: Some(1),
+                fallback_used: false,
+                routing_reason: None,
+            })
+        }
+    }
+
+    fn engine_with_provider(provider: Arc<dyn Provider>) -> Arc<Engine> {
+        let (event_tx, _) = broadcast::channel(256);
+        Arc::new(Engine {
+            providers: vec![RegisteredProvider {
+                name: provider.name().into(),
+                kind: provider.kind(),
+                priority: 1,
+                provider,
+            }],
+            models: DashMap::new(),
+            backend_health: DashMap::new(),
+            memory: MemoryManager::new(Some(100)),
+            circuit_breakers: CircuitBreakerRegistry::new(CircuitBreakerConfig::default()),
+            preflight: PreflightPredictor::new(),
+            event_tx,
+            started_at: Instant::now(),
+        })
+    }
+
+    fn chat_request(model: Option<&str>) -> InferenceRequest {
+        InferenceRequest {
+            capability: Some(Capability::Chat),
+            model: model.map(str::to_owned),
+            app_id: None,
+            session_id: None,
+            fallback_policy: FallbackPolicy::default(),
+            messages: vec![Message {
+                role: "user".into(),
+                content: "hello".into(),
+            }],
+            input_file: None,
+            params: serde_json::Value::Null,
+            hint_next: None,
+            request_id: "test".into(),
         }
     }
 
@@ -402,16 +822,7 @@ mod tests {
     #[tokio::test]
     async fn invoke_returns_no_capable_model() {
         let engine = Engine::new(minimal_config()).await;
-        let req = InferenceRequest {
-            capability: Some(Capability::Chat),
-            model: None,
-            messages: vec![],
-            input_file: None,
-            params: serde_json::Value::Null,
-            hint_next: None,
-            request_id: "test".into(),
-        };
-        let result = engine.invoke(req).await;
+        let result = engine.invoke(chat_request(None)).await;
         assert!(matches!(result, Err(EngineError::NoCapableModel(_))));
     }
 
@@ -420,17 +831,16 @@ mod tests {
         let engine = Engine::new(minimal_config()).await;
         let mut rx = engine.subscribe_events();
 
-        // Send a test event manually
         let _ = engine.event_tx.send(EngineEvent::ProviderHealthChanged {
             provider: "test".into(),
-            healthy: true,
+            health: BackendHealth::Healthy,
         });
 
         let event = rx.recv().await.unwrap();
         match event {
-            EngineEvent::ProviderHealthChanged { provider, healthy } => {
+            EngineEvent::ProviderHealthChanged { provider, health } => {
                 assert_eq!(provider, "test");
-                assert!(healthy);
+                assert_eq!(health, BackendHealth::Healthy);
             }
             _ => panic!("unexpected event"),
         }
@@ -458,5 +868,94 @@ mod tests {
         let engine = Engine::new(config).await;
         let status = engine.status().await;
         assert_eq!(status.providers, 0);
+    }
+
+    #[tokio::test]
+    async fn mock_provider_refresh_and_invoke_are_deterministic() {
+        let provider = Arc::new(MockProvider::new("mock"));
+        let engine = engine_with_provider(provider);
+        engine.refresh_resources().await;
+
+        let caps = engine.capabilities().await;
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0].id, "mock/mock-chat");
+
+        let resp = engine.invoke(chat_request(None)).await.unwrap();
+        assert_eq!(resp.text.as_deref(), Some("ok"));
+        assert_eq!(resp.provider, "mock");
+        assert!(resp.routing_reason.is_some());
+    }
+
+    #[tokio::test]
+    async fn ambiguous_short_model_name_is_rejected() {
+        let provider = Arc::new(MockProvider::new("mock"));
+        let engine = engine_with_provider(provider);
+        let mut a = ModelCard::new("a", "same", Capability::Chat, CostTier::Free);
+        a.residency = ModelResidency::Remote;
+        a.refresh_status();
+        let mut b = ModelCard::new("b", "same", Capability::Chat, CostTier::Free);
+        b.residency = ModelResidency::Remote;
+        b.refresh_status();
+        engine.models.insert(a.id.clone(), a);
+        engine.models.insert(b.id.clone(), b);
+
+        let err = engine.invoke(chat_request(Some("same"))).await.unwrap_err();
+        assert!(matches!(err, EngineError::InvalidRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn memory_pressure_evicts_lru_idle_model() {
+        let provider = Arc::new(MockProvider::new("mock"));
+        let engine = engine_with_provider(provider); // 100 MB budget
+
+        // Two resident, idle models at 40 MB each (80 MB used).
+        for name in ["old", "new"] {
+            let mut card = ModelCard::new("mock", name, Capability::Chat, CostTier::Low);
+            card.residency = ModelResidency::Loaded;
+            card.refresh_status();
+            let id = card.id.clone();
+            engine.models.insert(id.clone(), card);
+            engine.memory.allocate(&id, 40 * 1024 * 1024);
+        }
+        // Touch "new" so "old" is the least-recently-used victim.
+        engine.memory.touch("mock/new");
+        assert_eq!(engine.memory.used_bytes(), 80 * 1024 * 1024);
+
+        // Admitting another 40 MB needs 20 MB freed → evict exactly the LRU model.
+        engine.evict_to_fit("mock/incoming", 40 * 1024 * 1024).await;
+
+        assert!(engine.memory.can_fit(40 * 1024 * 1024));
+        assert_eq!(
+            engine.models.get("mock/old").unwrap().residency,
+            ModelResidency::Unloaded
+        );
+        assert_eq!(
+            engine.models.get("mock/new").unwrap().residency,
+            ModelResidency::Loaded
+        );
+    }
+
+    #[tokio::test]
+    async fn busy_models_are_never_evicted() {
+        let provider = Arc::new(MockProvider::new("mock"));
+        let engine = engine_with_provider(provider); // 100 MB budget
+
+        // A single resident model with an in-flight request, filling the budget.
+        let mut card = ModelCard::new("mock", "busy", Capability::Chat, CostTier::Low);
+        card.residency = ModelResidency::Loaded;
+        card.execution.active_requests = 1;
+        card.refresh_status();
+        let id = card.id.clone();
+        engine.models.insert(id.clone(), card);
+        engine.memory.allocate(&id, 90 * 1024 * 1024);
+
+        // It cannot be evicted, so the budget stays full.
+        engine.evict_to_fit("mock/incoming", 40 * 1024 * 1024).await;
+
+        assert!(!engine.memory.can_fit(40 * 1024 * 1024));
+        assert_eq!(
+            engine.models.get("mock/busy").unwrap().residency,
+            ModelResidency::Loaded
+        );
     }
 }

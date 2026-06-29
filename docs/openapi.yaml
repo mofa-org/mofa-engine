@@ -1,0 +1,149 @@
+openapi: 3.1.0
+info:
+  title: MoFA Engine API
+  version: 0.1.0
+  description: Compatibility API for the Stage 0-2 engine baseline.
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        "200":
+          description: Engine process health.
+  /v1/capabilities:
+    get:
+      summary: List registered model capabilities
+      responses:
+        "200":
+          description: Registered model cards.
+  /v1/status:
+    get:
+      summary: Get engine status
+      responses:
+        "200":
+          description: Engine, backend, and memory status.
+  /v1/events:
+    get:
+      summary: Subscribe to server-sent engine events
+      responses:
+        "200":
+          description: SSE event stream.
+  /v1/discovery/refresh:
+    post:
+      summary: Refresh backend health and model discovery
+      responses:
+        "200":
+          description: Updated engine status.
+  /v1/invoke:
+    post:
+      summary: Invoke a model by capability or name
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InferenceRequest"
+      responses:
+        "200":
+          description: Inference result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InferenceResponse"
+        "400":
+          description: Invalid request or unsupported operation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorInfo"
+        "404":
+          description: No model satisfies the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorInfo"
+        "503":
+          description: Provider circuit is open.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorInfo"
+        "504":
+          description: Request timed out.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorInfo"
+components:
+  schemas:
+    InferenceRequest:
+      type: object
+      properties:
+        capability:
+          type: string
+          enum: [chat, tts, asr, image_gen, video_gen, vlm, embedding]
+        model:
+          type: string
+          description: Canonical `provider/model` ID or unique short model name.
+        app_id:
+          type: string
+        session_id:
+          type: string
+        fallback_policy:
+          type: string
+          enum: [capability_only, disabled, allow_named]
+          default: capability_only
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/Message"
+        input_file:
+          type: string
+          description: Path on the engine host.
+        params:
+          type: object
+        hint_next:
+          type: string
+        request_id:
+          type: string
+    Message:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+        content:
+          type: string
+    InferenceResponse:
+      type: object
+      properties:
+        text:
+          type: [string, "null"]
+        file:
+          type: [string, "null"]
+        model_used:
+          type: string
+        provider:
+          type: string
+        duration_ms:
+          type: integer
+        request_id:
+          type: string
+        tokens_used:
+          type: [integer, "null"]
+        fallback_used:
+          type: boolean
+        routing_reason:
+          type: [string, "null"]
+    ErrorInfo:
+      type: object
+      required: [code, message, retryable]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        retryable:
+          type: boolean
+        source:
+          type: string

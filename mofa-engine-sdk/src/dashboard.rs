@@ -265,7 +265,7 @@ body {
 .cap-badge.chat { background: rgba(59, 130, 246, 0.15); color: var(--accent-blue); }
 .cap-badge.tts { background: rgba(139, 92, 246, 0.15); color: var(--accent-purple); }
 .cap-badge.asr { background: rgba(6, 182, 212, 0.15); color: var(--accent-cyan); }
-.cap-badge.imagegen { background: rgba(245, 158, 11, 0.15); color: var(--accent-yellow); }
+.cap-badge.image_gen { background: rgba(245, 158, 11, 0.15); color: var(--accent-yellow); }
 .cap-badge.embedding { background: rgba(16, 185, 129, 0.15); color: var(--accent-green); }
 
 .model-provider {
@@ -563,7 +563,7 @@ body {
           <option value="chat">Chat</option>
           <option value="tts">TTS</option>
           <option value="asr">ASR</option>
-          <option value="imagegen">Image Gen</option>
+          <option value="image_gen">Image Gen</option>
           <option value="embedding">Embedding</option>
         </select>
         <textarea id="try-input" placeholder="Type your message here..."></textarea>
