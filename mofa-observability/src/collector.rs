@@ -13,6 +13,7 @@
 use crate::events::*;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 
 // ─── Labels ──────────────────────────────────────────────────────────────────
@@ -85,6 +86,7 @@ pub struct CounterFamily {
     pub name: &'static str,
     pub help: &'static str,
     pub values: HashMap<Labels, u64>,
+    pub last_seen: HashMap<Labels, Instant>,
 }
 
 impl CounterFamily {
@@ -93,15 +95,30 @@ impl CounterFamily {
             name,
             help,
             values: HashMap::new(),
+            last_seen: HashMap::new(),
         }
     }
 
     fn inc(&mut self, labels: Labels) {
+        self.last_seen.insert(labels.clone(), Instant::now());
         *self.values.entry(labels).or_insert(0) += 1;
     }
 
     fn inc_by(&mut self, labels: Labels, n: u64) {
+        self.last_seen.insert(labels.clone(), Instant::now());
         *self.values.entry(labels).or_insert(0) += n;
+    }
+
+    fn evict_stale(&mut self, now: Instant, max_idle: Duration) {
+        let last_seen = &mut self.last_seen;
+        self.values.retain(|k, _| {
+            if let Some(&time) = last_seen.get(k) {
+                now.saturating_duration_since(time) < max_idle
+            } else {
+                true
+            }
+        });
+        self.last_seen.retain(|_, v| now.saturating_duration_since(*v) < max_idle);
     }
 }
 
@@ -112,6 +129,7 @@ pub struct HistogramFamily {
     pub help: &'static str,
     pub bucket_boundaries: Vec<f64>,
     pub values: HashMap<Labels, HistogramValue>,
+    pub last_seen: HashMap<Labels, Instant>,
 }
 
 impl HistogramFamily {
@@ -121,14 +139,28 @@ impl HistogramFamily {
             help,
             bucket_boundaries: boundaries,
             values: HashMap::new(),
+            last_seen: HashMap::new(),
         }
     }
 
     fn observe(&mut self, labels: Labels, value: f64) {
+        self.last_seen.insert(labels.clone(), Instant::now());
         self.values
             .entry(labels)
             .or_insert_with(|| HistogramValue::new(&self.bucket_boundaries))
             .observe(value);
+    }
+
+    fn evict_stale(&mut self, now: Instant, max_idle: Duration) {
+        let last_seen = &mut self.last_seen;
+        self.values.retain(|k, _| {
+            if let Some(&time) = last_seen.get(k) {
+                now.saturating_duration_since(time) < max_idle
+            } else {
+                true
+            }
+        });
+        self.last_seen.retain(|_, v| now.saturating_duration_since(*v) < max_idle);
     }
 }
 
@@ -138,6 +170,7 @@ pub struct GaugeFamily {
     pub name: &'static str,
     pub help: &'static str,
     pub values: HashMap<Labels, f64>,
+    pub last_seen: HashMap<Labels, Instant>,
 }
 
 impl GaugeFamily {
@@ -146,27 +179,45 @@ impl GaugeFamily {
             name,
             help,
             values: HashMap::new(),
+            last_seen: HashMap::new(),
         }
     }
 
     fn set(&mut self, labels: Labels, value: f64) {
+        self.last_seen.insert(labels.clone(), Instant::now());
         self.values.insert(labels, value);
     }
 
     fn inc(&mut self, labels: Labels) {
+        self.last_seen.insert(labels.clone(), Instant::now());
         *self.values.entry(labels).or_insert(0.0) += 1.0;
     }
 
     fn dec(&mut self, labels: Labels) {
+        self.last_seen.insert(labels.clone(), Instant::now());
         *self.values.entry(labels).or_insert(0.0) -= 1.0;
     }
 
     fn add(&mut self, labels: Labels, n: f64) {
+        self.last_seen.insert(labels.clone(), Instant::now());
         *self.values.entry(labels).or_insert(0.0) += n;
     }
 
     fn sub(&mut self, labels: Labels, n: f64) {
+        self.last_seen.insert(labels.clone(), Instant::now());
         *self.values.entry(labels).or_insert(0.0) -= n;
+    }
+
+    fn evict_stale(&mut self, now: Instant, max_idle: Duration) {
+        let last_seen = &mut self.last_seen;
+        self.values.retain(|k, _| {
+            if let Some(&time) = last_seen.get(k) {
+                now.saturating_duration_since(time) < max_idle
+            } else {
+                true
+            }
+        });
+        self.last_seen.retain(|_, v| now.saturating_duration_since(*v) < max_idle);
     }
 }
 
@@ -315,6 +366,15 @@ impl MetricsState {
             }
 
             EngineEvent::RequestCompleted(e) => {
+                tracing::info!(
+                    trace_id = ?envelope.trace_id,
+                    request_id = ?envelope.request_id,
+                    model = %e.model_id,
+                    duration_ms = e.duration_ms,
+                    success = e.success,
+                    "Request completed"
+                );
+
                 // Counter: requests by capability × status
                 let status = if e.success { "success" } else { "error" };
                 self.requests_total.inc(
@@ -358,6 +418,13 @@ impl MetricsState {
             }
 
             EngineEvent::ModelLoaded(e) => {
+                tracing::info!(
+                    model = %e.model_id,
+                    backend = %e.backend,
+                    load_duration_ms = e.load_duration_ms,
+                    "Model loaded"
+                );
+
                 // Counter
                 self.model_loads_total.inc(
                     Labels::new()
@@ -394,6 +461,13 @@ impl MetricsState {
             }
 
             EngineEvent::EvictionTriggered(e) => {
+                tracing::warn!(
+                    evicted_model = %e.evicted_model,
+                    memory_before = e.memory_before_bytes,
+                    memory_after = e.memory_after_bytes,
+                    "Eviction triggered"
+                );
+
                 self.evictions_total.inc(Labels::new());
 
                 // Reconcile memory gauge against the absolute post-eviction value.
@@ -422,11 +496,46 @@ impl MetricsState {
             }
 
             EngineEvent::FailoverTriggered(e) => {
+                tracing::error!(
+                    failed_model = %e.failed_model,
+                    fallback_model = %e.fallback_model,
+                    "Failover triggered"
+                );
+
                 // We don't have capability on FailoverTriggered, so label-free.
                 let _ = e;
                 self.failovers_total.inc(Labels::new());
             }
         }
+    }
+
+    /// Evict metric labels that haven't been updated in `max_idle` duration.
+    pub fn evict_stale_labels(&mut self, max_idle: Duration) {
+        let now = Instant::now();
+
+        // Counters
+        self.requests_total.evict_stale(now, max_idle);
+        self.model_loads_total.evict_stale(now, max_idle);
+        self.model_unloads_total.evict_stale(now, max_idle);
+        self.failovers_total.evict_stale(now, max_idle);
+        self.evictions_total.evict_stale(now, max_idle);
+        self.preflight_predictions_total.evict_stale(now, max_idle);
+        self.preflight_hits_total.evict_stale(now, max_idle);
+        self.preflight_misses_total.evict_stale(now, max_idle);
+        self.tokens_input_total.evict_stale(now, max_idle);
+        self.tokens_output_total.evict_stale(now, max_idle);
+        self.events_dropped_total.evict_stale(now, max_idle);
+
+        // Histograms
+        self.request_duration_seconds.evict_stale(now, max_idle);
+        self.model_load_seconds.evict_stale(now, max_idle);
+        self.ttft_seconds.evict_stale(now, max_idle);
+
+        // Gauges
+        self.memory_used_bytes.evict_stale(now, max_idle);
+        self.memory_budget_bytes.evict_stale(now, max_idle);
+        self.models_loaded.evict_stale(now, max_idle);
+        self.active_requests.evict_stale(now, max_idle);
     }
 }
 
@@ -447,12 +556,25 @@ pub struct EventSender {
 
 impl EventSender {
     /// Send an event. If the channel is full, the event is dropped
-    /// and the dropped counter is incremented.
+    /// and the dropped counter is incremented. Use for high-volume telemetry.
     pub fn send(&self, event: EventEnvelope) {
         if self.tx.try_send(event).is_err() {
             self.dropped
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
+    }
+
+    /// Send a critical event asynchronously. If the channel is full, this will await
+    /// and apply backpressure to the caller instead of dropping the event.
+    /// Use for rare, critical events like `FailoverTriggered` and `EvictionTriggered`.
+    pub async fn send_critical(&self, event: EventEnvelope) -> Result<(), mpsc::error::SendError<EventEnvelope>> {
+        self.tx.send(event).await
+    }
+
+    /// Send a critical event synchronously. If the channel is full, this will block
+    /// the current thread. Must not be called from within an async runtime context.
+    pub fn send_blocking(&self, event: EventEnvelope) -> Result<(), mpsc::error::SendError<EventEnvelope>> {
+        self.tx.blocking_send(event)
     }
 
     /// How many events have been dropped due to backpressure.
@@ -515,22 +637,39 @@ impl MetricsCollector {
     }
 
     /// Run the collector loop. Processes events until the channel closes.
+    /// Also periodically evicts stale metric labels to prevent memory leaks.
     pub async fn run(mut self) {
-        while let Some(envelope) = self.receiver.rx.recv().await {
-            let mut state = self.state.write().await;
+        let mut cleanup_interval = tokio::time::interval(Duration::from_secs(60));
+        let max_idle = Duration::from_secs(600); // 10 minutes
 
-            // Sync the dropped counter into metrics state.
-            let dropped = self
-                .receiver
-                .dropped
-                .swap(0, std::sync::atomic::Ordering::Relaxed);
-            if dropped > 0 {
-                state
-                    .events_dropped_total
-                    .inc_by(Labels::new(), dropped);
+        loop {
+            tokio::select! {
+                envelope_opt = self.receiver.rx.recv() => {
+                    match envelope_opt {
+                        Some(envelope) => {
+                            let mut state = self.state.write().await;
+
+                            // Sync the dropped counter into metrics state.
+                            let dropped = self
+                                .receiver
+                                .dropped
+                                .swap(0, std::sync::atomic::Ordering::Relaxed);
+                            if dropped > 0 {
+                                state
+                                    .events_dropped_total
+                                    .inc_by(Labels::new(), dropped);
+                            }
+
+                            state.process_event(&envelope);
+                        }
+                        None => break, // Channel closed
+                    }
+                }
+                _ = cleanup_interval.tick() => {
+                    let mut state = self.state.write().await;
+                    state.evict_stale_labels(max_idle);
+                }
             }
-
-            state.process_event(&envelope);
         }
     }
 }
@@ -978,6 +1117,46 @@ mod tests {
         assert!(sender.dropped_count() >= 3);
     }
 
+    #[tokio::test]
+    async fn test_send_critical_blocks() {
+        // Channel of size 1
+        let (sender, mut receiver) = create_event_channel(1);
+
+        // Fill channel
+        sender.send(EventEnvelope::now(EngineEvent::EvictionTriggered(
+            EvictionTriggered {
+                evicted_model: "test1".into(),
+                memory_before_bytes: 100,
+                memory_after_bytes: 50,
+                budget_bytes: 100,
+            },
+        )));
+
+        // Try to send critical event. It should block because the channel is full.
+        // We use tokio::time::timeout to prove it blocks.
+        let critical_event = EventEnvelope::now(EngineEvent::FailoverTriggered(
+            FailoverTriggered {
+                failed_model: "failed".into(),
+                failed_backend: "backend".into(),
+                fallback_model: "fallback".into(),
+                fallback_backend: "backend".into(),
+            },
+        ));
+
+        let send_future = sender.send_critical(critical_event.clone());
+        let result = tokio::time::timeout(Duration::from_millis(50), send_future).await;
+        
+        // It should timeout because it's blocking
+        assert!(result.is_err());
+
+        // Now drain the channel
+        let _ = receiver.rx.recv().await;
+
+        // Sending should now succeed
+        let send_result = sender.send_critical(critical_event).await;
+        assert!(send_result.is_ok());
+    }
+
     // ── Label cardinality test ───────────────────────────────────────────
 
     #[test]
@@ -1016,5 +1195,29 @@ mod tests {
 
         // 7 capabilities × 2 statuses = 14 series. Within defined cardinality bounds.
         assert_eq!(state.requests_total.values.len(), 14);
+    }
+
+    #[test]
+    fn test_evict_stale_labels() {
+        let mut state = make_state();
+        let labels_fresh = Labels::new().add("model", "fresh");
+        let labels_stale = Labels::new().add("model", "stale");
+
+        // Insert labels
+        state.requests_total.inc(labels_fresh.clone());
+        state.requests_total.inc(labels_stale.clone());
+
+        // Override the last_seen for the stale label to be 20 minutes ago
+        let twenty_mins_ago = Instant::now() - Duration::from_secs(1200);
+        state.requests_total.last_seen.insert(labels_stale.clone(), twenty_mins_ago);
+
+        // Evict labels older than 10 minutes
+        state.evict_stale_labels(Duration::from_secs(600));
+
+        // The stale label should be gone, the fresh one should remain
+        assert!(state.requests_total.values.contains_key(&labels_fresh));
+        assert!(!state.requests_total.values.contains_key(&labels_stale));
+        assert!(state.requests_total.last_seen.contains_key(&labels_fresh));
+        assert!(!state.requests_total.last_seen.contains_key(&labels_stale));
     }
 }
