@@ -90,14 +90,14 @@ async fn simulate_engine_traffic(sender: EventSender) {
 
                 // If eviction, also trigger eviction event
                 if reason == UnloadReason::Eviction {
-                    sender.send(EventEnvelope::now(EngineEvent::EvictionTriggered(
+                    sender.send_critical(EventEnvelope::now(EngineEvent::EvictionTriggered(
                         EvictionTriggered {
                             evicted_model: selected_model.0.into(),
                             memory_before_bytes: 15_000_000_000,
                             memory_after_bytes: 12_000_000_000,
                             budget_bytes: 16_000_000_000,
                         },
-                    )));
+                    ))).await.expect("Failed to send critical event");
                 }
             }
 
@@ -141,14 +141,14 @@ async fn simulate_engine_traffic(sender: EventSender) {
 
             // 1% chance: Failover
             20..=20 => {
-                sender.send(EventEnvelope::now(EngineEvent::FailoverTriggered(
+                sender.send_critical(EventEnvelope::now(EngineEvent::FailoverTriggered(
                     FailoverTriggered {
                         failed_model: selected_model.0.into(),
                         failed_backend: selected_model.1.into(),
                         fallback_model: "fallback-model".into(),
                         fallback_backend: "cloud".into(),
                     },
-                )));
+                ))).await.expect("Failed to send critical event");
             }
 
             // 79% chance: Normal Inference Request
@@ -215,6 +215,10 @@ async fn simulate_engine_traffic(sender: EventSender) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("mofa_observability=info".parse().unwrap()))
+        .init();
+
     println!("Starting MoFA Engine Observability Mock Harness...");
 
     // 1. Initialize Event Channel (capacity 1024)
