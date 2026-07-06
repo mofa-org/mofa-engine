@@ -7,7 +7,7 @@
 //! yet accumulated enough samples.
 
 use mofa_kernel::Capability;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -204,7 +204,7 @@ pub struct PreflightMetrics {
 }
 
 /// Serializable snapshot of [`PreflightMetrics`].
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PreflightStats {
     /// Warm tasks spawned.
     pub warms_started: u64,
@@ -252,7 +252,12 @@ impl PreflightMetrics {
         self.misses.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Take a consistent snapshot of all counters.
+    /// Read all counters into a `PreflightStats`.
+    ///
+    /// Each counter is read independently with relaxed ordering, so under heavy
+    /// concurrent updates the fields may reflect slightly different instants;
+    /// they are monotonic and eventually consistent, which is what the metrics
+    /// consumers need.
     pub fn snapshot(&self) -> PreflightStats {
         PreflightStats {
             warms_started: self.warms_started.load(Ordering::Relaxed),

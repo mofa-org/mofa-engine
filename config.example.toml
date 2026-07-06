@@ -29,6 +29,16 @@ confidence_threshold = 0.6  # min confidence (0.0-1.0) before a history predicti
 min_samples = 3             # min observed transitions before history is trusted
 subscription_ttl_secs = 3600
 
+[artifacts]
+# dir = "/tmp"            # where generated audio/artifacts are scanned (default: system temp)
+retention_secs = 3600     # delete engine-generated artifacts older than this; 0 disables
+
+[security]
+# Allowlist of directory roots that request `input_file` paths must fall under.
+# Empty (default) allows any local path — appropriate only on a trusted machine.
+# input_roots = ["/Users/me/mofa-workspace"]
+input_roots = []
+
 # Local Ollama (auto-discovered models). Priority is lower = preferred.
 [[providers]]
 name = "ollama"
@@ -58,3 +68,24 @@ cost_tier = "high"
   [[providers.models]]
   name = "whisper-1"
   capability = "asr"
+
+# Local TTS process-adapter backend. Runs a local command (an MLX/Kokoro or
+# Piper-style CLI) once per synthesis and returns the produced audio file.
+# Enable and point `command`/`args` at your installed runtime. Placeholders:
+#   {text}       input text passed as an argument
+#   {text_file}  path to a temp file holding the input text
+#   {output}     path the command must write audio to
+[[providers]]
+name = "local-tts"
+kind = "local_tts"
+base_url = ""            # unused for local_tts, but the field is required
+command = "kokoro-tts"
+args = ["--text-file", "{text_file}", "--output", "{output}"]
+output_format = "wav"
+priority = 2
+enabled = false          # opt-in: set true once the command is installed
+
+  [[providers.models]]
+  name = "kokoro"
+  capability = "tts"
+  memory_mb = 1024

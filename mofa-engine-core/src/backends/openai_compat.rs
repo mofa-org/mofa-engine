@@ -26,6 +26,8 @@ pub struct OpenAiCompatProvider {
     models: Vec<ModelDef>,
     /// Cost tier for all models from this provider.
     cost_tier: CostTier,
+    /// Directory for generated TTS artifacts.
+    output_dir: std::path::PathBuf,
     /// HTTP client.
     client: Client,
 }
@@ -39,11 +41,26 @@ impl OpenAiCompatProvider {
         models: Vec<ModelDef>,
         cost_tier: CostTier,
     ) -> Self {
+        Self::with_output_dir(name, base_url, api_key, models, cost_tier, None)
+    }
+
+    /// Create a provider, writing TTS artifacts into `output_dir` (or the system
+    /// temp dir when `None`) so they land where the artifact sweeper looks.
+    pub fn with_output_dir(
+        name: impl Into<String>,
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        models: Vec<ModelDef>,
+        cost_tier: CostTier,
+        output_dir: Option<String>,
+    ) -> Self {
+        // A failure here means the system TLS/HTTP stack is unusable, so fail
+        // loudly rather than falling back to a client without our timeouts.
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(120))
             .build()
-            .unwrap_or_default();
+            .expect("failed to build HTTP client");
 
         Self {
             name: name.into(),
@@ -51,6 +68,10 @@ impl OpenAiCompatProvider {
             api_key: api_key.into(),
             models,
             cost_tier,
+            output_dir: output_dir
+                .filter(|s| !s.is_empty())
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir),
             client,
         }
     }
@@ -385,8 +406,11 @@ impl OpenAiCompatProvider {
             detail: format!("TTS read error: {e}"),
         })?;
 
-        let path = std::env::temp_dir().join(format!("mofa_tts_{}.mp3", uuid::Uuid::new_v4()));
-        std::fs::write(&path, &bytes)
+        let path = self
+            .output_dir
+            .join(format!("mofa_tts_{}.mp3", uuid::Uuid::new_v4()));
+        tokio::fs::write(&path, &bytes)
+            .await
             .map_err(|e| EngineError::Internal(format!("write error: {e}")))?;
         let path = path.to_string_lossy().to_string();
 
@@ -415,7 +439,7 @@ impl OpenAiCompatProvider {
             .as_deref()
             .ok_or_else(|| EngineError::InvalidRequest("ASR requires input_file".into()))?;
 
-        let file_bytes = std::fs::read(file_path).map_err(|e| {
+        let file_bytes = tokio::fs::read(file_path).await.map_err(|e| {
             EngineError::InvalidRequest(format!("cannot read file '{file_path}': {e}"))
         })?;
 

@@ -12,7 +12,7 @@
 //! - **leases** — in-flight inferences; a model with active leases is never
 //!   evicted, even under pressure.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -48,7 +48,7 @@ impl Allocation {
 }
 
 /// A point-in-time view of one model's memory accounting.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AllocationSnapshot {
     /// Model identifier.
     pub model_id: String,
@@ -66,7 +66,7 @@ impl MemoryManager {
     /// If `budget_mb` is `None`, auto-detect from system RAM (use 70% of total).
     pub fn new(budget_mb: Option<u64>) -> Self {
         let budget_bytes = match budget_mb {
-            Some(mb) => mb * 1024 * 1024,
+            Some(mb) => mb.saturating_mul(1024 * 1024),
             None => Self::detect_system_memory(),
         };
 
@@ -122,7 +122,7 @@ impl MemoryManager {
             .filter(|(id, _)| id.as_str() != model_id)
             .map(|(_, a)| a.reserved_bytes)
             .sum();
-        if used_by_others + bytes > self.budget_bytes {
+        if used_by_others.saturating_add(bytes) > self.budget_bytes {
             return false;
         }
         match allocs.get_mut(model_id) {

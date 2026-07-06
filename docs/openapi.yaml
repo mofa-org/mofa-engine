@@ -77,6 +77,31 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorInfo"
+  /v1/invoke/stream:
+    post:
+      summary: Invoke a model and stream typed output as Server-Sent Events
+      description: >
+        Streams the response as SSE. Each `data:` line is a JSON StreamChunk: a
+        `started` event, then zero or more `text` deltas, then a terminal
+        `completed` or `error`. Errors after the stream opens are delivered
+        in-band as an `error` chunk (HTTP status is 200 once streaming begins),
+        so clients handle success and failure through one channel. The interface
+        is versioned and supports a non-streaming compatibility mode, in which a
+        backend emits `started`, a single full-text `text` chunk, then
+        `completed`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InferenceRequest"
+      responses:
+        "200":
+          description: A Server-Sent Events stream of StreamChunk objects.
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/StreamChunk"
   /v1/memory:
     get:
       summary: Current memory accounting (budget, reservations, leases)
@@ -173,6 +198,64 @@ paths:
                 properties:
                   removed:
                     type: boolean
+  /v1/models/load:
+    post:
+      summary: Manually load (warm) a model
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelActionRequest"
+      responses:
+        "200":
+          description: Model loaded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelActionResponse"
+        "400":
+          description: Unknown or busy model.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorInfo"
+  /v1/models/unload:
+    post:
+      summary: Manually unload a model
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelActionRequest"
+      responses:
+        "200":
+          description: Model unloaded (or was not known).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelActionResponse"
+        "400":
+          description: Model is busy and cannot be unloaded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorInfo"
+  /metrics:
+    get:
+      summary: Prometheus text-exposition metrics
+      description: >
+        Bounded-cardinality engine metrics (requests, failures, fallback,
+        load/unload/eviction counters, a request-latency histogram, and memory /
+        model / provider gauges). Public — not behind the `/v1` auth gate.
+      responses:
+        "200":
+          description: Prometheus exposition text.
+          content:
+            text/plain:
+              schema:
+                type: string
 components:
   schemas:
     InferenceRequest:
@@ -234,6 +317,55 @@ components:
           type: boolean
         routing_reason:
           type: [string, "null"]
+    StreamChunk:
+      description: >
+        One event in a streaming response, discriminated by `type`. Serialized
+        as internally-tagged JSON.
+      oneOf:
+        - type: object
+          required: [type, request_id, model_used, provider]
+          properties:
+            type: { const: started }
+            request_id: { type: string }
+            model_used: { type: string }
+            provider: { type: string }
+        - type: object
+          required: [type, delta]
+          properties:
+            type: { const: text }
+            delta: { type: string }
+        - type: object
+          required: [type, duration_ms, fallback_used]
+          properties:
+            type: { const: completed }
+            duration_ms: { type: integer }
+            tokens_used: { type: [integer, "null"] }
+            file: { type: [string, "null"] }
+            fallback_used: { type: boolean }
+            routing_reason: { type: [string, "null"] }
+        - type: object
+          required: [type, code, message, retryable]
+          properties:
+            type: { const: error }
+            code: { type: string }
+            message: { type: string }
+            retryable: { type: boolean }
+            source: { type: [string, "null"] }
+    ModelActionRequest:
+      type: object
+      required: [model_id]
+      properties:
+        model_id:
+          type: string
+          description: Canonical model id (`provider/model`).
+    ModelActionResponse:
+      type: object
+      required: [model_id, changed]
+      properties:
+        model_id:
+          type: string
+        changed:
+          type: boolean
     ErrorInfo:
       type: object
       required: [code, message, retryable]

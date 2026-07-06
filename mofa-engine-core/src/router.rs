@@ -204,11 +204,7 @@ impl Router {
     }
 
     fn locality_score(kind: ProviderKind) -> i64 {
-        match kind {
-            ProviderKind::Ollama => 100,
-            ProviderKind::OpenAiCompatible => 0,
-            _ => 0,
-        }
+        if kind.is_local() { 100 } else { 0 }
     }
 
     fn cost_score(tier: CostTier) -> i64 {
@@ -230,7 +226,9 @@ impl Router {
     }
 
     fn priority_score(priority: u8) -> i64 {
-        100_i64.saturating_sub(priority as i64)
+        // Lower configured priority is preferred; floor at 0 so a priority above
+        // 100 cannot contribute a negative term to the score.
+        (100_i64 - priority as i64).max(0)
     }
 
     fn health_score(health: BackendHealth) -> i64 {

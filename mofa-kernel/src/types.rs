@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::error::ErrorInfo;
+
 /// Capabilities that a model can provide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -64,6 +66,17 @@ pub enum ProviderKind {
     Ollama,
     /// Any OpenAI-compatible API.
     OpenAiCompatible,
+    /// Local process-adapter backend (e.g. an MLX/Kokoro or Piper TTS CLI).
+    LocalTts,
+}
+
+impl ProviderKind {
+    /// Whether this backend runs on the local machine (as opposed to a remote
+    /// API). Used by routing to prefer local models and by the memory manager
+    /// to account for on-device residency.
+    pub fn is_local(self) -> bool {
+        matches!(self, Self::Ollama | Self::LocalTts)
+    }
 }
 
 /// Backend health is independent from model residency.
@@ -399,6 +412,52 @@ pub struct InferenceResponse {
     /// Machine-readable routing reason.
     pub routing_reason: Option<String>,
 }
+
+/// A single event in a streaming inference response.
+///
+/// The streaming interface is versioned and can operate in a *non-streaming
+/// compatibility mode*: a backend that cannot emit incremental tokens sends
+/// `Started`, one `Text` chunk carrying the full output, then `Completed`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StreamChunk {
+    /// Emitted once before any content; identifies the serving model.
+    Started {
+        /// Request correlation ID.
+        request_id: String,
+        /// Model actually serving the request.
+        model_used: String,
+        /// Provider serving the request.
+        provider: String,
+    },
+    /// An incremental piece of text output.
+    Text {
+        /// Text delta appended to the output so far.
+        delta: String,
+    },
+    /// Terminal success event with aggregate metadata and any file output.
+    Completed {
+        /// Wall-clock duration in milliseconds.
+        duration_ms: u64,
+        /// Token usage, if reported.
+        tokens_used: Option<u32>,
+        /// File output path (for TTS, image gen, etc.).
+        file: Option<String>,
+        /// Whether a fallback candidate served the request.
+        fallback_used: bool,
+        /// Machine-readable routing reason.
+        routing_reason: Option<String>,
+    },
+    /// Terminal error event.
+    Error(ErrorInfo),
+}
+
+/// Channel a provider uses to emit incremental text deltas while streaming.
+///
+/// The engine owns the surrounding envelope (`Started`/`Completed`/`Error`);
+/// providers push only text deltas here and return the final aggregate response.
+pub type StreamSink = tokio::sync::mpsc::Sender<String>;
 
 /// Result of a lifecycle operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]

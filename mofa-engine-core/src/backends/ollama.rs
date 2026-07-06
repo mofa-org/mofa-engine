@@ -26,12 +26,14 @@ pub struct OllamaProvider {
 impl OllamaProvider {
     /// Create a new Ollama provider.
     pub fn new(name: impl Into<String>, base_url: impl Into<String>) -> Self {
+        // A build failure means the system TLS/HTTP stack is unusable; fail
+        // loudly rather than silently dropping the configured timeouts/no_proxy.
         let client = Client::builder()
             .no_proxy()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(180))
             .build()
-            .unwrap_or_default();
+            .expect("failed to build HTTP client");
 
         Self {
             name: name.into(),

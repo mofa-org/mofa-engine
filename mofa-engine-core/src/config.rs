@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Top-level engine configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EngineConfig {
     /// Network listen settings
     #[serde(default)]
@@ -25,9 +25,50 @@ pub struct EngineConfig {
     /// Preflight (predictive warming) settings
     #[serde(default)]
     pub preflight: PreflightConfig,
+    /// Generated-artifact retention settings
+    #[serde(default)]
+    pub artifacts: ArtifactConfig,
+    /// Security and file-access settings
+    #[serde(default)]
+    pub security: SecurityConfig,
     /// Provider definitions
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
+}
+
+/// Retention policy for engine-generated artifacts (e.g. TTS audio files).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactConfig {
+    /// Directory scanned for cleanup (default: the system temp dir).
+    #[serde(default)]
+    pub dir: Option<String>,
+    /// Delete engine artifacts older than this many seconds. `0` disables the
+    /// background sweep (artifacts are then the caller's responsibility).
+    #[serde(default = "default_artifact_retention")]
+    pub retention_secs: u64,
+}
+
+impl Default for ArtifactConfig {
+    fn default() -> Self {
+        Self {
+            dir: None,
+            retention_secs: default_artifact_retention(),
+        }
+    }
+}
+
+fn default_artifact_retention() -> u64 {
+    3600
+}
+
+/// Security and file-access constraints.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SecurityConfig {
+    /// Allowlist of directory roots that request `input_file` paths must fall
+    /// under. Empty (the default) allows any local path — appropriate only for a
+    /// trusted single-user machine.
+    #[serde(default)]
+    pub input_roots: Vec<String>,
 }
 
 /// Network listen configuration.
@@ -240,6 +281,43 @@ pub struct ProviderConfig {
     /// Whether this provider is enabled
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Program to execute for a `local_tts` process-adapter backend.
+    ///
+    /// Only used when `kind = "local_tts"`. The engine runs this command once
+    /// per synthesis, substituting placeholders in `args`.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Argument template for a `local_tts` command. Each element may contain the
+    /// placeholders `{text}` (input text), `{text_file}` (path to a temp file
+    /// holding the input text), and `{output}` (path the command must write
+    /// audio to).
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Output audio container/extension for `local_tts` artifacts (default `wav`).
+    #[serde(default)]
+    pub output_format: Option<String>,
+    /// Directory for `local_tts` audio artifacts (default: the system temp dir).
+    #[serde(default)]
+    pub output_dir: Option<String>,
+}
+
+impl Default for ProviderConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            kind: String::new(),
+            base_url: String::new(),
+            api_key: None,
+            priority: default_priority(),
+            cost_tier: default_cost_tier(),
+            models: Vec::new(),
+            enabled: default_enabled(),
+            command: None,
+            args: Vec::new(),
+            output_format: None,
+            output_dir: None,
+        }
+    }
 }
 
 fn default_priority() -> u8 {
@@ -340,6 +418,16 @@ impl EngineConfig {
                 self.preflight.confidence_threshold
             )));
         }
+        // Each configured allowlist root must resolve. Otherwise a typo would be
+        // silently dropped, leaving an *empty* allowlist that permits every path
+        // — a security downgrade rather than the intended restriction.
+        for root in &self.security.input_roots {
+            if std::fs::canonicalize(root).is_err() {
+                return Err(EngineError::Config(format!(
+                    "security.input_roots entry '{root}' does not exist or cannot be resolved"
+                )));
+            }
+        }
         for provider in &self.providers {
             if !provider.enabled {
                 continue;
@@ -352,6 +440,20 @@ impl EngineConfig {
                     "provider '{}' requires a non-empty api_key",
                     provider.name
                 )));
+            }
+            if provider.kind == "local_tts" {
+                if provider.command.as_deref().unwrap_or_default().is_empty() {
+                    return Err(EngineError::Config(format!(
+                        "provider '{}' (local_tts) requires a non-empty command",
+                        provider.name
+                    )));
+                }
+                if provider.models.is_empty() {
+                    return Err(EngineError::Config(format!(
+                        "provider '{}' (local_tts) must declare at least one model",
+                        provider.name
+                    )));
+                }
             }
             for model in &provider.models {
                 if mofa_kernel::Capability::from_str_loose(&model.capability).is_none() {
@@ -379,6 +481,7 @@ impl EngineConfig {
             cost_tier: "free".into(),
             models: vec![],
             enabled: true,
+            ..Default::default()
         });
 
         // OpenAI
@@ -423,6 +526,7 @@ impl EngineConfig {
                     },
                 ],
                 enabled: true,
+                ..Default::default()
             });
         }
 
@@ -450,6 +554,7 @@ impl EngineConfig {
                     },
                 ],
                 enabled: true,
+                ..Default::default()
             });
         }
 
@@ -483,6 +588,7 @@ impl EngineConfig {
                     },
                 ],
                 enabled: true,
+                ..Default::default()
             });
         }
 
@@ -502,6 +608,7 @@ impl EngineConfig {
                     memory_mb: None,
                 }],
                 enabled: true,
+                ..Default::default()
             });
         }
 
@@ -521,6 +628,7 @@ impl EngineConfig {
                     memory_mb: None,
                 }],
                 enabled: true,
+                ..Default::default()
             });
         }
 
@@ -540,6 +648,7 @@ impl EngineConfig {
                     memory_mb: None,
                 }],
                 enabled: true,
+                ..Default::default()
             });
         }
 
@@ -548,6 +657,8 @@ impl EngineConfig {
             memory: MemoryConfig::default(),
             timeouts: TimeoutConfig::default(),
             preflight: PreflightConfig::default(),
+            artifacts: ArtifactConfig::default(),
+            security: SecurityConfig::default(),
             providers,
         }
     }
@@ -571,6 +682,7 @@ impl ProviderConfig {
         match self.kind.as_str() {
             "ollama" => Ok(ProviderKind::Ollama),
             "openai_compatible" => Ok(ProviderKind::OpenAiCompatible),
+            "local_tts" => Ok(ProviderKind::LocalTts),
             other => Err(EngineError::Config(format!(
                 "unknown provider kind '{}' for provider '{}'",
                 other, self.name
@@ -624,6 +736,8 @@ mod tests {
             memory: MemoryConfig::default(),
             timeouts: TimeoutConfig::default(),
             preflight: PreflightConfig::default(),
+            artifacts: ArtifactConfig::default(),
+            security: SecurityConfig::default(),
             providers: vec![ProviderConfig {
                 name: "test".into(),
                 kind: "ollama".into(),
@@ -633,6 +747,7 @@ mod tests {
                 cost_tier: "free".into(),
                 models: vec![],
                 enabled: true,
+                ..Default::default()
             }],
         };
         let toml_str = toml::to_string_pretty(&cfg).unwrap();
@@ -679,6 +794,8 @@ mod tests {
             memory: MemoryConfig::default(),
             timeouts: TimeoutConfig::default(),
             preflight: PreflightConfig::default(),
+            artifacts: ArtifactConfig::default(),
+            security: SecurityConfig::default(),
             providers: vec![ProviderConfig {
                 name: "bad".into(),
                 kind: "bad_kind".into(),
@@ -688,6 +805,7 @@ mod tests {
                 cost_tier: "free".into(),
                 models: vec![],
                 enabled: true,
+                ..Default::default()
             }],
         };
         assert!(cfg.validate().is_err());

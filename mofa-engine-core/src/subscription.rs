@@ -7,7 +7,7 @@
 //! be reasoned about and cleaned up per application.
 
 use mofa_kernel::Capability;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,7 +35,7 @@ impl Subscription {
 }
 
 /// Public view of a subscription.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubscriptionInfo {
     /// Unique subscription id.
     pub id: u64,
@@ -93,17 +93,15 @@ impl SubscriptionRegistry {
         subs.len() != before
     }
 
-    /// Drop every expired subscription.
-    fn prune(&self, now: Instant) {
-        self.lock().retain(|s| !s.is_expired(now));
-    }
-
     /// The set of capabilities currently kept warm by any live subscription.
+    ///
+    /// Prunes and reads under a single lock, so the result is a consistent
+    /// snapshot and expired entries are dropped exactly once.
     pub fn active_capabilities(&self) -> HashSet<Capability> {
         let now = Instant::now();
-        self.prune(now);
-        self.lock()
-            .iter()
+        let mut subs = self.lock();
+        subs.retain(|s| !s.is_expired(now));
+        subs.iter()
             .flat_map(|s| s.capabilities.iter().copied())
             .collect()
     }
@@ -116,9 +114,9 @@ impl SubscriptionRegistry {
     /// List all live subscriptions.
     pub fn list(&self) -> Vec<SubscriptionInfo> {
         let now = Instant::now();
-        self.prune(now);
-        self.lock()
-            .iter()
+        let mut subs = self.lock();
+        subs.retain(|s| !s.is_expired(now));
+        subs.iter()
             .map(|s| SubscriptionInfo {
                 id: s.id,
                 app_id: s.app_id.clone(),

@@ -13,16 +13,17 @@ use dashmap::DashMap;
 use mofa_kernel::{
     BackendHealth, BackendStatus, Capability, CostTier, EngineError, EngineEvent, EngineStatus,
     FallbackPolicy, InferenceRequest, InferenceResponse, ModelCard, ModelResidency, Provider,
-    ProviderHealth, ProviderKind,
+    ProviderHealth, ProviderKind, StreamChunk, model_id_name,
 };
-use serde::Serialize;
-use tokio::sync::{Mutex as AsyncMutex, Semaphore, broadcast};
+use serde::{Deserialize, Serialize};
+use tokio::sync::{Mutex as AsyncMutex, Semaphore, broadcast, mpsc};
 use tokio::task::{AbortHandle, JoinHandle};
 
-use crate::backends::{OllamaProvider, OpenAiCompatProvider};
+use crate::backends::{LocalTtsProvider, OllamaProvider, OpenAiCompatProvider};
 use crate::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerRegistry, CircuitState};
 use crate::config::{EngineConfig, PreflightConfig, TimeoutConfig};
 use crate::memory::{AllocationSnapshot, MemoryManager};
+use crate::metrics::{EngineMetrics, MetricsGauges};
 use crate::preflight::{GLOBAL_SCOPE, PreflightMetrics, PreflightPredictor, PreflightStats};
 use crate::router::{RouteDecision, Router, RoutingProvider};
 use crate::subscription::{SubscriptionInfo, SubscriptionRegistry};
@@ -42,7 +43,7 @@ struct RegisteredProvider {
 }
 
 /// A single entry in the model lifecycle history.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LifecycleRecord {
     /// Monotonic sequence number.
     pub seq: u64,
@@ -57,7 +58,7 @@ pub struct LifecycleRecord {
 }
 
 /// A snapshot of the engine's memory accounting.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryReport {
     /// Bytes reserved across all models.
     pub used_bytes: u64,
@@ -107,10 +108,17 @@ pub struct Engine {
     lifecycle_seq: AtomicU64,
     /// Background idle-eviction task; aborted on drop.
     idle_task: Mutex<Option<JoinHandle<()>>>,
+    /// Background artifact-cleanup task; aborted on drop.
+    artifact_task: Mutex<Option<JoinHandle<()>>>,
     /// Weak self-reference for background tasks.
     weak_self: OnceLock<Weak<Engine>>,
     /// Event broadcast channel.
     event_tx: broadcast::Sender<EngineEvent>,
+    /// Bounded-cardinality metrics counters.
+    metrics: EngineMetrics,
+    /// Canonicalized allowlist of roots for request `input_file` paths; empty
+    /// means any local path is accepted.
+    input_roots: Vec<std::path::PathBuf>,
     /// Engine start time.
     started_at: Instant,
 }
@@ -152,13 +160,32 @@ impl Engine {
             let cost_tier = CostTier::from_str_loose(&pc.cost_tier);
             let provider: Arc<dyn Provider> = match kind {
                 ProviderKind::Ollama => Arc::new(OllamaProvider::new(&pc.name, &pc.base_url)),
-                ProviderKind::OpenAiCompatible => Arc::new(OpenAiCompatProvider::new(
-                    &pc.name,
-                    &pc.base_url,
-                    pc.api_key.clone().unwrap_or_default(),
-                    pc.models.clone(),
-                    cost_tier,
-                )),
+                ProviderKind::OpenAiCompatible => {
+                    Arc::new(OpenAiCompatProvider::with_output_dir(
+                        &pc.name,
+                        &pc.base_url,
+                        pc.api_key.clone().unwrap_or_default(),
+                        pc.models.clone(),
+                        cost_tier,
+                        config.artifacts.dir.clone(),
+                    ))
+                }
+                ProviderKind::LocalTts => {
+                    let command = pc.command.clone().ok_or_else(|| {
+                        EngineError::Config(format!(
+                            "provider '{}' (local_tts) requires a command",
+                            pc.name
+                        ))
+                    })?;
+                    Arc::new(LocalTtsProvider::new(
+                        &pc.name,
+                        command,
+                        pc.args.clone(),
+                        pc.output_format.clone(),
+                        pc.output_dir.clone(),
+                        pc.models.clone(),
+                    ))
+                }
                 _ => {
                     return Err(EngineError::Config(format!(
                         "provider '{}' uses unsupported provider kind",
@@ -174,6 +201,19 @@ impl Engine {
                 provider,
             });
         }
+
+        // Canonicalize the input-path allowlist up front; unresolvable roots are
+        // dropped so a typo cannot silently widen access.
+        let input_roots = config
+            .security
+            .input_roots
+            .iter()
+            .filter_map(|r| std::fs::canonicalize(r).ok())
+            .collect::<Vec<_>>();
+        let artifact_sweeper = crate::artifacts::ArtifactSweeper::new(
+            config.artifacts.dir.clone().map(std::path::PathBuf::from),
+            Duration::from_secs(config.artifacts.retention_secs),
+        );
 
         let engine = Arc::new(Self {
             providers,
@@ -194,14 +234,18 @@ impl Engine {
             lifecycle: Mutex::new(VecDeque::with_capacity(LIFECYCLE_CAPACITY)),
             lifecycle_seq: AtomicU64::new(0),
             idle_task: Mutex::new(None),
+            artifact_task: Mutex::new(None),
             weak_self: OnceLock::new(),
             event_tx,
+            metrics: EngineMetrics::default(),
+            input_roots,
             started_at: Instant::now(),
         });
         let _ = engine.weak_self.set(Arc::downgrade(&engine));
 
         engine.refresh_resources().await;
         engine.spawn_idle_eviction();
+        engine.spawn_artifact_sweep(artifact_sweeper);
         Ok(engine)
     }
 
@@ -352,6 +396,20 @@ impl Engine {
         models
     }
 
+    /// Run inference, recording request-level metrics around the attempt.
+    pub async fn invoke(&self, req: InferenceRequest) -> Result<InferenceResponse, EngineError> {
+        let started = Instant::now();
+        let result = self.invoke_inner(req).await;
+        let duration_ms = started.elapsed().as_millis() as u64;
+        match &result {
+            Ok(resp) => self
+                .metrics
+                .record_request(true, duration_ms, resp.fallback_used),
+            Err(_) => self.metrics.record_request(false, duration_ms, false),
+        }
+        result
+    }
+
     /// Run inference.
     ///
     /// Builds a single ranked candidate plan and walks it in order: the first
@@ -359,8 +417,9 @@ impl Engine {
     /// Only *retryable* failures advance to the next candidate, so malformed or
     /// unsupported requests fail immediately rather than masquerading as
     /// transient errors. The candidate list itself encodes the fallback policy.
-    pub async fn invoke(&self, req: InferenceRequest) -> Result<InferenceResponse, EngineError> {
+    async fn invoke_inner(&self, req: InferenceRequest) -> Result<InferenceResponse, EngineError> {
         self.reject_ambiguous_short_name(&req)?;
+        self.check_input_path(&req)?;
         let overall_deadline = Instant::now() + self.timeouts.request();
 
         // Confirm the previous request's prediction for this scope before a new
@@ -575,6 +634,168 @@ impl Engine {
                 )))
             }
         }
+    }
+
+    /// Run inference and stream typed output chunks.
+    ///
+    /// Returns a receiver that yields a `Started` chunk, then `Text` deltas as
+    /// the backend produces them, then a terminal `Completed` or `Error`. Errors
+    /// are delivered in-band as [`StreamChunk::Error`] rather than as a `Result`,
+    /// so a consumer only has to read one channel.
+    ///
+    /// Streaming targets the single best candidate. Unlike [`invoke`](Self::invoke)
+    /// it does not fail over once output has begun, since partial output cannot
+    /// be un-sent; a failure before the first token surfaces as `Error`.
+    pub fn invoke_stream(&self, req: InferenceRequest) -> mpsc::Receiver<StreamChunk> {
+        let (tx, rx) = mpsc::channel(64);
+        if let Some(weak) = self.weak() {
+            tokio::spawn(async move {
+                if let Some(engine) = weak.upgrade() {
+                    engine.run_stream(req, tx).await;
+                }
+            });
+        }
+        rx
+    }
+
+    /// Drive one streaming request end to end, emitting chunks to `out`.
+    async fn run_stream(&self, req: InferenceRequest, out: mpsc::Sender<StreamChunk>) {
+        if let Err(e) = self
+            .reject_ambiguous_short_name(&req)
+            .and_then(|()| self.check_input_path(&req))
+        {
+            let _ = out.send(StreamChunk::Error(e.info())).await;
+            return;
+        }
+        self.confirm_prediction(&req);
+
+        let all_models = self.capabilities().await;
+        let providers = self.routing_providers();
+        let candidates = self.build_candidates(&all_models, &req, &providers);
+        let Some(decision) = candidates.first() else {
+            let err = EngineError::NoCapableModel(Self::requested_capability(&req));
+            let _ = out.send(StreamChunk::Error(err.info())).await;
+            return;
+        };
+
+        let model_id = decision.model.id.clone();
+        let provider_name = decision.model.provider.clone();
+        let max_concurrency = decision.model.execution.max_concurrency;
+        let routing_reason = decision.reason.clone();
+        let overall_deadline = Instant::now() + self.timeouts.request();
+
+        if !self.circuit_breakers.allow_request(&provider_name) {
+            let err = EngineError::CircuitOpen(provider_name.clone());
+            let _ = out.send(StreamChunk::Error(err.info())).await;
+            return;
+        }
+        let Some(provider) = self.find_provider(&provider_name) else {
+            let err = EngineError::Internal(format!("provider '{provider_name}' not found"));
+            let _ = out.send(StreamChunk::Error(err.info())).await;
+            return;
+        };
+
+        let _ = self.event_tx.send(EngineEvent::RequestStarted {
+            request_id: req.request_id.clone(),
+            capability: req.capability,
+            model_id: model_id.clone(),
+        });
+
+        if let Err(e) = self
+            .ensure_loaded(&model_id, &provider_name, &provider)
+            .await
+        {
+            self.emit_request_completed(&req.request_id, 0, false);
+            let _ = out.send(StreamChunk::Error(e.info())).await;
+            return;
+        }
+
+        let sem = self.semaphore_for(&model_id, max_concurrency);
+        let queue_budget = remaining(overall_deadline).min(self.timeouts.queue());
+        let permit = match tokio::time::timeout(queue_budget, sem.acquire_owned()).await {
+            Ok(Ok(p)) => p,
+            Ok(Err(_)) => {
+                self.emit_request_completed(&req.request_id, 0, false);
+                let err = EngineError::Internal("concurrency semaphore closed".into());
+                let _ = out.send(StreamChunk::Error(err.info())).await;
+                return;
+            }
+            Err(_) => {
+                self.emit_request_completed(&req.request_id, 0, false);
+                let err = EngineError::Timeout(format!("queue wait exceeded for '{model_id}'"));
+                let _ = out.send(StreamChunk::Error(err.info())).await;
+                return;
+            }
+        };
+
+        self.begin_execution(&model_id);
+        self.trigger_preflight(&req);
+
+        let _ = out
+            .send(StreamChunk::Started {
+                request_id: req.request_id.clone(),
+                model_used: model_id_name(&model_id).to_string(),
+                provider: provider_name.clone(),
+            })
+            .await;
+
+        // Forward the provider's text deltas into the output stream as they
+        // arrive. The provider drops its sink when it returns, ending the
+        // forwarder, so all deltas are flushed before the terminal chunk.
+        let (delta_tx, mut delta_rx) = mpsc::channel::<String>(64);
+        let forward_out = out.clone();
+        let forwarder = tokio::spawn(async move {
+            while let Some(delta) = delta_rx.recv().await {
+                if forward_out.send(StreamChunk::Text { delta }).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let inference_budget = remaining(overall_deadline).min(self.timeouts.inference());
+        let start = Instant::now();
+        let result =
+            tokio::time::timeout(inference_budget, provider.stream(&model_id, &req, delta_tx))
+                .await;
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        let _ = forwarder.await;
+        self.end_execution(&model_id);
+        drop(permit);
+
+        let terminal = match result {
+            Ok(Ok(resp)) => {
+                self.circuit_breakers.record_success(&provider_name);
+                self.record_transition(&req);
+                self.emit_request_completed(&req.request_id, duration_ms, true);
+                self.metrics.record_request(true, duration_ms, false);
+                StreamChunk::Completed {
+                    duration_ms,
+                    tokens_used: resp.tokens_used,
+                    file: resp.file,
+                    fallback_used: false,
+                    routing_reason: Some(routing_reason),
+                }
+            }
+            Ok(Err(e)) => {
+                self.circuit_breakers.record_failure(&provider_name);
+                self.emit_request_completed(&req.request_id, duration_ms, false);
+                self.metrics.record_request(false, duration_ms, false);
+                StreamChunk::Error(e.info())
+            }
+            Err(_) => {
+                self.circuit_breakers.record_failure(&provider_name);
+                let budget_ms = inference_budget.as_millis() as u64;
+                self.emit_request_completed(&req.request_id, budget_ms, false);
+                self.metrics.record_request(false, budget_ms, false);
+                let err = EngineError::Timeout(format!(
+                    "provider '{provider_name}' did not respond within {}s",
+                    inference_budget.as_secs()
+                ));
+                StreamChunk::Error(err.info())
+            }
+        };
+        let _ = out.send(terminal).await;
     }
 
     /// Ensure a model is resident, reserving memory before loading.
@@ -1013,6 +1234,60 @@ impl Engine {
         *self.idle_task.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
     }
 
+    /// Background task: periodically delete stale engine artifacts.
+    fn spawn_artifact_sweep(&self, sweeper: crate::artifacts::ArtifactSweeper) {
+        let retention = sweeper.retention();
+        if retention.is_zero() {
+            return; // retention 0 disables cleanup
+        }
+        let Some(weak) = self.weak_self.get().cloned() else {
+            return;
+        };
+        // Sweep on roughly half the retention interval, bounded so tests and
+        // long-lived daemons both behave.
+        let tick = Duration::from_secs((retention.as_secs().max(2) / 2).clamp(1, 300));
+        let handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(tick);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticker.tick().await;
+                if weak.upgrade().is_none() {
+                    break;
+                }
+                let removed = sweeper.sweep();
+                if removed > 0 {
+                    tracing::debug!("artifact sweep removed {removed} stale file(s)");
+                }
+            }
+        });
+        *self.artifact_task.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
+    }
+
+    /// Reject a request whose `input_file` falls outside the configured
+    /// allowlist. A no-op when no roots are configured.
+    fn check_input_path(&self, req: &InferenceRequest) -> Result<(), EngineError> {
+        if self.input_roots.is_empty() {
+            return Ok(());
+        }
+        let Some(path) = req.input_file.as_deref() else {
+            return Ok(());
+        };
+        let canonical = std::fs::canonicalize(path).map_err(|_| {
+            EngineError::InvalidRequest(format!("input_file '{path}' cannot be resolved"))
+        })?;
+        if self
+            .input_roots
+            .iter()
+            .any(|root| canonical.starts_with(root))
+        {
+            Ok(())
+        } else {
+            Err(EngineError::InvalidRequest(format!(
+                "input_file '{path}' is outside the allowed roots"
+            )))
+        }
+    }
+
     /// Unload every model that has been idle past the timeout.
     async fn run_idle_sweep(&self) {
         let protected = self.eviction_protected_ids();
@@ -1157,6 +1432,7 @@ impl Engine {
     }
 
     fn record_lifecycle(&self, model_id: &str, event: &str, detail: Option<&str>) {
+        self.metrics.record_lifecycle(event);
         let record = LifecycleRecord {
             seq: self.lifecycle_seq.fetch_add(1, Ordering::Relaxed),
             at_ms: self.started_at.elapsed().as_millis() as u64,
@@ -1246,6 +1522,80 @@ impl Engine {
         self.event_tx.subscribe()
     }
 
+    /// Render the current metrics in Prometheus text-exposition format.
+    ///
+    /// Combines the process-wide counters with point-in-time gauges sampled
+    /// from the registry, memory manager, preflight counters, and per-provider
+    /// health. Label cardinality is bounded: only the fixed provider set adds
+    /// labels.
+    pub fn metrics_prometheus(&self) -> String {
+        let models = self.models_snapshot();
+        let loaded = models
+            .iter()
+            .filter(|m| matches!(m.residency, ModelResidency::Loaded | ModelResidency::Remote))
+            .count() as u64;
+        let preflight = self.preflight_metrics.snapshot();
+        let provider_up = self
+            .providers
+            .iter()
+            .map(|p| {
+                let health = self
+                    .backend_health
+                    .get(&p.name)
+                    .map(|h| *h)
+                    .unwrap_or(BackendHealth::Unknown);
+                let up = health.is_routable()
+                    && self.circuit_breakers.state(&p.name) != CircuitState::Open;
+                (p.name.clone(), up)
+            })
+            .collect();
+
+        let gauges = MetricsGauges {
+            models_total: models.len() as u64,
+            models_loaded: loaded,
+            memory_used_bytes: self.memory.used_bytes(),
+            memory_budget_bytes: self.memory.budget_bytes(),
+            preflight_warms_started: preflight.warms_started,
+            preflight_hits: preflight.hits,
+            provider_up,
+        };
+        self.metrics.render_prometheus(&gauges)
+    }
+
+    /// Manually load (warm) a model by id. Used by the management interface.
+    ///
+    /// Goes through the same reservation-based admission and lifecycle path as
+    /// an on-demand load, so memory accounting and eviction rules still hold.
+    pub async fn load_model(&self, model_id: &str) -> Result<(), EngineError> {
+        let provider_name = self
+            .models
+            .get(model_id)
+            .map(|c| c.provider.clone())
+            .ok_or_else(|| EngineError::InvalidRequest(format!("unknown model '{model_id}'")))?;
+        let provider = self.find_provider(&provider_name).ok_or_else(|| {
+            EngineError::Internal(format!("provider '{provider_name}' not found"))
+        })?;
+        self.ensure_loaded(model_id, &provider_name, &provider)
+            .await
+    }
+
+    /// Manually unload a model by id. Returns whether the model was known.
+    ///
+    /// Refuses to unload a model with active leases (in-flight inference) so a
+    /// manual action cannot corrupt a running request.
+    pub async fn unload_model_manual(&self, model_id: &str) -> Result<bool, EngineError> {
+        if !self.models.contains_key(model_id) {
+            return Ok(false);
+        }
+        if self.memory.lease_count(model_id) > 0 {
+            return Err(EngineError::InvalidRequest(format!(
+                "model '{model_id}' is busy and cannot be unloaded"
+            )));
+        }
+        self.unload_model(model_id, "manual").await;
+        Ok(true)
+    }
+
     /// Engine uptime in seconds.
     pub fn uptime_secs(&self) -> u64 {
         self.started_at.elapsed().as_secs()
@@ -1254,13 +1604,10 @@ impl Engine {
 
 impl Drop for Engine {
     fn drop(&mut self) {
-        if let Some(handle) = self
-            .idle_task
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-        {
-            handle.abort();
+        for task in [&self.idle_task, &self.artifact_task] {
+            if let Some(handle) = task.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                handle.abort();
+            }
         }
         // Cancel any in-flight speculative warm tasks.
         for entry in self.warming.iter() {
@@ -1280,7 +1627,8 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use crate::config::{
-        EngineConfig, ListenConfig, MemoryConfig, PreflightConfig, ProviderConfig, TimeoutConfig,
+        EngineConfig, ListenConfig, MemoryConfig, PreflightConfig, ProviderConfig, SecurityConfig,
+        TimeoutConfig,
     };
 
     const MB: u64 = 1024 * 1024;
@@ -1294,6 +1642,8 @@ mod tests {
             },
             timeouts: TimeoutConfig::default(),
             preflight: PreflightConfig::default(),
+            artifacts: Default::default(),
+            security: Default::default(),
             providers: vec![],
         }
     }
@@ -1505,8 +1855,11 @@ mod tests {
             lifecycle: Mutex::new(VecDeque::new()),
             lifecycle_seq: AtomicU64::new(0),
             idle_task: Mutex::new(None),
+            artifact_task: Mutex::new(None),
             weak_self: OnceLock::new(),
             event_tx,
+            metrics: EngineMetrics::default(),
+            input_roots: Vec::new(),
             started_at: Instant::now(),
         });
         let _ = engine.weak_self.set(Arc::downgrade(&engine));
@@ -1588,6 +1941,8 @@ mod tests {
             },
             timeouts: TimeoutConfig::default(),
             preflight: PreflightConfig::default(),
+            artifacts: Default::default(),
+            security: Default::default(),
             providers: vec![ProviderConfig {
                 name: "disabled-ollama".into(),
                 kind: "ollama".into(),
@@ -1597,6 +1952,7 @@ mod tests {
                 cost_tier: "free".into(),
                 models: vec![],
                 enabled: false,
+                ..Default::default()
             }],
         };
         let engine = Engine::new(config).await;
@@ -1714,6 +2070,42 @@ mod tests {
 
         let resp = engine.invoke(chat_request(None)).await.unwrap();
         assert_eq!(resp.provider, "openai");
+        assert!(resp.fallback_used);
+    }
+
+    #[tokio::test]
+    async fn local_tts_failure_falls_back_to_cloud_tts() {
+        // A local TTS backend (preferred by locality) crashes mid-synthesis; the
+        // engine must fail over to the configured cloud TTS model. This is RFC
+        // acceptance step 8 exercised deterministically without a real backend.
+        let local_tts = Arc::new(
+            TestProvider::new("local-tts", ProviderKind::LocalTts)
+                .with_model(
+                    "kokoro",
+                    Capability::Tts,
+                    ModelResidency::Loaded,
+                    10 * MB,
+                    1,
+                )
+                .behavior(InvokeBehavior::FailRetryable),
+        );
+        let cloud_tts = Arc::new(
+            TestProvider::new("openai", ProviderKind::OpenAiCompatible)
+                .with_model("tts-1", Capability::Tts, ModelResidency::Remote, 0, 32)
+                .behavior(InvokeBehavior::Ok),
+        );
+        let local_calls = local_tts.invoke_calls.clone();
+        let engine = build_engine(vec![local_tts, cloud_tts], 1000, 0);
+        engine.refresh_resources().await;
+
+        let resp = engine
+            .invoke(request(Capability::Tts, None, FallbackPolicy::default()))
+            .await
+            .unwrap();
+        // The local backend was tried first, then the engine fell over to cloud.
+        assert_eq!(local_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(resp.provider, "openai");
+        assert_eq!(resp.model_used, "tts-1");
         assert!(resp.fallback_used);
     }
 
@@ -2153,5 +2545,188 @@ mod tests {
                 .iter()
                 .any(|r| r.event == "idle_unload")
         );
+    }
+
+    async fn collect_stream(mut rx: mpsc::Receiver<StreamChunk>) -> Vec<StreamChunk> {
+        let mut chunks = Vec::new();
+        while let Some(c) = rx.recv().await {
+            chunks.push(c);
+        }
+        chunks
+    }
+
+    /// A provider that emits several real text deltas, to prove the engine
+    /// forwards incremental output in order (not just the compatibility path).
+    struct MultiDeltaProvider {
+        name: String,
+        deltas: Vec<String>,
+    }
+
+    #[async_trait]
+    impl Provider for MultiDeltaProvider {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn kind(&self) -> ProviderKind {
+            ProviderKind::Ollama
+        }
+        fn features(&self) -> Vec<BackendFeature> {
+            vec![BackendFeature::Discovery, BackendFeature::Streaming]
+        }
+        async fn discover(&self) -> Result<Vec<ModelCard>, EngineError> {
+            let mut card = ModelCard::new(&self.name, "streamer", Capability::Chat, CostTier::Free);
+            card.residency = ModelResidency::Loaded;
+            card.refresh_status();
+            Ok(vec![card])
+        }
+        async fn health(&self) -> Result<BackendHealth, EngineError> {
+            Ok(BackendHealth::Healthy)
+        }
+        async fn load(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
+            Ok(LifecycleResult {
+                model_id: model_id.into(),
+                residency: ModelResidency::Loaded,
+                memory_bytes: Some(0),
+                changed: true,
+            })
+        }
+        async fn unload(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
+            Ok(LifecycleResult {
+                model_id: model_id.into(),
+                residency: ModelResidency::Unloaded,
+                memory_bytes: Some(0),
+                changed: true,
+            })
+        }
+        async fn invoke(
+            &self,
+            model_id: &str,
+            request: &InferenceRequest,
+        ) -> Result<InferenceResponse, EngineError> {
+            Ok(InferenceResponse {
+                text: Some(self.deltas.concat()),
+                file: None,
+                model_used: mofa_kernel::model_id_name(model_id).into(),
+                provider: self.name.clone(),
+                duration_ms: 1,
+                request_id: request.request_id.clone(),
+                tokens_used: Some(self.deltas.len() as u32),
+                fallback_used: false,
+                routing_reason: None,
+            })
+        }
+        async fn stream(
+            &self,
+            model_id: &str,
+            request: &InferenceRequest,
+            sink: mofa_kernel::StreamSink,
+        ) -> Result<InferenceResponse, EngineError> {
+            for d in &self.deltas {
+                let _ = sink.send(d.clone()).await;
+            }
+            self.invoke(model_id, request).await
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_emits_started_text_completed_in_order() {
+        // Default (compat) streaming: one Text chunk carrying the full output.
+        let provider = Arc::new(
+            TestProvider::new("ollama", ProviderKind::Ollama).with_model(
+                "qwen",
+                Capability::Chat,
+                ModelResidency::Loaded,
+                10 * MB,
+                1,
+            ),
+        );
+        let engine = build_engine(vec![provider], 1000, 0);
+        engine.refresh_resources().await;
+
+        let chunks = collect_stream(engine.invoke_stream(chat_request(None))).await;
+        assert!(matches!(chunks.first(), Some(StreamChunk::Started { .. })));
+        assert!(matches!(chunks.last(), Some(StreamChunk::Completed { .. })));
+        let text: String = chunks
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::Text { delta } => Some(delta.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "ok");
+    }
+
+    #[tokio::test]
+    async fn stream_forwards_incremental_deltas_in_order() {
+        let provider = Arc::new(MultiDeltaProvider {
+            name: "ollama".into(),
+            deltas: vec!["Hello".into(), ", ".into(), "world".into()],
+        });
+        let engine = build_engine(vec![provider], 1000, 0);
+        engine.refresh_resources().await;
+
+        let chunks = collect_stream(engine.invoke_stream(chat_request(None))).await;
+        let deltas: Vec<String> = chunks
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::Text { delta } => Some(delta.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, vec!["Hello", ", ", "world"]);
+        // Completed reports the token count the provider aggregated.
+        match chunks.last() {
+            Some(StreamChunk::Completed { tokens_used, .. }) => {
+                assert_eq!(*tokens_used, Some(3));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn input_path_allowlist_blocks_paths_outside_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let allowed = root.path().join("clip.wav");
+        std::fs::write(&allowed, b"x").unwrap();
+        let outside = std::env::temp_dir().join("mofa_outside_allowlist.wav");
+        std::fs::write(&outside, b"x").unwrap();
+
+        let config = EngineConfig {
+            security: SecurityConfig {
+                input_roots: vec![root.path().to_string_lossy().to_string()],
+            },
+            ..minimal_config()
+        };
+        let engine = Engine::new(config).await;
+
+        // A path outside the allowlist is rejected before any routing happens.
+        let mut req = request(Capability::Asr, None, FallbackPolicy::default());
+        req.input_file = Some(outside.to_string_lossy().to_string());
+        assert!(matches!(
+            engine.invoke(req).await,
+            Err(EngineError::InvalidRequest(_))
+        ));
+
+        // A path inside the allowlist passes the check (then fails later only
+        // because no ASR model is registered).
+        let mut ok = request(Capability::Asr, None, FallbackPolicy::default());
+        ok.input_file = Some(allowed.to_string_lossy().to_string());
+        assert!(matches!(
+            engine.invoke(ok).await,
+            Err(EngineError::NoCapableModel(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn stream_reports_no_capable_model_as_error_chunk() {
+        let engine = build_engine(vec![], 100, 0);
+        let chunks = collect_stream(engine.invoke_stream(chat_request(None))).await;
+        assert_eq!(chunks.len(), 1);
+        match &chunks[0] {
+            StreamChunk::Error(info) => {
+                assert_eq!(info.code, mofa_kernel::ErrorCode::NoCapableModel);
+            }
+            other => panic!("expected Error chunk, got {other:?}"),
+        }
     }
 }
