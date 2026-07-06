@@ -160,16 +160,14 @@ impl Engine {
             let cost_tier = CostTier::from_str_loose(&pc.cost_tier);
             let provider: Arc<dyn Provider> = match kind {
                 ProviderKind::Ollama => Arc::new(OllamaProvider::new(&pc.name, &pc.base_url)),
-                ProviderKind::OpenAiCompatible => {
-                    Arc::new(OpenAiCompatProvider::with_output_dir(
-                        &pc.name,
-                        &pc.base_url,
-                        pc.api_key.clone().unwrap_or_default(),
-                        pc.models.clone(),
-                        cost_tier,
-                        config.artifacts.dir.clone(),
-                    ))
-                }
+                ProviderKind::OpenAiCompatible => Arc::new(OpenAiCompatProvider::with_output_dir(
+                    &pc.name,
+                    &pc.base_url,
+                    pc.api_key.clone().unwrap_or_default(),
+                    pc.models.clone(),
+                    cost_tier,
+                    config.artifacts.dir.clone(),
+                )),
                 ProviderKind::LocalTts => {
                     let command = pc.command.clone().ok_or_else(|| {
                         EngineError::Config(format!(
