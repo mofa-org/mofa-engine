@@ -111,10 +111,12 @@ fn build_app(state: AppState) -> Router {
         .route("/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
         .merge(api)
-        .layer(middleware::from_fn(correlation_middleware))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
+        // Outermost, so the request-id span encloses the trace layer and every
+        // response (including framework rejections) carries `x-request-id`.
+        .layer(middleware::from_fn(correlation_middleware))
         .with_state(state)
 }
 
@@ -147,12 +149,28 @@ async fn auth_middleware(State(state): State<AppState>, req: Request, next: Next
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
-    if presented == Some(expected.as_str()) {
+    let authorized = presented
+        .map(|p| constant_time_eq(p.as_bytes(), expected.as_bytes()))
+        .unwrap_or(false);
+    if authorized {
         next.run(req).await
     } else {
         let err = EngineError::InvalidRequest("missing or invalid bearer token".into());
         (StatusCode::UNAUTHORIZED, Json(err.info())).into_response()
     }
+}
+
+/// Compare two byte strings in time independent of how many leading bytes match,
+/// so token verification does not leak the secret through response timing.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// Health check response.
@@ -209,7 +227,12 @@ async fn invoke_stream_handler(
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
     let rx = state.engine.invoke_stream(req);
     let stream = ReceiverStream::new(rx).map(|chunk| {
-        let data = serde_json::to_string(&chunk).unwrap_or_default();
+        // Every SSE frame must be a valid StreamChunk JSON. Serialization of a
+        // chunk cannot realistically fail, but if it did, emit a well-formed
+        // error chunk rather than an empty (invalid) frame.
+        let data = serde_json::to_string(&chunk).unwrap_or_else(|_| {
+            r#"{"type":"error","code":"internal","message":"failed to serialize stream chunk","retryable":false,"source":null}"#.to_string()
+        });
         Ok(Event::default().data(data))
     });
     Sse::new(stream).keep_alive(

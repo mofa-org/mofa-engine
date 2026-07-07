@@ -908,10 +908,13 @@ impl Engine {
         }
         // Frees the reservation and emits residency/memory events.
         self.set_model_residency(model_id, ModelResidency::Unloaded);
-        let event = if reason == "idle_timeout" {
-            "idle_unload"
-        } else {
-            "evict"
+        // Distinguish the cause so metrics count each correctly: an idle sweep is
+        // an idle-unload, an operator action is a plain unload, and everything
+        // else (memory pressure) is an eviction.
+        let event = match reason {
+            "idle_timeout" => "idle_unload",
+            "manual" => "unload",
+            _ => "evict",
         };
         self.record_lifecycle(model_id, event, Some(reason));
         let _ = self.event_tx.send(EngineEvent::ModelEvicted {

@@ -276,6 +276,18 @@ mod tests {
     }
 
     #[test]
+    fn provider_label_values_are_escaped() {
+        let m = EngineMetrics::default();
+        let gauges = MetricsGauges {
+            provider_up: vec![("we\"ird\\name".into(), true)],
+            ..Default::default()
+        };
+        let text = m.render_prometheus(&gauges);
+        // The quote and backslash must be escaped so the exposition stays valid.
+        assert!(text.contains(r#"mofa_provider_up{provider="we\"ird\\name"} 1"#));
+    }
+
+    #[test]
     fn latency_buckets_are_cumulative() {
         let m = EngineMetrics::default();
         m.record_request(true, 10, false); // le=50

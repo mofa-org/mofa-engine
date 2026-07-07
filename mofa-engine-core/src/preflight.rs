@@ -50,26 +50,38 @@ impl ScopeChain {
         }
     }
 
+    /// Observe a capability used within this scope, recording the `prev → this`
+    /// transition against the scope's own running order.
     fn observe(&mut self, capability: Capability) {
         self.last_access = Instant::now();
         if let Some(prev) = self.last_capability {
-            *self
-                .transitions
-                .entry(prev)
-                .or_default()
-                .entry(capability)
-                .or_insert(0.0) += 1.0;
-            self.total_transitions += 1;
+            self.record_transition(prev, capability);
+        }
+        self.last_capability = Some(capability);
+    }
 
-            if self.total_transitions.is_multiple_of(DECAY_INTERVAL) {
-                for counts in self.transitions.values_mut() {
-                    for count in counts.values_mut() {
-                        *count *= DECAY_FACTOR;
-                    }
+    /// Add a single `from → to` transition to this chain's counts, applying
+    /// decay on the interval. Unlike [`observe`](Self::observe) it does not
+    /// touch `last_capability`, so it can mirror a transition that already
+    /// happened elsewhere (e.g. into the global aggregate) without inventing a
+    /// spurious edge from whatever this chain saw last.
+    fn record_transition(&mut self, from: Capability, to: Capability) {
+        self.last_access = Instant::now();
+        *self
+            .transitions
+            .entry(from)
+            .or_default()
+            .entry(to)
+            .or_insert(0.0) += 1.0;
+        self.total_transitions += 1;
+
+        if self.total_transitions.is_multiple_of(DECAY_INTERVAL) {
+            for counts in self.transitions.values_mut() {
+                for count in counts.values_mut() {
+                    *count *= DECAY_FACTOR;
                 }
             }
         }
-        self.last_capability = Some(capability);
     }
 
     fn predict(&self, current: Capability, min_samples: u64) -> Option<Prediction> {
@@ -111,21 +123,34 @@ impl PreflightPredictor {
 
     /// Record that a capability was used within `scope`.
     ///
-    /// The observation updates both the scope's own chain and the global chain,
-    /// so global history accumulates without leaking one scope's ordering into
-    /// another's predictions.
+    /// The observation updates the scope's own chain, and the *same* per-scope
+    /// transition (if any) is mirrored into the global aggregate. The global
+    /// chain therefore only ever accumulates transitions that genuinely occurred
+    /// within some scope — an edge that spanned two different scopes (because
+    /// their requests interleaved) is never invented.
     pub fn record(&self, scope: &str, capability: Capability) {
         let mut scopes = self.lock();
         Self::evict_if_full(&mut scopes, scope);
-        scopes
-            .entry(scope.to_string())
-            .or_insert_with(ScopeChain::new)
-            .observe(capability);
-        if scope != GLOBAL_SCOPE {
+
+        // Observe into the scope's own chain, capturing the transition edge it
+        // just formed (its previous capability, if any).
+        let edge_from = {
+            let chain = scopes
+                .entry(scope.to_string())
+                .or_insert_with(ScopeChain::new);
+            let prev = chain.last_capability;
+            chain.observe(capability);
+            prev
+        };
+
+        // Mirror only that real edge into the global aggregate.
+        if scope != GLOBAL_SCOPE
+            && let Some(from) = edge_from
+        {
             scopes
                 .entry(GLOBAL_SCOPE.to_string())
                 .or_insert_with(ScopeChain::new)
-                .observe(capability);
+                .record_transition(from, capability);
         }
     }
 
@@ -352,6 +377,29 @@ mod tests {
             .predict("fresh-scope", Capability::Chat, SAMPLES, THRESHOLD)
             .unwrap();
         assert_eq!(pred.capability, Capability::Tts);
+    }
+
+    #[test]
+    fn global_chain_ignores_cross_scope_transitions() {
+        let p = PreflightPredictor::new();
+        // Two scopes run concurrently with interleaved requests. App A always
+        // does Chat → Tts; app B always does Asr → Vlm. If the global chain
+        // observed the interleaved stream it would learn phantom edges like
+        // Chat → Asr (A's Chat followed by B's Asr), which never happened in any
+        // real sequence.
+        for _ in 0..6 {
+            p.record("app-a", Capability::Chat);
+            p.record("app-b", Capability::Asr);
+            p.record("app-a", Capability::Tts);
+            p.record("app-b", Capability::Vlm);
+        }
+        // A fresh scope falls back to the global aggregate. It must predict the
+        // real edge Chat → Tts, not the phantom Chat → Asr the old code learned.
+        let pred = p
+            .predict("fresh", Capability::Chat, SAMPLES, THRESHOLD)
+            .expect("global should predict the real transition");
+        assert_eq!(pred.capability, Capability::Tts);
+        assert!(pred.confidence > 0.9);
     }
 
     #[test]

@@ -33,7 +33,16 @@ pub enum ClientError {
     /// The daemon returned a structured engine error.
     #[error("engine error: {}", .0.message)]
     Engine(ErrorInfo),
-    /// A response body could not be decoded.
+    /// The daemon returned a non-success status without a structured body
+    /// (e.g. a 401/404/413 from the framework rather than the handler).
+    #[error("http {status}: {body}")]
+    Status {
+        /// HTTP status code.
+        status: u16,
+        /// Raw response body.
+        body: String,
+    },
+    /// A success response body could not be decoded into the expected type.
     #[error("decode error: {0}")]
     Decode(String),
 }
@@ -98,6 +107,10 @@ impl EmbeddedEngine {
         capabilities: Vec<Capability>,
         ttl_secs: Option<u64>,
     ) -> u64 {
+        // `Engine::subscribe` spawns background warm tasks, so it must run with
+        // the owned runtime entered on this thread — otherwise `tokio::spawn`
+        // panics when called from a plain (non-async) caller.
+        let _guard = self.runtime.enter();
         self.engine.subscribe(
             app_id,
             session_id,
@@ -108,6 +121,7 @@ impl EmbeddedEngine {
 
     /// Remove a subscription by id.
     pub fn unsubscribe(&self, id: u64) -> bool {
+        let _guard = self.runtime.enter();
         self.engine.unsubscribe(id)
     }
 
@@ -156,6 +170,7 @@ fn err_json(e: EngineError) -> String {
 pub struct DaemonClient {
     base_url: String,
     http: reqwest::Client,
+    token: Option<String>,
 }
 
 impl DaemonClient {
@@ -167,17 +182,35 @@ impl DaemonClient {
     /// Create a client with a caller-provided HTTP client.
     pub fn with_client(base_url: impl Into<String>, http: reqwest::Client) -> Self {
         let base_url = base_url.into().trim_end_matches('/').to_string();
-        Self { base_url, http }
+        Self {
+            base_url,
+            http,
+            token: None,
+        }
+    }
+
+    /// Attach a bearer token, sent on every request. Required when the daemon
+    /// runs with `MOFA_API_TOKEN` set.
+    pub fn with_token(mut self, token: impl Into<String>) -> Self {
+        self.token = Some(token.into());
+        self
     }
 
     fn url(&self, path: &str) -> String {
         format!("{}/{}", self.base_url, path.trim_start_matches('/'))
     }
 
+    /// Attach the bearer token to a request builder when one is configured.
+    fn authed(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.token {
+            Some(token) => rb.bearer_auth(token),
+            None => rb,
+        }
+    }
+
     async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
         let resp = self
-            .http
-            .get(self.url(path))
+            .authed(self.http.get(self.url(path)))
             .send()
             .await
             .map_err(|e| ClientError::Transport(e.to_string()))?;
@@ -187,16 +220,23 @@ impl DaemonClient {
     async fn decode<T: serde::de::DeserializeOwned>(
         resp: reqwest::Response,
     ) -> Result<T, ClientError> {
-        if resp.status().is_success() {
-            resp.json::<T>()
+        let status = resp.status();
+        if status.is_success() {
+            return resp
+                .json::<T>()
                 .await
-                .map_err(|e| ClientError::Decode(e.to_string()))
-        } else {
-            // Error responses carry a structured ErrorInfo body.
-            match resp.json::<ErrorInfo>().await {
-                Ok(info) => Err(ClientError::Engine(info)),
-                Err(e) => Err(ClientError::Decode(e.to_string())),
-            }
+                .map_err(|e| ClientError::Decode(e.to_string()));
+        }
+        // Read the body once, then prefer a structured ErrorInfo; fall back to a
+        // status-bearing error for framework responses (401/404/413/…) so the
+        // status and reason are not lost.
+        let body = resp.text().await.unwrap_or_default();
+        match serde_json::from_str::<ErrorInfo>(&body) {
+            Ok(info) => Err(ClientError::Engine(info)),
+            Err(_) => Err(ClientError::Status {
+                status: status.as_u16(),
+                body,
+            }),
         }
     }
 
@@ -236,9 +276,7 @@ impl DaemonClient {
         request: &InferenceRequest,
     ) -> Result<InferenceResponse, ClientError> {
         let resp = self
-            .http
-            .post(self.url("/v1/invoke"))
-            .json(request)
+            .authed(self.http.post(self.url("/v1/invoke")).json(request))
             .send()
             .await
             .map_err(|e| ClientError::Transport(e.to_string()))?;
@@ -248,8 +286,7 @@ impl DaemonClient {
     /// `POST /v1/discovery/refresh`
     pub async fn refresh(&self) -> Result<EngineStatus, ClientError> {
         let resp = self
-            .http
-            .post(self.url("/v1/discovery/refresh"))
+            .authed(self.http.post(self.url("/v1/discovery/refresh")))
             .send()
             .await
             .map_err(|e| ClientError::Transport(e.to_string()))?;
@@ -325,5 +362,23 @@ mod tests {
         let client = DaemonClient::new("http://localhost:8420/");
         assert_eq!(client.url("/v1/status"), "http://localhost:8420/v1/status");
         assert_eq!(client.url("v1/status"), "http://localhost:8420/v1/status");
+    }
+
+    #[test]
+    fn with_token_is_retained_and_url_unaffected() {
+        let client = DaemonClient::new("http://localhost:8420").with_token("secret");
+        assert_eq!(client.token.as_deref(), Some("secret"));
+        assert_eq!(client.url("/v1/status"), "http://localhost:8420/v1/status");
+    }
+
+    #[test]
+    fn client_error_status_preserves_code_and_body() {
+        let err = ClientError::Status {
+            status: 401,
+            body: "unauthorized".into(),
+        };
+        assert!(err.to_string().contains("401"));
+        assert!(err.to_string().contains("unauthorized"));
+        assert!(err.engine_error().is_none());
     }
 }

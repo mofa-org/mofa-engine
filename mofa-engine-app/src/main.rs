@@ -33,6 +33,23 @@ struct DaemonArgs {
     /// Base URL of the running engine daemon.
     #[arg(long, default_value = "http://127.0.0.1:8420")]
     url: String,
+    /// Bearer token for a secured daemon (defaults to $MOFA_API_TOKEN).
+    #[arg(long)]
+    token: Option<String>,
+}
+
+/// Build a daemon client from the shared args, taking the bearer token from
+/// `--token` or, failing that, `$MOFA_API_TOKEN`.
+fn daemon_client(args: DaemonArgs) -> DaemonClient {
+    let token = args
+        .token
+        .or_else(|| std::env::var("MOFA_API_TOKEN").ok())
+        .filter(|t| !t.is_empty());
+    let client = DaemonClient::new(args.url);
+    match token {
+        Some(t) => client.with_token(t),
+        None => client,
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -97,9 +114,9 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         None | Some(Command::Serve) => serve(cli.config, cli.port).await,
         Some(Command::ValidateConfig) => validate_config(cli.config),
-        Some(Command::Capabilities(d)) => print_json(DaemonClient::new(d.url).capabilities().await),
-        Some(Command::Status(d)) => print_json(DaemonClient::new(d.url).status().await),
-        Some(Command::Refresh(d)) => print_json(DaemonClient::new(d.url).refresh().await),
+        Some(Command::Capabilities(d)) => print_json(daemon_client(d).capabilities().await),
+        Some(Command::Status(d)) => print_json(daemon_client(d).status().await),
+        Some(Command::Refresh(d)) => print_json(daemon_client(d).refresh().await),
         Some(Command::Invoke {
             daemon,
             capability,
@@ -121,7 +138,7 @@ async fn main() -> anyhow::Result<()> {
                 hint_next: None,
                 request_id: String::new(),
             };
-            print_json(DaemonClient::new(daemon.url).invoke(&request).await)
+            print_json(daemon_client(daemon).invoke(&request).await)
         }
     }
 }
