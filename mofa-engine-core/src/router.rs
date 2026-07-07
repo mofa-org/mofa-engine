@@ -38,13 +38,34 @@ pub struct Router;
 
 impl Router {
     /// Score and rank models, returning the best match and reason.
+    ///
+    /// Equivalent to the first entry of [`route_ranked`] with no memory budget.
     pub fn route<'a>(
         models: &'a [ModelCard],
         request: &InferenceRequest,
         providers: &[RoutingProvider],
     ) -> Option<RouteDecision<'a>> {
+        Self::route_ranked(models, request, providers, None)
+            .into_iter()
+            .next()
+    }
+
+    /// Apply hard constraints, then score and rank every valid candidate,
+    /// best first. The engine uses the same ordered plan for both primary
+    /// selection and failover so the two never diverge.
+    ///
+    /// `budget_bytes` enables a static memory-feasibility filter: a local model
+    /// whose estimated footprint exceeds the entire budget can never be admitted
+    /// even after evicting everything else, so it is dropped here rather than
+    /// failing later at load time. Pass `None` to skip this filter.
+    pub fn route_ranked<'a>(
+        models: &'a [ModelCard],
+        request: &InferenceRequest,
+        providers: &[RoutingProvider],
+        budget_bytes: Option<u64>,
+    ) -> Vec<RouteDecision<'a>> {
         let desired_cap = request.capability;
-        let mut best: Option<RouteDecision<'a>> = None;
+        let mut decisions: Vec<RouteDecision<'a>> = Vec::new();
 
         for model in models {
             if !Self::matches_model_name(model, request.model.as_deref()) {
@@ -69,7 +90,13 @@ impl Router {
                 continue;
             }
 
-            if !model.execution.has_capacity() {
+            // Static memory feasibility: a local model that cannot fit the budget
+            // even on an empty device is never a viable candidate. Remote models
+            // report a zero footprint and are unaffected.
+            if let Some(budget) = budget_bytes
+                && model.residency != ModelResidency::Remote
+                && model.memory_estimate_bytes > budget
+            {
                 continue;
             }
 
@@ -79,26 +106,22 @@ impl Router {
             }
 
             let reason = Self::reason(model, provider, score);
-            let decision = RouteDecision {
+            decisions.push(RouteDecision {
                 model,
                 score,
                 reason,
-            };
-
-            match &best {
-                None => best = Some(decision),
-                Some(current) if decision.score > current.score => best = Some(decision),
-                Some(current)
-                    if decision.score == current.score
-                        && Self::tie_breaks_before(model, current.model) =>
-                {
-                    best = Some(decision);
-                }
-                _ => {}
-            }
+            });
         }
 
-        best
+        // Highest score first; ties resolved toward already-resident models, then
+        // by canonical id for a fully deterministic, stable ordering.
+        decisions.sort_by(|a, b| {
+            b.score
+                .cmp(&a.score)
+                .then_with(|| Self::residency_rank(b.model).cmp(&Self::residency_rank(a.model)))
+                .then_with(|| a.model.id.cmp(&b.model.id))
+        });
+        decisions
     }
 
     /// Compatibility helper returning just the selected model.
@@ -108,6 +131,15 @@ impl Router {
         providers: &[RoutingProvider],
     ) -> Option<&'a ModelCard> {
         Self::route(models, request, providers).map(|d| d.model)
+    }
+
+    /// Tie-break rank: resident models (loaded locally or cloud-backed) rank
+    /// above those that would require a cold start.
+    fn residency_rank(model: &ModelCard) -> u8 {
+        u8::from(matches!(
+            model.residency,
+            ModelResidency::Loaded | ModelResidency::Remote
+        ))
     }
 
     fn matches_model_name(model: &ModelCard, target: Option<&str>) -> bool {
@@ -172,11 +204,7 @@ impl Router {
     }
 
     fn locality_score(kind: ProviderKind) -> i64 {
-        match kind {
-            ProviderKind::Ollama => 100,
-            ProviderKind::OpenAiCompatible => 0,
-            _ => 0,
-        }
+        if kind.is_local() { 100 } else { 0 }
     }
 
     fn cost_score(tier: CostTier) -> i64 {
@@ -198,7 +226,9 @@ impl Router {
     }
 
     fn priority_score(priority: u8) -> i64 {
-        100_i64.saturating_sub(priority as i64)
+        // Lower configured priority is preferred; floor at 0 so a priority above
+        // 100 cannot contribute a negative term to the score.
+        (100_i64 - priority as i64).max(0)
     }
 
     fn health_score(health: BackendHealth) -> i64 {
@@ -214,18 +244,6 @@ impl Router {
             .execution
             .max_concurrency
             .saturating_sub(model.execution.active_requests) as i64
-    }
-
-    fn tie_breaks_before(candidate: &ModelCard, current: &ModelCard) -> bool {
-        let candidate_loaded = matches!(
-            candidate.residency,
-            ModelResidency::Loaded | ModelResidency::Remote
-        );
-        let current_loaded = matches!(
-            current.residency,
-            ModelResidency::Loaded | ModelResidency::Remote
-        );
-        candidate_loaded && !current_loaded
     }
 
     fn reason(model: &ModelCard, provider: &RoutingProvider, score: i64) -> String {
@@ -288,6 +306,51 @@ mod tests {
             hint_next: None,
             request_id: "test".into(),
         }
+    }
+
+    #[test]
+    #[ignore = "timing-sensitive perf guard; run explicitly with `--ignored` or as a benchmark"]
+    fn routing_decision_meets_latency_target() {
+        // RFC budget: a scheduling decision should take < 1ms (excluding load).
+        // Wall-clock assertions are sensitive to CI host load, so this is a
+        // perf guard run on demand rather than a gating unit test.
+        // Build a realistic pool: three providers, several models each.
+        let providers = vec![
+            provider("ollama", ProviderKind::Ollama, 1),
+            provider("openai", ProviderKind::OpenAiCompatible, 10),
+            provider("deepseek", ProviderKind::OpenAiCompatible, 8),
+        ];
+        let mut models = Vec::new();
+        for (prov, count) in [("ollama", 8), ("openai", 6), ("deepseek", 6)] {
+            for i in 0..count {
+                models.push(make_model(
+                    &format!("m{i}"),
+                    prov,
+                    Capability::Chat,
+                    if i % 2 == 0 {
+                        ModelResidency::Unloaded
+                    } else {
+                        ModelResidency::Loaded
+                    },
+                    CostTier::Low,
+                ));
+            }
+        }
+        let req = request(Capability::Chat, None);
+        let budget = Some(16 * 1024 * 1024 * 1024);
+
+        let iterations = 2000;
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            let plan = Router::route_ranked(&models, &req, &providers, budget);
+            std::hint::black_box(&plan);
+        }
+        let avg = start.elapsed() / iterations;
+        assert!(
+            avg < std::time::Duration::from_millis(1),
+            "routing averaged {avg:?}/decision over {} models, exceeding the 1ms target",
+            models.len()
+        );
     }
 
     #[test]
@@ -391,6 +454,90 @@ mod tests {
             .unwrap()
             .model;
         assert_eq!(selected.name, "b");
+    }
+
+    #[test]
+    fn route_ranked_orders_local_before_cloud() {
+        let models = vec![
+            make_model(
+                "cloud",
+                "openai",
+                Capability::Chat,
+                ModelResidency::Remote,
+                CostTier::High,
+            ),
+            make_model(
+                "local",
+                "ollama",
+                Capability::Chat,
+                ModelResidency::Loaded,
+                CostTier::Free,
+            ),
+        ];
+        let providers = vec![
+            provider("openai", ProviderKind::OpenAiCompatible, 10),
+            provider("ollama", ProviderKind::Ollama, 1),
+        ];
+        let ranked =
+            Router::route_ranked(&models, &request(Capability::Chat, None), &providers, None);
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].model.name, "local");
+        assert_eq!(ranked[1].model.name, "cloud");
+        // Scores are strictly ordered best-first.
+        assert!(ranked[0].score >= ranked[1].score);
+    }
+
+    #[test]
+    fn route_ranked_filters_models_larger_than_budget() {
+        let mut big = make_model(
+            "big",
+            "ollama",
+            Capability::Chat,
+            ModelResidency::Unloaded,
+            CostTier::Free,
+        );
+        big.memory_estimate_bytes = 32 * 1024 * 1024 * 1024; // 32 GB
+        let small = make_model(
+            "small",
+            "ollama",
+            Capability::Chat,
+            ModelResidency::Unloaded,
+            CostTier::Free,
+        );
+        let models = vec![big, small];
+        let providers = vec![provider("ollama", ProviderKind::Ollama, 1)];
+
+        let budget = Some(8 * 1024 * 1024 * 1024); // 8 GB
+        let ranked = Router::route_ranked(
+            &models,
+            &request(Capability::Chat, None),
+            &providers,
+            budget,
+        );
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].model.name, "small");
+    }
+
+    #[test]
+    fn route_ranked_budget_does_not_filter_remote() {
+        let mut cloud = make_model(
+            "cloud",
+            "openai",
+            Capability::Chat,
+            ModelResidency::Remote,
+            CostTier::High,
+        );
+        // A nonsensical estimate must not exclude a cloud model, which holds no local memory.
+        cloud.memory_estimate_bytes = u64::MAX;
+        let models = vec![cloud];
+        let providers = vec![provider("openai", ProviderKind::OpenAiCompatible, 10)];
+        let ranked = Router::route_ranked(
+            &models,
+            &request(Capability::Chat, None),
+            &providers,
+            Some(1024),
+        );
+        assert_eq!(ranked.len(), 1);
     }
 
     #[test]

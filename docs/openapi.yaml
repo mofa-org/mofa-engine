@@ -2,7 +2,10 @@ openapi: 3.1.0
 info:
   title: MoFA Engine API
   version: 0.1.0
-  description: Compatibility API for the Stage 0-2 engine baseline.
+  description: >-
+    MoFA Engine HTTP API. Covers the Stage 0-2 baseline plus the Stage 3-5
+    additions: deterministic routing with failover, reservation-based memory and
+    lifecycle, and Preflight (hint/subscription/history) warming.
 paths:
   /health:
     get:
@@ -74,6 +77,185 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorInfo"
+  /v1/invoke/stream:
+    post:
+      summary: Invoke a model and stream typed output as Server-Sent Events
+      description: >
+        Streams the response as SSE. Each `data:` line is a JSON StreamChunk: a
+        `started` event, then zero or more `text` deltas, then a terminal
+        `completed` or `error`. Errors after the stream opens are delivered
+        in-band as an `error` chunk (HTTP status is 200 once streaming begins),
+        so clients handle success and failure through one channel. The interface
+        is versioned and supports a non-streaming compatibility mode, in which a
+        backend emits `started`, a single full-text `text` chunk, then
+        `completed`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InferenceRequest"
+      responses:
+        "200":
+          description: A Server-Sent Events stream of StreamChunk objects.
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/StreamChunk"
+  /v1/memory:
+    get:
+      summary: Current memory accounting (budget, reservations, leases)
+      responses:
+        "200":
+          description: Memory report.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryReport"
+  /v1/lifecycle:
+    get:
+      summary: Rolling model lifecycle history (load/unload/evict)
+      responses:
+        "200":
+          description: Lifecycle records, oldest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LifecycleRecord"
+  /v1/preflight:
+    get:
+      summary: Preflight effectiveness counters
+      responses:
+        "200":
+          description: Preflight statistics.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PreflightStats"
+  /v1/subscriptions:
+    get:
+      summary: List active capability subscriptions
+      responses:
+        "200":
+          description: Active subscriptions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SubscriptionInfo"
+    post:
+      summary: Create a capability subscription (kept warm + eviction-protected)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubscribeRequest"
+      responses:
+        "200":
+          description: Subscription created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: integer
+        "400":
+          description: Empty or invalid capability list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorInfo"
+  /v1/subscriptions/{id}:
+    delete:
+      summary: Remove a capability subscription
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Subscription removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  removed:
+                    type: boolean
+        "404":
+          description: No such subscription.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  removed:
+                    type: boolean
+  /v1/models/load:
+    post:
+      summary: Manually load (warm) a model
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelActionRequest"
+      responses:
+        "200":
+          description: Model loaded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelActionResponse"
+        "400":
+          description: Unknown or busy model.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorInfo"
+  /v1/models/unload:
+    post:
+      summary: Manually unload a model
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelActionRequest"
+      responses:
+        "200":
+          description: Model unloaded (or was not known).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelActionResponse"
+        "400":
+          description: Model is busy and cannot be unloaded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorInfo"
+  /metrics:
+    get:
+      summary: Prometheus text-exposition metrics
+      description: >
+        Bounded-cardinality engine metrics (requests, failures, fallback,
+        load/unload/eviction counters, a request-latency histogram, and memory /
+        model / provider gauges). Public — not behind the `/v1` auth gate.
+      responses:
+        "200":
+          description: Prometheus exposition text.
+          content:
+            text/plain:
+              schema:
+                type: string
 components:
   schemas:
     InferenceRequest:
@@ -135,6 +317,55 @@ components:
           type: boolean
         routing_reason:
           type: [string, "null"]
+    StreamChunk:
+      description: >
+        One event in a streaming response, discriminated by `type`. Serialized
+        as internally-tagged JSON.
+      oneOf:
+        - type: object
+          required: [type, request_id, model_used, provider]
+          properties:
+            type: { const: started }
+            request_id: { type: string }
+            model_used: { type: string }
+            provider: { type: string }
+        - type: object
+          required: [type, delta]
+          properties:
+            type: { const: text }
+            delta: { type: string }
+        - type: object
+          required: [type, duration_ms, fallback_used]
+          properties:
+            type: { const: completed }
+            duration_ms: { type: integer }
+            tokens_used: { type: [integer, "null"] }
+            file: { type: [string, "null"] }
+            fallback_used: { type: boolean }
+            routing_reason: { type: [string, "null"] }
+        - type: object
+          required: [type, code, message, retryable]
+          properties:
+            type: { const: error }
+            code: { type: string }
+            message: { type: string }
+            retryable: { type: boolean }
+            source: { type: [string, "null"] }
+    ModelActionRequest:
+      type: object
+      required: [model_id]
+      properties:
+        model_id:
+          type: string
+          description: Canonical model id (`provider/model`).
+    ModelActionResponse:
+      type: object
+      required: [model_id, changed]
+      properties:
+        model_id:
+          type: string
+        changed:
+          type: boolean
     ErrorInfo:
       type: object
       required: [code, message, retryable]
@@ -147,3 +378,91 @@ components:
           type: boolean
         source:
           type: string
+    AllocationSnapshot:
+      type: object
+      properties:
+        model_id:
+          type: string
+        reserved_bytes:
+          type: integer
+        observed_bytes:
+          type: [integer, "null"]
+        leases:
+          type: integer
+    MemoryReport:
+      type: object
+      properties:
+        used_bytes:
+          type: integer
+        budget_bytes:
+          type: integer
+        available_bytes:
+          type: integer
+        allocations:
+          type: array
+          items:
+            $ref: "#/components/schemas/AllocationSnapshot"
+    LifecycleRecord:
+      type: object
+      properties:
+        seq:
+          type: integer
+        at_ms:
+          type: integer
+          description: Milliseconds since engine start (monotonic).
+        model_id:
+          type: string
+        event:
+          type: string
+          description: load, unload, evict, idle_unload, load_failed, etc.
+        detail:
+          type: [string, "null"]
+    PreflightStats:
+      type: object
+      properties:
+        warms_started:
+          type: integer
+        warms_completed:
+          type: integer
+        warms_failed:
+          type: integer
+        warms_skipped:
+          type: integer
+        predictions:
+          type: integer
+        hits:
+          type: integer
+        misses:
+          type: integer
+    SubscriptionInfo:
+      type: object
+      properties:
+        id:
+          type: integer
+        app_id:
+          type: [string, "null"]
+        session_id:
+          type: [string, "null"]
+        capabilities:
+          type: array
+          items:
+            type: string
+            enum: [chat, tts, asr, image_gen, video_gen, vlm, embedding]
+        expires_in_secs:
+          type: [integer, "null"]
+    SubscribeRequest:
+      type: object
+      required: [capabilities]
+      properties:
+        app_id:
+          type: string
+        session_id:
+          type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+            enum: [chat, tts, asr, image_gen, video_gen, vlm, embedding]
+        ttl_secs:
+          type: integer
+          description: Optional lifetime in seconds; omitted means until removed.

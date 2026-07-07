@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Top-level engine configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EngineConfig {
     /// Network listen settings
     #[serde(default)]
@@ -19,9 +19,56 @@ pub struct EngineConfig {
     /// Memory management settings
     #[serde(default)]
     pub memory: MemoryConfig,
+    /// Operation timeout settings
+    #[serde(default)]
+    pub timeouts: TimeoutConfig,
+    /// Preflight (predictive warming) settings
+    #[serde(default)]
+    pub preflight: PreflightConfig,
+    /// Generated-artifact retention settings
+    #[serde(default)]
+    pub artifacts: ArtifactConfig,
+    /// Security and file-access settings
+    #[serde(default)]
+    pub security: SecurityConfig,
     /// Provider definitions
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
+}
+
+/// Retention policy for engine-generated artifacts (e.g. TTS audio files).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactConfig {
+    /// Directory scanned for cleanup (default: the system temp dir).
+    #[serde(default)]
+    pub dir: Option<String>,
+    /// Delete engine artifacts older than this many seconds. `0` disables the
+    /// background sweep (artifacts are then the caller's responsibility).
+    #[serde(default = "default_artifact_retention")]
+    pub retention_secs: u64,
+}
+
+impl Default for ArtifactConfig {
+    fn default() -> Self {
+        Self {
+            dir: None,
+            retention_secs: default_artifact_retention(),
+        }
+    }
+}
+
+fn default_artifact_retention() -> u64 {
+    3600
+}
+
+/// Security and file-access constraints.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SecurityConfig {
+    /// Allowlist of directory roots that request `input_file` paths must fall
+    /// under. Empty (the default) allows any local path — appropriate only for a
+    /// trusted single-user machine.
+    #[serde(default)]
+    pub input_roots: Vec<String>,
 }
 
 /// Network listen configuration.
@@ -75,6 +122,142 @@ fn default_idle_timeout() -> u64 {
     120
 }
 
+/// Timeouts for the distinct phases of a request, all in seconds.
+///
+/// These bound the time spent waiting in the admission queue, loading a model,
+/// running inference, and the request as a whole, plus the per-provider
+/// discovery and health probes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeoutConfig {
+    /// Overall budget for a single `invoke`, spanning queueing, loading, and
+    /// inference across every candidate attempted.
+    #[serde(default = "default_request_timeout")]
+    pub request_secs: u64,
+    /// Maximum time a request may wait for a concurrency permit before failing.
+    #[serde(default = "default_queue_timeout")]
+    pub queue_secs: u64,
+    /// Maximum time to load/warm a single model.
+    #[serde(default = "default_load_timeout")]
+    pub load_secs: u64,
+    /// Maximum time for a single inference call to a provider.
+    #[serde(default = "default_inference_timeout")]
+    pub inference_secs: u64,
+    /// Maximum time for a single provider discovery probe.
+    #[serde(default = "default_discovery_timeout")]
+    pub discovery_secs: u64,
+    /// Maximum time for a single provider health probe.
+    #[serde(default = "default_health_timeout")]
+    pub health_secs: u64,
+}
+
+impl Default for TimeoutConfig {
+    fn default() -> Self {
+        Self {
+            request_secs: default_request_timeout(),
+            queue_secs: default_queue_timeout(),
+            load_secs: default_load_timeout(),
+            inference_secs: default_inference_timeout(),
+            discovery_secs: default_discovery_timeout(),
+            health_secs: default_health_timeout(),
+        }
+    }
+}
+
+impl TimeoutConfig {
+    /// Overall request budget as a `Duration`.
+    pub fn request(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.request_secs)
+    }
+    /// Queue-wait budget as a `Duration`.
+    pub fn queue(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.queue_secs)
+    }
+    /// Load budget as a `Duration`.
+    pub fn load(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.load_secs)
+    }
+    /// Inference budget as a `Duration`.
+    pub fn inference(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.inference_secs)
+    }
+    /// Discovery probe budget as a `Duration`.
+    pub fn discovery(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.discovery_secs)
+    }
+    /// Health probe budget as a `Duration`.
+    pub fn health(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.health_secs)
+    }
+}
+
+fn default_request_timeout() -> u64 {
+    240
+}
+fn default_queue_timeout() -> u64 {
+    30
+}
+fn default_load_timeout() -> u64 {
+    60
+}
+fn default_inference_timeout() -> u64 {
+    180
+}
+fn default_discovery_timeout() -> u64 {
+    8
+}
+fn default_health_timeout() -> u64 {
+    5
+}
+
+/// Preflight (predictive warming) configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreflightConfig {
+    /// Master switch for all predictive warming.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Whether the engine learns capability transition history.
+    #[serde(default = "default_true")]
+    pub history_learning: bool,
+    /// Whether the engine speculatively warms models from hints/history/subscriptions.
+    #[serde(default = "default_true")]
+    pub speculative_warming: bool,
+    /// Minimum confidence (0.0–1.0) a history prediction needs before it warms a model.
+    #[serde(default = "default_confidence_threshold")]
+    pub confidence_threshold: f64,
+    /// Minimum number of observed transitions before history is trusted.
+    #[serde(default = "default_min_samples")]
+    pub min_samples: u64,
+    /// Default lifetime of a capability subscription, in seconds.
+    #[serde(default = "default_subscription_ttl")]
+    pub subscription_ttl_secs: u64,
+}
+
+impl Default for PreflightConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            history_learning: default_true(),
+            speculative_warming: default_true(),
+            confidence_threshold: default_confidence_threshold(),
+            min_samples: default_min_samples(),
+            subscription_ttl_secs: default_subscription_ttl(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_confidence_threshold() -> f64 {
+    0.6
+}
+fn default_min_samples() -> u64 {
+    3
+}
+fn default_subscription_ttl() -> u64 {
+    3600
+}
+
 /// Configuration for a single provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
@@ -98,6 +281,43 @@ pub struct ProviderConfig {
     /// Whether this provider is enabled
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Program to execute for a `local_tts` process-adapter backend.
+    ///
+    /// Only used when `kind = "local_tts"`. The engine runs this command once
+    /// per synthesis, substituting placeholders in `args`.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Argument template for a `local_tts` command. Each element may contain the
+    /// placeholders `{text}` (input text), `{text_file}` (path to a temp file
+    /// holding the input text), and `{output}` (path the command must write
+    /// audio to).
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Output audio container/extension for `local_tts` artifacts (default `wav`).
+    #[serde(default)]
+    pub output_format: Option<String>,
+    /// Directory for `local_tts` audio artifacts (default: the system temp dir).
+    #[serde(default)]
+    pub output_dir: Option<String>,
+}
+
+impl Default for ProviderConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            kind: String::new(),
+            base_url: String::new(),
+            api_key: None,
+            priority: default_priority(),
+            cost_tier: default_cost_tier(),
+            models: Vec::new(),
+            enabled: default_enabled(),
+            command: None,
+            args: Vec::new(),
+            output_format: None,
+            output_dir: None,
+        }
+    }
 }
 
 fn default_priority() -> u8 {
@@ -192,6 +412,22 @@ impl EngineConfig {
 
     /// Validate configuration before constructing the engine.
     pub fn validate(&self) -> Result<(), EngineError> {
+        if !(0.0..=1.0).contains(&self.preflight.confidence_threshold) {
+            return Err(EngineError::Config(format!(
+                "preflight.confidence_threshold must be within 0.0..=1.0, got {}",
+                self.preflight.confidence_threshold
+            )));
+        }
+        // Each configured allowlist root must resolve. Otherwise a typo would be
+        // silently dropped, leaving an *empty* allowlist that permits every path
+        // — a security downgrade rather than the intended restriction.
+        for root in &self.security.input_roots {
+            if std::fs::canonicalize(root).is_err() {
+                return Err(EngineError::Config(format!(
+                    "security.input_roots entry '{root}' does not exist or cannot be resolved"
+                )));
+            }
+        }
         for provider in &self.providers {
             if !provider.enabled {
                 continue;
@@ -204,6 +440,20 @@ impl EngineConfig {
                     "provider '{}' requires a non-empty api_key",
                     provider.name
                 )));
+            }
+            if provider.kind == "local_tts" {
+                if provider.command.as_deref().unwrap_or_default().is_empty() {
+                    return Err(EngineError::Config(format!(
+                        "provider '{}' (local_tts) requires a non-empty command",
+                        provider.name
+                    )));
+                }
+                if provider.models.is_empty() {
+                    return Err(EngineError::Config(format!(
+                        "provider '{}' (local_tts) must declare at least one model",
+                        provider.name
+                    )));
+                }
             }
             for model in &provider.models {
                 if mofa_kernel::Capability::from_str_loose(&model.capability).is_none() {
@@ -231,6 +481,7 @@ impl EngineConfig {
             cost_tier: "free".into(),
             models: vec![],
             enabled: true,
+            ..Default::default()
         });
 
         // OpenAI
@@ -275,6 +526,7 @@ impl EngineConfig {
                     },
                 ],
                 enabled: true,
+                ..Default::default()
             });
         }
 
@@ -302,6 +554,7 @@ impl EngineConfig {
                     },
                 ],
                 enabled: true,
+                ..Default::default()
             });
         }
 
@@ -335,6 +588,7 @@ impl EngineConfig {
                     },
                 ],
                 enabled: true,
+                ..Default::default()
             });
         }
 
@@ -354,6 +608,7 @@ impl EngineConfig {
                     memory_mb: None,
                 }],
                 enabled: true,
+                ..Default::default()
             });
         }
 
@@ -373,6 +628,7 @@ impl EngineConfig {
                     memory_mb: None,
                 }],
                 enabled: true,
+                ..Default::default()
             });
         }
 
@@ -392,12 +648,17 @@ impl EngineConfig {
                     memory_mb: None,
                 }],
                 enabled: true,
+                ..Default::default()
             });
         }
 
         EngineConfig {
             listen: ListenConfig::default(),
             memory: MemoryConfig::default(),
+            timeouts: TimeoutConfig::default(),
+            preflight: PreflightConfig::default(),
+            artifacts: ArtifactConfig::default(),
+            security: SecurityConfig::default(),
             providers,
         }
     }
@@ -421,6 +682,7 @@ impl ProviderConfig {
         match self.kind.as_str() {
             "ollama" => Ok(ProviderKind::Ollama),
             "openai_compatible" => Ok(ProviderKind::OpenAiCompatible),
+            "local_tts" => Ok(ProviderKind::LocalTts),
             other => Err(EngineError::Config(format!(
                 "unknown provider kind '{}' for provider '{}'",
                 other, self.name
@@ -472,6 +734,10 @@ mod tests {
         let cfg = EngineConfig {
             listen: ListenConfig::default(),
             memory: MemoryConfig::default(),
+            timeouts: TimeoutConfig::default(),
+            preflight: PreflightConfig::default(),
+            artifacts: ArtifactConfig::default(),
+            security: SecurityConfig::default(),
             providers: vec![ProviderConfig {
                 name: "test".into(),
                 kind: "ollama".into(),
@@ -481,6 +747,7 @@ mod tests {
                 cost_tier: "free".into(),
                 models: vec![],
                 enabled: true,
+                ..Default::default()
             }],
         };
         let toml_str = toml::to_string_pretty(&cfg).unwrap();
@@ -490,10 +757,45 @@ mod tests {
     }
 
     #[test]
+    fn example_config_is_valid() {
+        // The shipped example must always parse and validate so docs cannot drift.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../config.example.toml");
+        let content = std::fs::read_to_string(path).expect("config.example.toml should exist");
+        let cfg: EngineConfig = toml::from_str(&content).expect("example config should parse");
+        cfg.validate().expect("example config should validate");
+        assert!(cfg.providers.iter().any(|p| p.name == "ollama"));
+        assert_eq!(cfg.timeouts.queue_secs, 30);
+        assert!(cfg.preflight.enabled);
+    }
+
+    #[test]
+    fn timeout_and_preflight_defaults_apply_from_partial_toml() {
+        // A config that omits [timeouts] and [preflight] must still parse with defaults.
+        let cfg: EngineConfig = toml::from_str("[memory]\nbudget_mb = 1024\n").unwrap();
+        assert_eq!(cfg.timeouts.queue_secs, 30);
+        assert_eq!(cfg.timeouts.inference_secs, 180);
+        assert!(cfg.preflight.enabled);
+        assert!(cfg.preflight.speculative_warming);
+        assert_eq!(cfg.preflight.min_samples, 3);
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_confidence() {
+        let mut cfg = EngineConfig::from_env();
+        cfg.preflight.confidence_threshold = 1.5;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
     fn validate_rejects_unknown_provider_kind() {
         let cfg = EngineConfig {
             listen: ListenConfig::default(),
             memory: MemoryConfig::default(),
+            timeouts: TimeoutConfig::default(),
+            preflight: PreflightConfig::default(),
+            artifacts: ArtifactConfig::default(),
+            security: SecurityConfig::default(),
             providers: vec![ProviderConfig {
                 name: "bad".into(),
                 kind: "bad_kind".into(),
@@ -503,6 +805,7 @@ mod tests {
                 cost_tier: "free".into(),
                 models: vec![],
                 enabled: true,
+                ..Default::default()
             }],
         };
         assert!(cfg.validate().is_err());
