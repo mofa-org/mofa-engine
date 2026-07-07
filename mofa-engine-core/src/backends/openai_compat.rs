@@ -40,12 +40,15 @@ impl OpenAiCompatProvider {
         api_key: impl Into<String>,
         models: Vec<ModelDef>,
         cost_tier: CostTier,
-    ) -> Self {
+    ) -> Result<Self, EngineError> {
         Self::with_output_dir(name, base_url, api_key, models, cost_tier, None)
     }
 
     /// Create a provider, writing TTS artifacts into `output_dir` (or the system
     /// temp dir when `None`) so they land where the artifact sweeper looks.
+    ///
+    /// Fails (rather than panicking or silently dropping the configured
+    /// timeouts) if the system TLS/HTTP stack cannot build a client.
     pub fn with_output_dir(
         name: impl Into<String>,
         base_url: impl Into<String>,
@@ -53,16 +56,18 @@ impl OpenAiCompatProvider {
         models: Vec<ModelDef>,
         cost_tier: CostTier,
         output_dir: Option<String>,
-    ) -> Self {
-        // A failure here means the system TLS/HTTP stack is unusable, so fail
-        // loudly rather than falling back to a client without our timeouts.
+    ) -> Result<Self, EngineError> {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(120))
             .build()
-            .expect("failed to build HTTP client");
+            .map_err(|e| {
+                EngineError::Config(format!(
+                    "failed to build OpenAI-compatible HTTP client: {e}"
+                ))
+            })?;
 
-        Self {
+        Ok(Self {
             name: name.into(),
             base_url: base_url.into(),
             api_key: api_key.into(),
@@ -73,7 +78,7 @@ impl OpenAiCompatProvider {
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(std::env::temp_dir),
             client,
-        }
+        })
     }
 }
 
@@ -529,7 +534,8 @@ mod tests {
                 },
             ],
             CostTier::Medium,
-        );
+        )
+        .unwrap();
 
         let cards = provider.discover().await.unwrap();
         assert_eq!(cards.len(), 2);
@@ -542,7 +548,8 @@ mod tests {
 
     #[test]
     fn kind_is_openai_compat() {
-        let p = OpenAiCompatProvider::new("x", "https://example.com", "key", vec![], CostTier::Low);
+        let p = OpenAiCompatProvider::new("x", "https://example.com", "key", vec![], CostTier::Low)
+            .unwrap();
         assert_eq!(p.kind(), ProviderKind::OpenAiCompatible);
         assert_eq!(p.name(), "x");
     }

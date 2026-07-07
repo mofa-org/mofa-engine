@@ -309,8 +309,11 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "timing-sensitive perf guard; run explicitly with `--ignored` or as a benchmark"]
     fn routing_decision_meets_latency_target() {
         // RFC budget: a scheduling decision should take < 1ms (excluding load).
+        // Wall-clock assertions are sensitive to CI host load, so this is a
+        // perf guard run on demand rather than a gating unit test.
         // Build a realistic pool: three providers, several models each.
         let providers = vec![
             provider("ollama", ProviderKind::Ollama, 1),

@@ -87,7 +87,9 @@ impl ScopeChain {
     fn predict(&self, current: Capability, min_samples: u64) -> Option<Prediction> {
         let counts = self.transitions.get(&current)?;
         let total: f64 = counts.values().sum();
-        if (total as u64) < min_samples {
+        // Compare in f64: `total` may be fractional after decay, and a lossy
+        // cast to u64 would be an unnecessary truncation.
+        if total < min_samples as f64 {
             return None;
         }
         counts

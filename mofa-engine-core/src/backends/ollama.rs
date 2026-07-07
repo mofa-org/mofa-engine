@@ -25,21 +25,23 @@ pub struct OllamaProvider {
 
 impl OllamaProvider {
     /// Create a new Ollama provider.
-    pub fn new(name: impl Into<String>, base_url: impl Into<String>) -> Self {
-        // A build failure means the system TLS/HTTP stack is unusable; fail
-        // loudly rather than silently dropping the configured timeouts/no_proxy.
+    ///
+    /// Fails (rather than panicking or silently dropping the configured
+    /// timeouts/`no_proxy`) if the system TLS/HTTP stack cannot build a client,
+    /// so the engine surfaces a clean startup error instead of crashing.
+    pub fn new(name: impl Into<String>, base_url: impl Into<String>) -> Result<Self, EngineError> {
         let client = Client::builder()
             .no_proxy()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(180))
             .build()
-            .expect("failed to build HTTP client");
+            .map_err(|e| EngineError::Config(format!("failed to build Ollama HTTP client: {e}")))?;
 
-        Self {
+        Ok(Self {
             name: name.into(),
             base_url: base_url.into(),
             client,
-        }
+        })
     }
 
     async fn loaded_models(&self) -> HashSet<String> {
@@ -364,7 +366,7 @@ mod tests {
 
     #[test]
     fn provider_metadata() {
-        let p = OllamaProvider::new("test-ollama", "http://localhost:11434");
+        let p = OllamaProvider::new("test-ollama", "http://localhost:11434").unwrap();
         assert_eq!(p.kind(), ProviderKind::Ollama);
         assert_eq!(p.name(), "test-ollama");
         assert!(p.features().contains(&BackendFeature::Discovery));

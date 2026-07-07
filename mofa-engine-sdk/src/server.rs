@@ -120,6 +120,11 @@ fn build_app(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Maximum accepted length of a client-supplied `x-request-id`. A longer (or
+/// empty) value is replaced with a generated id so a caller cannot amplify log
+/// or allocation cost through the correlation header.
+const MAX_REQUEST_ID_LEN: usize = 128;
+
 /// Attach an `x-request-id` to every request/response and open a tracing span
 /// carrying it, so logs can be correlated across a single request.
 async fn correlation_middleware(req: Request, next: Next) -> Response {
@@ -127,6 +132,7 @@ async fn correlation_middleware(req: Request, next: Next) -> Response {
         .headers()
         .get(REQUEST_ID_HEADER)
         .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.is_empty() && v.len() <= MAX_REQUEST_ID_LEN)
         .map(str::to_owned)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
