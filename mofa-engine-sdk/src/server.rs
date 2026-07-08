@@ -26,20 +26,24 @@ use crate::dashboard;
 
 /// Shared application state.
 #[derive(Clone)]
+#[allow(dead_code)]
 struct AppState {
     engine: Arc<Engine>,
     started_at: std::time::Instant,
+    metrics: Option<Arc<tokio::sync::RwLock<mofa_observability::collector::MetricsState>>>,
 }
 
 /// Start the HTTP server.
 pub async fn start_server(
     engine: Arc<Engine>,
+    metrics: Option<Arc<tokio::sync::RwLock<mofa_observability::collector::MetricsState>>>,
     host: &str,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state = AppState {
         engine,
         started_at: std::time::Instant::now(),
+        metrics,
     };
 
     let app = Router::new()
@@ -47,6 +51,7 @@ pub async fn start_server(
         .route("/", get(dashboard_handler))
         // API routes
         .route("/health", get(health_handler))
+        .route("/metrics", get(metrics_handler))
         .route("/v1/capabilities", get(capabilities_handler))
         .route("/v1/invoke", post(invoke_handler))
         .route("/v1/status", get(status_handler))
@@ -138,6 +143,15 @@ async fn events_handler(
 
 async fn dashboard_handler() -> Html<&'static str> {
     Html(dashboard::DASHBOARD_HTML)
+}
+
+async fn metrics_handler(State(state): State<AppState>) -> Result<String, axum::http::StatusCode> {
+    if let Some(metrics_arc) = &state.metrics {
+        let guard = metrics_arc.read().await;
+        Ok(mofa_observability::prometheus::render(&guard))
+    } else {
+        Err(axum::http::StatusCode::SERVICE_UNAVAILABLE)
+    }
 }
 
 #[cfg(test)]
