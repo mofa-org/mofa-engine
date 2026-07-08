@@ -674,6 +674,7 @@ mod tests {
 
     fn minimal_config() -> EngineConfig {
         EngineConfig {
+            observability: Default::default(),
             listen: ListenConfig::default(),
             memory: MemoryConfig {
                 budget_mb: Some(100),
@@ -849,6 +850,7 @@ mod tests {
     #[tokio::test]
     async fn disabled_provider_is_skipped() {
         let config = EngineConfig {
+            observability: Default::default(),
             listen: ListenConfig::default(),
             memory: MemoryConfig {
                 budget_mb: Some(100),
