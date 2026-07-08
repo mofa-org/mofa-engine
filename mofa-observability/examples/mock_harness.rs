@@ -53,28 +53,57 @@ async fn simulate_engine_traffic(sender: EventSender) {
         memory_bytes: 800_000_000,
     })));
 
+    // Send an initial event to seed the memory budget for Grafana
+    sender.send_critical(EventEnvelope::now(EngineEvent::EvictionTriggered(
+        EvictionTriggered {
+            evicted_model: "init".into(),
+            memory_before_bytes: 0,
+            memory_after_bytes: 0,
+            budget_bytes: 16_000_000_000,
+        },
+    ))).await.expect("Failed to send init event");
+    let mut active_models = 2; // We pre-loaded 2 models
+    let mut current_memory = 4_000_000_000_u64;
+
     // Continuous event loop
     loop {
-        // Sleep between 50ms and 500ms to generate roughly 2-20 requests/sec.
         tokio::time::sleep(Duration::from_millis(rng.gen_range(50..500))).await;
 
-        let action = rng.gen_range(0..100);
+        let mut action = rng.gen_range(0..100);
         let selected_model = models.choose(&mut rng).unwrap();
+
+        let mem_size = rng.gen_range(500_000_000..2_500_000_000); // 0.5 - 2.5 GB
+
+        // Force eviction if we're hitting the ceiling
+        if action < 5 && current_memory + mem_size > 15_000_000_000 {
+            action = 5; // Convert to an unload/eviction
+        }
 
         match action {
             // 5% chance: Load a new model
             0..=4 => {
+                active_models += 1;
+                current_memory += mem_size;
                 sender.send(EventEnvelope::now(EngineEvent::ModelLoaded(ModelLoaded {
                     model_id: selected_model.0.into(),
                     backend: selected_model.1.into(),
                     capability: selected_model.2,
                     load_duration_ms: rng.gen_range(1000..5000),
-                    memory_bytes: rng.gen_range(500_000_000..8_000_000_000),
+                    memory_bytes: mem_size,
                 })));
             }
 
             // 5% chance: Unload a model
             5..=9 => {
+                if active_models == 0 {
+                    continue; // Can't unload what isn't there!
+                }
+                active_models -= 1;
+                
+                // Don't free more than we have
+                let freed = mem_size.min(current_memory);
+                current_memory -= freed;
+
                 let reason = match rng.gen_range(0..3) {
                     0 => UnloadReason::IdleTimeout,
                     1 => UnloadReason::Eviction,
@@ -84,7 +113,7 @@ async fn simulate_engine_traffic(sender: EventSender) {
                     ModelUnloaded {
                         model_id: selected_model.0.into(),
                         reason,
-                        memory_freed_bytes: rng.gen_range(500_000_000..8_000_000_000),
+                        memory_freed_bytes: freed,
                     },
                 )));
 
@@ -93,11 +122,11 @@ async fn simulate_engine_traffic(sender: EventSender) {
                     sender.send_critical(EventEnvelope::now(EngineEvent::EvictionTriggered(
                         EvictionTriggered {
                             evicted_model: selected_model.0.into(),
-                            memory_before_bytes: 15_000_000_000,
-                            memory_after_bytes: 12_000_000_000,
+                            memory_before_bytes: current_memory + freed,
+                            memory_after_bytes: current_memory,
                             budget_bytes: 16_000_000_000,
                         },
-                    ))).await.expect("Failed to send critical event");
+                    ))).await.expect("Failed to send eviction event");
                 }
             }
 
@@ -239,14 +268,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/metrics", get(metrics_handler))
         .with_state(state);
 
-    let port = 9090;
+    let port = 9092;
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     println!("=======================================================");
-    println!("🚀 Mock Harness Running!");
-    println!("📊 Prometheus Endpoint: http://localhost:{}/metrics", port);
-    println!("   Try running: curl http://localhost:{}/metrics", port);
+    println!("Mock Harness Running!");
+    println!("Prometheus Endpoint: http://localhost:{}/metrics", port);
+    println!("Try running: curl -s http://localhost:{}/metrics | grep \"^mofa_\"", port);
     println!("=======================================================");
 
     axum::serve(listener, app).await?;

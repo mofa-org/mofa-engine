@@ -472,9 +472,9 @@ impl MetricsState {
 
                 // Reconcile memory gauge against the absolute post-eviction value.
                 // This corrects any cumulative drift caused by dropped ModelUnloaded
-                // events under channel backpressure. The running sum is replaced with
                 // the authoritative value from the eviction subsystem.
                 self.memory_used_bytes.set(Labels::new(), e.memory_after_bytes as f64);
+                self.memory_budget_bytes.set(Labels::new(), e.budget_bytes as f64);
             }
 
             EngineEvent::PreflightSignal(e) => {
@@ -573,6 +573,7 @@ impl EventSender {
 
     /// Send a critical event synchronously. If the channel is full, this will block
     /// the current thread. Must not be called from within an async runtime context.
+    #[allow(clippy::result_large_err)]
     pub fn send_blocking(&self, event: EventEnvelope) -> Result<(), mpsc::error::SendError<EventEnvelope>> {
         self.tx.blocking_send(event)
     }
@@ -672,6 +673,20 @@ impl MetricsCollector {
             }
         }
     }
+}
+
+/// Initialize the observability pipeline.
+/// Spawns the collector loop and returns the shared state and event sender.
+pub fn init_pipeline(_otlp_endpoint: Option<&str>) -> (Arc<RwLock<MetricsState>>, EventSender) {
+    let (sender, receiver) = create_event_channel(10000);
+    let collector_loop = MetricsCollector::new(receiver);
+    let state = collector_loop.state();
+    
+    tokio::spawn(async move {
+        collector_loop.run().await;
+    });
+
+    (state, sender)
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
