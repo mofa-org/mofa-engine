@@ -1,0 +1,20 @@
+[listen]
+host = "127.0.0.1"
+port = 8420
+
+[memory]
+budget_mb = 100
+idle_timeout_secs = 60
+
+[observability]
+enabled = true
+
+[[providers]]
+name = "test"
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:11435/v1"
+api_key = "dummy"
+
+[[providers.models]]
+name = "mock_chat"
+capability = "chat"
