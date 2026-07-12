@@ -275,6 +275,13 @@ components:
           type: string
           enum: [capability_only, disabled, allow_named]
           default: capability_only
+        locality:
+          type: string
+          enum: [auto, prefer_local, local_only]
+          default: auto
+          description: >
+            Routing locality guardrail. `local_only` restricts the request to
+            local backends (privacy); `prefer_local` ranks local ahead of cloud.
         messages:
           type: array
           items:
@@ -313,6 +320,13 @@ components:
           type: string
         tokens_used:
           type: [integer, "null"]
+        prompt_tokens:
+          type: [integer, "null"]
+        completion_tokens:
+          type: [integer, "null"]
+        cost_usd:
+          type: [number, "null"]
+          description: Estimated USD cost, if a price is configured for the provider.
         fallback_used:
           type: boolean
         routing_reason:
@@ -340,6 +354,9 @@ components:
             type: { const: completed }
             duration_ms: { type: integer }
             tokens_used: { type: [integer, "null"] }
+            prompt_tokens: { type: [integer, "null"] }
+            completion_tokens: { type: [integer, "null"] }
+            cost_usd: { type: [number, "null"] }
             file: { type: [string, "null"] }
             fallback_used: { type: boolean }
             routing_reason: { type: [string, "null"] }

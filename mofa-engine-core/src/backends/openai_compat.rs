@@ -110,6 +110,10 @@ struct ChatChoice {
 #[derive(Debug, Deserialize)]
 struct ChatUsage {
     total_tokens: Option<u32>,
+    #[serde(default)]
+    prompt_tokens: Option<u32>,
+    #[serde(default)]
+    completion_tokens: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -335,7 +339,10 @@ impl OpenAiCompatProvider {
             .and_then(|c| c.message.as_ref())
             .map(|m| m.content.clone());
 
-        let tokens = chat.usage.and_then(|u| u.total_tokens);
+        let (tokens, prompt_tokens, completion_tokens) = match chat.usage {
+            Some(u) => (u.total_tokens, u.prompt_tokens, u.completion_tokens),
+            None => (None, None, None),
+        };
         let duration_ms = start.elapsed().as_millis() as u64;
 
         Ok(InferenceResponse {
@@ -346,8 +353,11 @@ impl OpenAiCompatProvider {
             duration_ms,
             request_id: request.request_id.clone(),
             tokens_used: tokens,
+            prompt_tokens,
+            completion_tokens,
             fallback_used: false,
             routing_reason: None,
+            ..Default::default()
         })
     }
 
@@ -430,6 +440,7 @@ impl OpenAiCompatProvider {
             tokens_used: None,
             fallback_used: false,
             routing_reason: None,
+            ..Default::default()
         })
     }
 
@@ -505,6 +516,7 @@ impl OpenAiCompatProvider {
             tokens_used: None,
             fallback_used: false,
             routing_reason: None,
+            ..Default::default()
         })
     }
 }

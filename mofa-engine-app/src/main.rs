@@ -137,6 +137,7 @@ async fn main() -> anyhow::Result<()> {
                 params: serde_json::Value::Null,
                 hint_next: None,
                 request_id: String::new(),
+                ..Default::default()
             };
             print_json(daemon_client(daemon).invoke(&request).await)
         }

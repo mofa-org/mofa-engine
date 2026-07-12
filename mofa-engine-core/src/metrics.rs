@@ -7,9 +7,21 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use dashmap::DashMap;
+
 /// Upper bounds (in milliseconds) for the request-latency histogram buckets.
 /// The final `+Inf` bucket is implicit.
 const LATENCY_BUCKETS_MS: [u64; 8] = [50, 100, 250, 500, 1000, 2500, 5000, 10000];
+
+/// Per-provider token and cost aggregation (dual-track observability).
+#[derive(Default)]
+struct ProviderUsage {
+    prompt_tokens: AtomicU64,
+    completion_tokens: AtomicU64,
+    /// Accumulated cost in micro-USD (millionths of a dollar) to avoid float
+    /// atomics; rendered back to USD.
+    cost_micro_usd: AtomicU64,
+}
 
 /// Process-wide engine counters.
 #[derive(Default)]
@@ -25,6 +37,8 @@ pub struct EngineMetrics {
     evictions_total: AtomicU64,
     idle_unloads_total: AtomicU64,
     load_failures_total: AtomicU64,
+    /// Token/cost totals keyed by provider (bounded by the fixed provider set).
+    per_provider: DashMap<String, ProviderUsage>,
 }
 
 impl EngineMetrics {
@@ -67,6 +81,31 @@ impl EngineMetrics {
     /// Total requests observed.
     pub fn requests_total(&self) -> u64 {
         self.requests_total.load(Ordering::Relaxed)
+    }
+
+    /// Record per-provider token usage and cost for one successful request.
+    pub fn record_usage(
+        &self,
+        provider: &str,
+        prompt_tokens: Option<u32>,
+        completion_tokens: Option<u32>,
+        cost_usd: Option<f64>,
+    ) {
+        let entry = self.per_provider.entry(provider.to_string()).or_default();
+        if let Some(p) = prompt_tokens {
+            entry.prompt_tokens.fetch_add(p as u64, Ordering::Relaxed);
+        }
+        if let Some(c) = completion_tokens {
+            entry
+                .completion_tokens
+                .fetch_add(c as u64, Ordering::Relaxed);
+        }
+        if let Some(cost) = cost_usd
+            && cost > 0.0
+        {
+            let micro = (cost * 1_000_000.0).round() as u64;
+            entry.cost_micro_usd.fetch_add(micro, Ordering::Relaxed);
+        }
     }
 
     /// Render the Prometheus text-exposition body for these counters.
@@ -209,6 +248,34 @@ impl EngineMetrics {
             ));
         }
 
+        // Dual-track observability: per-provider token and cost totals.
+        out.push_str(
+            "# HELP mofa_tokens_total Tokens processed, by provider and direction.\n\
+             # TYPE mofa_tokens_total counter\n",
+        );
+        for entry in self.per_provider.iter() {
+            let provider = escape_label_value(entry.key());
+            out.push_str(&format!(
+                "mofa_tokens_total{{provider=\"{provider}\",direction=\"prompt\"}} {}\n",
+                entry.prompt_tokens.load(Ordering::Relaxed)
+            ));
+            out.push_str(&format!(
+                "mofa_tokens_total{{provider=\"{provider}\",direction=\"completion\"}} {}\n",
+                entry.completion_tokens.load(Ordering::Relaxed)
+            ));
+        }
+        out.push_str(
+            "# HELP mofa_cost_usd_total Estimated spend in USD, by provider.\n\
+             # TYPE mofa_cost_usd_total counter\n",
+        );
+        for entry in self.per_provider.iter() {
+            let usd = entry.cost_micro_usd.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+            out.push_str(&format!(
+                "mofa_cost_usd_total{{provider=\"{}\"}} {usd}\n",
+                escape_label_value(entry.key())
+            ));
+        }
+
         out
     }
 }
@@ -273,6 +340,24 @@ mod tests {
         assert!(text.contains("mofa_request_duration_ms_count 2"));
         assert!(text.contains("mofa_request_duration_ms_sum 1530"));
         assert!(text.contains("mofa_provider_up{provider=\"ollama\"} 1"));
+    }
+
+    #[test]
+    fn per_provider_token_and_cost_render() {
+        let m = EngineMetrics::default();
+        m.record_usage("openai", Some(100), Some(40), Some(0.0021));
+        m.record_usage("openai", Some(50), Some(10), Some(0.0009));
+        m.record_usage("ollama", Some(30), Some(20), None); // local → no cost
+
+        let text = m.render_prometheus(&MetricsGauges::default());
+        assert!(text.contains("mofa_tokens_total{provider=\"openai\",direction=\"prompt\"} 150"));
+        assert!(
+            text.contains("mofa_tokens_total{provider=\"openai\",direction=\"completion\"} 50")
+        );
+        assert!(text.contains("mofa_tokens_total{provider=\"ollama\",direction=\"prompt\"} 30"));
+        // 0.0021 + 0.0009 = 0.003 USD accumulated for openai; ollama has none.
+        assert!(text.contains("mofa_cost_usd_total{provider=\"openai\"} 0.003"));
+        assert!(text.contains("mofa_cost_usd_total{provider=\"ollama\"} 0"));
     }
 
     #[test]

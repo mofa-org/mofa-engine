@@ -3,9 +3,13 @@
 //! The router applies hard constraints first, then scores valid candidates.
 
 use mofa_kernel::{
-    BackendHealth, Capability, CostTier, InferenceRequest, ModelCard, ModelResidency, ModelStatus,
-    ProviderKind,
+    BackendHealth, Capability, CostTier, InferenceRequest, Locality, ModelCard, ModelResidency,
+    ModelStatus, ProviderKind,
 };
+
+/// Score bonus that guarantees a `prefer_local` request ranks every local
+/// candidate ahead of any cloud one. Larger than any achievable base score.
+const LOCAL_FIRST_BONUS: i64 = 1_000_000_000;
 
 /// Provider facts needed by routing.
 #[derive(Debug, Clone)]
@@ -86,6 +90,12 @@ impl Router {
                 continue;
             }
 
+            // Hard locality constraint (privacy / data-residency guardrail): a
+            // `local_only` request must never leave the device.
+            if request.locality == Locality::LocalOnly && !provider.kind.is_local() {
+                continue;
+            }
+
             if model.availability == mofa_kernel::ModelAvailability::Unavailable {
                 continue;
             }
@@ -100,7 +110,13 @@ impl Router {
                 continue;
             }
 
-            let score = Self::score(model, desired_cap, provider);
+            let mut score = Self::score(model, desired_cap, provider);
+            // `prefer_local` ranks every local candidate strictly ahead of any
+            // cloud one (cloud stays available only as a fallback) by adding a
+            // bonus larger than any achievable base score.
+            if request.locality == Locality::PreferLocal && provider.kind.is_local() {
+                score = score.saturating_add(LOCAL_FIRST_BONUS);
+            }
             if score <= 0 {
                 continue;
             }
@@ -305,6 +321,7 @@ mod tests {
             params: serde_json::Value::Null,
             hint_next: None,
             request_id: "test".into(),
+            ..Default::default()
         }
     }
 
@@ -552,5 +569,84 @@ mod tests {
         let mut providers = vec![provider("p", ProviderKind::OpenAiCompatible, 5)];
         providers[0].health = BackendHealth::Unavailable;
         assert!(Router::route(&models, &request(Capability::Chat, None), &providers).is_none());
+    }
+
+    #[test]
+    fn local_only_excludes_cloud_candidates() {
+        let models = vec![
+            make_model(
+                "cloud",
+                "openai",
+                Capability::Chat,
+                ModelResidency::Remote,
+                CostTier::High,
+            ),
+            make_model(
+                "local",
+                "ollama",
+                Capability::Chat,
+                ModelResidency::Loaded,
+                CostTier::Free,
+            ),
+        ];
+        let providers = vec![
+            provider("openai", ProviderKind::OpenAiCompatible, 10),
+            provider("ollama", ProviderKind::Ollama, 1),
+        ];
+        let mut req = request(Capability::Chat, None);
+        req.locality = Locality::LocalOnly;
+        let ranked = Router::route_ranked(&models, &req, &providers, None);
+        // Only the local candidate survives the hard constraint.
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].model.name, "local");
+    }
+
+    #[test]
+    fn local_only_with_no_local_returns_empty() {
+        let models = vec![make_model(
+            "cloud",
+            "openai",
+            Capability::Chat,
+            ModelResidency::Remote,
+            CostTier::High,
+        )];
+        let providers = vec![provider("openai", ProviderKind::OpenAiCompatible, 10)];
+        let mut req = request(Capability::Chat, None);
+        req.locality = Locality::LocalOnly;
+        // No local candidate → no route (engine turns this into NoCapableModel).
+        assert!(Router::route_ranked(&models, &req, &providers, None).is_empty());
+    }
+
+    #[test]
+    fn prefer_local_ranks_local_first_but_keeps_cloud_fallback() {
+        // A cloud model that is "hotter" than the local one would normally win on
+        // residency; prefer_local must still rank the local candidate first while
+        // keeping the cloud one as a fallback.
+        let models = vec![
+            make_model(
+                "cloud",
+                "openai",
+                Capability::Chat,
+                ModelResidency::Remote,
+                CostTier::High,
+            ),
+            make_model(
+                "local",
+                "ollama",
+                Capability::Chat,
+                ModelResidency::Unloaded,
+                CostTier::Free,
+            ),
+        ];
+        let providers = vec![
+            provider("openai", ProviderKind::OpenAiCompatible, 10),
+            provider("ollama", ProviderKind::Ollama, 1),
+        ];
+        let mut req = request(Capability::Chat, None);
+        req.locality = Locality::PreferLocal;
+        let ranked = Router::route_ranked(&models, &req, &providers, None);
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].model.name, "local");
+        assert_eq!(ranked[1].model.name, "cloud");
     }
 }

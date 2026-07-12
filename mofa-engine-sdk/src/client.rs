@@ -333,6 +333,7 @@ mod tests {
             params: serde_json::Value::Null,
             hint_next: None,
             request_id: "t".into(),
+            ..Default::default()
         };
         assert!(matches!(
             engine.invoke(req),

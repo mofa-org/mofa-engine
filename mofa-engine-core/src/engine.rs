@@ -4,7 +4,7 @@
 //! circuit breaking, reservation-based memory admission, concurrency control,
 //! idle eviction, and observability.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
@@ -116,6 +116,8 @@ pub struct Engine {
     event_tx: broadcast::Sender<EngineEvent>,
     /// Bounded-cardinality metrics counters.
     metrics: EngineMetrics,
+    /// Per-provider token pricing: name → (USD/1k prompt, USD/1k completion).
+    pricing: HashMap<String, (f64, f64)>,
     /// Canonicalized allowlist of roots for request `input_file` paths; empty
     /// means any local path is accepted.
     input_roots: Vec<std::path::PathBuf>,
@@ -126,6 +128,22 @@ pub struct Engine {
 /// Remaining time until `deadline`, saturating at zero.
 fn remaining(deadline: Instant) -> Duration {
     deadline.saturating_duration_since(Instant::now())
+}
+
+/// USD cost from per-1k-token prices. `None` when both prices are zero (free /
+/// local models), so no spurious zero cost is attributed.
+fn estimate_cost(
+    price_in_per_1k: f64,
+    price_out_per_1k: f64,
+    prompt_tokens: Option<u32>,
+    completion_tokens: Option<u32>,
+) -> Option<f64> {
+    if price_in_per_1k == 0.0 && price_out_per_1k == 0.0 {
+        return None;
+    }
+    let prompt = prompt_tokens.unwrap_or(0) as f64;
+    let completion = completion_tokens.unwrap_or(0) as f64;
+    Some(prompt / 1000.0 * price_in_per_1k + completion / 1000.0 * price_out_per_1k)
 }
 
 impl Engine {
@@ -213,6 +231,19 @@ impl Engine {
             Duration::from_secs(config.artifacts.retention_secs),
         );
 
+        // Per-provider token pricing for cost tracking.
+        let pricing = config
+            .providers
+            .iter()
+            .filter(|p| p.enabled)
+            .map(|p| {
+                (
+                    p.name.clone(),
+                    (p.price_input_per_1k, p.price_output_per_1k),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
         let engine = Arc::new(Self {
             providers,
             models: DashMap::new(),
@@ -236,6 +267,7 @@ impl Engine {
             weak_self: OnceLock::new(),
             event_tx,
             metrics: EngineMetrics::default(),
+            pricing,
             input_roots,
             started_at: Instant::now(),
         });
@@ -394,18 +426,40 @@ impl Engine {
         models
     }
 
-    /// Run inference, recording request-level metrics around the attempt.
+    /// Run inference, recording request-level metrics + token/cost usage.
     pub async fn invoke(&self, req: InferenceRequest) -> Result<InferenceResponse, EngineError> {
         let started = Instant::now();
-        let result = self.invoke_inner(req).await;
+        let mut result = self.invoke_inner(req).await;
         let duration_ms = started.elapsed().as_millis() as u64;
-        match &result {
-            Ok(resp) => self
-                .metrics
-                .record_request(true, duration_ms, resp.fallback_used),
+        match &mut result {
+            Ok(resp) => {
+                resp.cost_usd =
+                    self.compute_cost(&resp.provider, resp.prompt_tokens, resp.completion_tokens);
+                self.metrics
+                    .record_request(true, duration_ms, resp.fallback_used);
+                self.metrics.record_usage(
+                    &resp.provider,
+                    resp.prompt_tokens,
+                    resp.completion_tokens,
+                    resp.cost_usd,
+                );
+            }
             Err(_) => self.metrics.record_request(false, duration_ms, false),
         }
         result
+    }
+
+    /// Estimated USD cost for a request served by `provider`, from the
+    /// configured per-1k-token prices. `None` when no price is configured
+    /// (e.g. local models) or no tokens were reported.
+    fn compute_cost(
+        &self,
+        provider: &str,
+        prompt_tokens: Option<u32>,
+        completion_tokens: Option<u32>,
+    ) -> Option<f64> {
+        let (price_in, price_out) = self.pricing.get(provider).copied()?;
+        estimate_cost(price_in, price_out, prompt_tokens, completion_tokens)
     }
 
     /// Run inference.
@@ -767,9 +821,20 @@ impl Engine {
                 self.record_transition(&req);
                 self.emit_request_completed(&req.request_id, duration_ms, true);
                 self.metrics.record_request(true, duration_ms, false);
+                let cost_usd =
+                    self.compute_cost(&provider_name, resp.prompt_tokens, resp.completion_tokens);
+                self.metrics.record_usage(
+                    &provider_name,
+                    resp.prompt_tokens,
+                    resp.completion_tokens,
+                    cost_usd,
+                );
                 StreamChunk::Completed {
                     duration_ms,
                     tokens_used: resp.tokens_used,
+                    prompt_tokens: resp.prompt_tokens,
+                    completion_tokens: resp.completion_tokens,
+                    cost_usd,
                     file: resp.file,
                     fallback_used: false,
                     routing_reason: Some(routing_reason),
@@ -1101,6 +1166,7 @@ impl Engine {
             params: serde_json::Value::Null,
             hint_next: None,
             request_id: String::new(),
+            ..Default::default()
         };
         let budget = Some(self.memory.budget_bytes());
         let Some(best) = Router::route_ranked(&all, &route_req, &providers, budget)
@@ -1814,6 +1880,7 @@ mod tests {
                 tokens_used: Some(1),
                 fallback_used: false,
                 routing_reason: None,
+                ..Default::default()
             })
         }
     }
@@ -1860,6 +1927,7 @@ mod tests {
             weak_self: OnceLock::new(),
             event_tx,
             metrics: EngineMetrics::default(),
+            pricing: HashMap::new(),
             input_roots: Vec::new(),
             started_at: Instant::now(),
         });
@@ -1891,6 +1959,7 @@ mod tests {
             params: serde_json::Value::Null,
             hint_next: None,
             request_id: "test".into(),
+            ..Default::default()
         }
     }
 
@@ -1898,6 +1967,17 @@ mod tests {
     async fn engine_starts_with_empty_config() {
         let engine = Engine::new(minimal_config()).await;
         assert!(engine.capabilities().await.is_empty());
+    }
+
+    #[test]
+    fn cost_estimation_from_prices() {
+        // $0.01/1k in, $0.03/1k out; 1000 prompt + 500 completion tokens.
+        let cost = estimate_cost(0.01, 0.03, Some(1000), Some(500)).unwrap();
+        assert!((cost - (0.01 + 0.015)).abs() < 1e-9);
+        // Zero prices (free / local model) → no cost attributed.
+        assert!(estimate_cost(0.0, 0.0, Some(1000), Some(500)).is_none());
+        // Missing token counts default to zero.
+        assert_eq!(estimate_cost(0.01, 0.03, None, None), Some(0.0));
     }
 
     #[tokio::test]
@@ -2024,6 +2104,31 @@ mod tests {
         let resp = engine.invoke(chat_request(None)).await.unwrap();
         assert_eq!(resp.model_used, "qwen");
         assert!(!resp.fallback_used);
+    }
+
+    #[tokio::test]
+    async fn local_only_never_routes_to_cloud() {
+        // S5 privacy guardrail: a local_only request must be served locally or
+        // fail — never fall through to a cloud provider.
+        let cloud = Arc::new(
+            TestProvider::new("openai", ProviderKind::OpenAiCompatible).with_model(
+                "gpt",
+                Capability::Chat,
+                ModelResidency::Remote,
+                0,
+                32,
+            ),
+        );
+        let engine = build_engine(vec![cloud], 1000, 0);
+        engine.refresh_resources().await;
+
+        let mut req = chat_request(None);
+        req.locality = mofa_kernel::Locality::LocalOnly;
+        // Only a cloud model exists → the request fails rather than leaving the device.
+        assert!(matches!(
+            engine.invoke(req).await,
+            Err(EngineError::NoCapableModel(_))
+        ));
     }
 
     #[tokio::test]
@@ -2614,6 +2719,7 @@ mod tests {
                 tokens_used: Some(self.deltas.len() as u32),
                 fallback_used: false,
                 routing_reason: None,
+                ..Default::default()
             })
         }
         async fn stream(

@@ -55,6 +55,10 @@ base_url = "https://api.openai.com/v1"
 api_key = "${OPENAI_API_KEY}"
 priority = 10
 cost_tier = "high"
+# Optional token pricing (USD per 1000 tokens) for cost tracking in /metrics and
+# per-response `cost_usd`. Omit or set 0 for free/local models.
+price_input_per_1k = 0.0025
+price_output_per_1k = 0.01
 
   [[providers.models]]
   name = "gpt-4o"

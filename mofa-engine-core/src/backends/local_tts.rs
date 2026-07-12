@@ -205,6 +205,7 @@ impl LocalTtsProvider {
             tokens_used: None,
             fallback_used: false,
             routing_reason: None,
+            ..Default::default()
         })
     }
 }
@@ -342,6 +343,7 @@ mod tests {
             params: serde_json::Value::Null,
             hint_next: None,
             request_id: "test".into(),
+            ..Default::default()
         }
     }
 

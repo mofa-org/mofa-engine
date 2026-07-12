@@ -6,12 +6,12 @@ use async_trait::async_trait;
 use mofa_kernel::{
     BackendFeature, BackendHealth, Capability, CostTier, EngineError, InferenceRequest,
     InferenceResponse, LifecycleResult, ModelAvailability, ModelCard, ModelResidency, Provider,
-    ProviderKind, canonical_model_id, model_id_name,
+    ProviderKind, StreamSink, canonical_model_id, model_id_name,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Provider for a local Ollama instance.
 pub struct OllamaProvider {
@@ -106,10 +106,39 @@ struct OllamaMessage {
 #[allow(dead_code)]
 struct OllamaChatResponse {
     message: Option<OllamaMessage>,
+    /// Completion/output tokens.
     #[serde(default)]
     eval_count: Option<u32>,
+    /// Prompt/input tokens.
+    #[serde(default)]
+    prompt_eval_count: Option<u32>,
     #[serde(default)]
     total_duration: Option<u64>,
+}
+
+/// One NDJSON object from Ollama's `stream: true` response.
+#[derive(Debug, Deserialize)]
+struct OllamaStreamChunk {
+    /// Incremental message with the next token(s) of content.
+    message: Option<OllamaMessage>,
+    /// Set on the final object.
+    #[serde(default)]
+    done: bool,
+    /// Completion/output tokens (final object only).
+    #[serde(default)]
+    eval_count: Option<u32>,
+    /// Prompt/input tokens (final object only).
+    #[serde(default)]
+    prompt_eval_count: Option<u32>,
+}
+
+/// Parse one NDJSON line from an Ollama stream. Blank/whitespace lines and
+/// unparseable fragments yield `None`.
+fn parse_stream_line(line: &[u8]) -> Option<OllamaStreamChunk> {
+    if line.iter().all(u8::is_ascii_whitespace) {
+        return None;
+    }
+    serde_json::from_slice(line).ok()
 }
 
 #[async_trait]
@@ -345,6 +374,12 @@ impl Provider for OllamaProvider {
 
         let duration_ms = start.elapsed().as_millis() as u64;
         let text = chat_resp.message.map(|m| m.content).unwrap_or_default();
+        let prompt_tokens = chat_resp.prompt_eval_count;
+        let completion_tokens = chat_resp.eval_count;
+        let tokens_used = match (prompt_tokens, completion_tokens) {
+            (None, None) => None,
+            (p, c) => Some(p.unwrap_or(0) + c.unwrap_or(0)),
+        };
 
         Ok(InferenceResponse {
             text: Some(text),
@@ -353,9 +388,121 @@ impl Provider for OllamaProvider {
             provider: self.name.clone(),
             duration_ms,
             request_id: request.request_id.clone(),
-            tokens_used: chat_resp.eval_count,
+            tokens_used,
+            prompt_tokens,
+            completion_tokens,
             fallback_used: false,
             routing_reason: None,
+            ..Default::default()
+        })
+    }
+
+    async fn stream(
+        &self,
+        model_id: &str,
+        request: &InferenceRequest,
+        sink: StreamSink,
+    ) -> Result<InferenceResponse, EngineError> {
+        let model_name = model_id_name(model_id);
+        let messages: Vec<OllamaMessage> = request
+            .messages
+            .iter()
+            .map(|m| OllamaMessage {
+                role: m.role.clone(),
+                content: m.content.clone(),
+            })
+            .collect();
+        if messages.is_empty() {
+            return Err(EngineError::InvalidRequest("no messages provided".into()));
+        }
+
+        let body = OllamaChatRequest {
+            model: model_name.to_string(),
+            messages,
+            stream: true,
+            keep_alive: None,
+        };
+        let url = format!("{}/api/chat", self.base_url);
+        let start = Instant::now();
+
+        let mut resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: e.to_string(),
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("HTTP {status}: {text}"),
+            });
+        }
+
+        // Ollama streams newline-delimited JSON. Buffer bytes and emit each
+        // token's content as it completes a line, accumulating the full text.
+        let mut buf: Vec<u8> = Vec::new();
+        let mut full = String::new();
+        let mut prompt_tokens = None;
+        let mut completion_tokens = None;
+
+        let mut apply = |chunk: OllamaStreamChunk, full: &mut String| -> Option<String> {
+            if chunk.done {
+                prompt_tokens = chunk.prompt_eval_count;
+                completion_tokens = chunk.eval_count;
+            }
+            let content = chunk.message.map(|m| m.content)?;
+            if content.is_empty() {
+                return None;
+            }
+            full.push_str(&content);
+            Some(content)
+        };
+
+        while let Some(bytes) = resp.chunk().await.map_err(|e| EngineError::ProviderError {
+            provider: self.name.clone(),
+            detail: format!("stream read error: {e}"),
+        })? {
+            buf.extend_from_slice(&bytes);
+            while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                let line: Vec<u8> = buf.drain(..=pos).collect();
+                if let Some(chunk) = parse_stream_line(&line)
+                    && let Some(delta) = apply(chunk, &mut full)
+                {
+                    let _ = sink.send(delta).await;
+                }
+            }
+        }
+        // Any trailing bytes without a final newline.
+        if let Some(chunk) = parse_stream_line(&buf)
+            && let Some(delta) = apply(chunk, &mut full)
+        {
+            let _ = sink.send(delta).await;
+        }
+
+        let tokens_used = match (prompt_tokens, completion_tokens) {
+            (None, None) => None,
+            (p, c) => Some(p.unwrap_or(0) + c.unwrap_or(0)),
+        };
+        Ok(InferenceResponse {
+            text: Some(full),
+            file: None,
+            model_used: model_name.to_string(),
+            provider: self.name.clone(),
+            duration_ms: start.elapsed().as_millis() as u64,
+            request_id: request.request_id.clone(),
+            tokens_used,
+            prompt_tokens,
+            completion_tokens,
+            fallback_used: false,
+            routing_reason: None,
+            ..Default::default()
         })
     }
 }
@@ -376,5 +523,51 @@ mod tests {
     fn model_id_parse_accepts_old_and_new_format() {
         assert_eq!(model_id_name("ollama/llama3:8b"), "llama3:8b");
         assert_eq!(model_id_name("ollama::llama3:8b"), "llama3:8b");
+    }
+
+    #[test]
+    fn ndjson_stream_lines_accumulate_text_and_tokens() {
+        // A realistic Ollama `stream: true` sequence, including a blank line that
+        // must be ignored and a final `done` object carrying token counts.
+        let lines: Vec<&[u8]> = vec![
+            br#"{"message":{"role":"assistant","content":"He"},"done":false}"#,
+            b"",
+            br#"{"message":{"role":"assistant","content":"llo"},"done":false}"#,
+            br#"{"message":{"role":"assistant","content":""},"done":false}"#,
+            br#"{"message":{"role":"assistant","content":"!"},"done":false}"#,
+            br#"{"done":true,"eval_count":3,"prompt_eval_count":5}"#,
+        ];
+
+        let mut full = String::new();
+        let mut deltas = Vec::new();
+        let mut prompt = None;
+        let mut completion = None;
+        for line in lines {
+            if let Some(chunk) = parse_stream_line(line) {
+                if chunk.done {
+                    prompt = chunk.prompt_eval_count;
+                    completion = chunk.eval_count;
+                }
+                if let Some(content) = chunk.message.map(|m| m.content)
+                    && !content.is_empty()
+                {
+                    full.push_str(&content);
+                    deltas.push(content);
+                }
+            }
+        }
+
+        // Multiple real deltas (not one lump), empty content skipped.
+        assert_eq!(deltas, vec!["He", "llo", "!"]);
+        assert_eq!(full, "Hello!");
+        assert_eq!(prompt, Some(5));
+        assert_eq!(completion, Some(3));
+    }
+
+    #[test]
+    fn parse_stream_line_ignores_blank_and_garbage() {
+        assert!(parse_stream_line(b"").is_none());
+        assert!(parse_stream_line(b"   \n").is_none());
+        assert!(parse_stream_line(b"not json").is_none());
     }
 }

@@ -299,6 +299,13 @@ pub struct ProviderConfig {
     /// Directory for `local_tts` audio artifacts (default: the system temp dir).
     #[serde(default)]
     pub output_dir: Option<String>,
+    /// USD price per 1000 prompt (input) tokens. Used for cost tracking; `0`
+    /// (the default, e.g. local models) means no cost is attributed.
+    #[serde(default)]
+    pub price_input_per_1k: f64,
+    /// USD price per 1000 completion (output) tokens.
+    #[serde(default)]
+    pub price_output_per_1k: f64,
 }
 
 impl Default for ProviderConfig {
@@ -316,6 +323,8 @@ impl Default for ProviderConfig {
             args: Vec::new(),
             output_format: None,
             output_dir: None,
+            price_input_per_1k: 0.0,
+            price_output_per_1k: 0.0,
         }
     }
 }

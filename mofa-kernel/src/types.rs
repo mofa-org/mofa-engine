@@ -356,6 +356,22 @@ pub enum FallbackPolicy {
     AllowNamed,
 }
 
+/// Locality preference for routing (privacy / data-residency guardrail).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Locality {
+    /// Normal ranking: local models are preferred but a cloud model can be
+    /// selected or used as a fallback.
+    #[default]
+    Auto,
+    /// Local models are ranked strictly ahead of any cloud model, which remains
+    /// available only as a fallback.
+    PreferLocal,
+    /// Hard constraint: only local models may serve the request. If none can,
+    /// the request fails rather than leaving the device.
+    LocalOnly,
+}
+
 /// A request to the engine for inference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferenceRequest {
@@ -370,6 +386,9 @@ pub struct InferenceRequest {
     /// Named fallback policy.
     #[serde(default)]
     pub fallback_policy: FallbackPolicy,
+    /// Locality preference (privacy guardrail).
+    #[serde(default)]
+    pub locality: Locality,
     /// Conversation messages.
     #[serde(default)]
     pub messages: Vec<Message>,
@@ -385,12 +404,30 @@ pub struct InferenceRequest {
     pub request_id: String,
 }
 
+impl Default for InferenceRequest {
+    fn default() -> Self {
+        Self {
+            capability: None,
+            model: None,
+            app_id: None,
+            session_id: None,
+            fallback_policy: FallbackPolicy::default(),
+            locality: Locality::default(),
+            messages: Vec::new(),
+            input_file: None,
+            params: serde_json::Value::Null,
+            hint_next: None,
+            request_id: generate_request_id(),
+        }
+    }
+}
+
 fn generate_request_id() -> String {
     Uuid::new_v4().to_string()
 }
 
 /// Response from an inference call.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InferenceResponse {
     /// Text output (for chat, ASR, etc.).
     pub text: Option<String>,
@@ -404,8 +441,17 @@ pub struct InferenceResponse {
     pub duration_ms: u64,
     /// Request correlation ID.
     pub request_id: String,
-    /// Token usage, if reported by provider.
+    /// Total token usage, if reported by provider.
     pub tokens_used: Option<u32>,
+    /// Prompt/input tokens, if reported by provider.
+    #[serde(default)]
+    pub prompt_tokens: Option<u32>,
+    /// Completion/output tokens, if reported by provider.
+    #[serde(default)]
+    pub completion_tokens: Option<u32>,
+    /// Estimated cost in USD, if a price is configured for the serving provider.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
     /// Whether the response came from a fallback candidate.
     #[serde(default)]
     pub fallback_used: bool,
@@ -440,8 +486,17 @@ pub enum StreamChunk {
     Completed {
         /// Wall-clock duration in milliseconds.
         duration_ms: u64,
-        /// Token usage, if reported.
+        /// Total token usage, if reported.
         tokens_used: Option<u32>,
+        /// Prompt/input tokens, if reported.
+        #[serde(default)]
+        prompt_tokens: Option<u32>,
+        /// Completion/output tokens, if reported.
+        #[serde(default)]
+        completion_tokens: Option<u32>,
+        /// Estimated cost in USD, if a price is configured for the provider.
+        #[serde(default)]
+        cost_usd: Option<f64>,
         /// File output path (for TTS, image gen, etc.).
         file: Option<String>,
         /// Whether a fallback candidate served the request.
