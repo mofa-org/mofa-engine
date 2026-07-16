@@ -110,8 +110,9 @@ async fn main() -> anyhow::Result<()> {
     if let Some(sender) = obs_sender {
         let rx = engine.subscribe_events();
         let engine_clone = Arc::clone(&engine);
+        let metrics_clone = metrics_state.clone();
         tokio::spawn(async move {
-            mofa_engine_sdk::observability_bridge::run(rx, sender, engine_clone).await;
+            mofa_engine_sdk::observability_bridge::run(rx, sender, engine_clone, metrics_clone).await;
         });
     }
 

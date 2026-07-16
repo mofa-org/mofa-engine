@@ -56,6 +56,7 @@ pub async fn start_server(
         .route("/v1/invoke", post(invoke_handler))
         .route("/v1/status", get(status_handler))
         .route("/v1/events", get(events_handler))
+        .route("/v1/files/{filename}", get(files_handler))
         .route("/v1/discovery/refresh", post(refresh_handler))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
@@ -139,6 +140,30 @@ async fn events_handler(
             .interval(Duration::from_secs(15))
             .text("ping"),
     )
+}
+
+use axum::extract::Path;
+use axum::response::IntoResponse;
+use axum::http::header;
+
+async fn files_handler(Path(filename): Path<String>) -> Result<impl IntoResponse, StatusCode> {
+    if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    
+    let temp_dir = std::env::temp_dir();
+    let file_path = temp_dir.join(&filename);
+    
+    if !file_path.exists() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    
+    let bytes = std::fs::read(file_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    
+    Ok((
+        [(header::CONTENT_TYPE, "audio/wav")],
+        bytes,
+    ))
 }
 
 async fn dashboard_handler() -> Html<&'static str> {

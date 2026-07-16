@@ -5,13 +5,14 @@
 
 use mofa_engine_core::Engine;
 use mofa_kernel::EngineEvent;
-use mofa_observability::collector::EventSender;
+use mofa_observability::collector::{EventSender, Labels, MetricsState};
 use mofa_observability::events::{
     EngineEvent as ObsEngineEvent, EventEnvelope, EvictionTriggered, ModelLoaded, ModelUnloaded,
     RequestCompleted, RequestReceived, UnloadReason,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 
 struct RequestContext {
@@ -28,6 +29,7 @@ pub async fn run(
     mut engine_events: broadcast::Receiver<EngineEvent>,
     sender: EventSender,
     engine: Arc<Engine>,
+    metrics_state: Option<Arc<RwLock<MetricsState>>>,
 ) {
     let mut cache: HashMap<String, RequestContext> = HashMap::new();
 
@@ -73,10 +75,15 @@ pub async fn run(
         }
     }
 
-    // ── Event loop ───────────────────────────────────────────────────────
+    // ── Event loop with periodic gauge sync ────────────────────────────
+    let mut gauge_interval = tokio::time::interval(std::time::Duration::from_secs(10));
+    gauge_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
-        match engine_events.recv().await {
-            Ok(event) => {
+        tokio::select! {
+            event_result = engine_events.recv() => {
+                match event_result {
+                    Ok(event) => {
                 match event {
                     EngineEvent::RequestStarted {
                         request_id,
@@ -219,13 +226,33 @@ pub async fn run(
                         // ModelStatusChanged, ProviderHealthChanged — not mapped yet
                     }
                 }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!("Observability bridge lagged, skipped {} events", skipped);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        tracing::info!("Observability bridge shutting down");
+                        break;
+                    }
+                }
             }
-            Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                tracing::warn!("Observability bridge lagged, skipped {} events", skipped);
-            }
-            Err(broadcast::error::RecvError::Closed) => {
-                tracing::info!("Observability bridge shutting down");
-                break;
+            _ = gauge_interval.tick() => {
+                // Periodic gauge sync: directly write memory and model-count
+                // gauges from the authoritative engine state every 10 seconds.
+                if let Some(ref ms) = metrics_state {
+                    let status = engine.status().await;
+                    let mut state = ms.write().await;
+                    state.memory_used_bytes.set(Labels::new(), status.memory_used_bytes as f64);
+                    state.memory_budget_bytes.set(Labels::new(), status.memory_budget_bytes as f64);
+                    state.models_loaded.set(Labels::new(), status.loaded_models as f64);
+
+                    tracing::trace!(
+                        memory_used_mib = status.memory_used_bytes as f64 / 1_048_576.0,
+                        memory_budget_mib = status.memory_budget_bytes as f64 / 1_048_576.0,
+                        loaded_models = status.loaded_models,
+                        "Bridge: periodic gauge sync"
+                    );
+                }
             }
         }
     }
