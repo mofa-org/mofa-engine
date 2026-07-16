@@ -172,9 +172,25 @@ impl Engine {
                     }
 
                     let count = cards.len();
+                    let mut allocated_any = false;
                     for mut card in cards {
                         card.refresh_status();
-                        self.models.insert(card.id.clone(), card);
+                        let id = card.id.clone();
+                        if matches!(card.residency, ModelResidency::Loaded) && card.memory_estimate_bytes > 0 {
+                            // If it's already loaded but we don't have it allocated yet
+                            let snapshot = self.memory.snapshot();
+                            if !snapshot.iter().any(|(mem_id, _)| mem_id == &id) {
+                                self.memory.allocate(&id, card.memory_estimate_bytes);
+                                allocated_any = true;
+                            }
+                        }
+                        self.models.insert(id, card);
+                    }
+                    if allocated_any {
+                        let _ = self.event_tx.send(EngineEvent::MemoryChanged {
+                            used_bytes: self.memory.used_bytes(),
+                            total_bytes: self.memory.budget_bytes(),
+                        });
                     }
                     let _ = self.event_tx.send(EngineEvent::DiscoveryCompleted {
                         provider: name.clone(),
@@ -674,6 +690,7 @@ mod tests {
 
     fn minimal_config() -> EngineConfig {
         EngineConfig {
+            observability: Default::default(),
             listen: ListenConfig::default(),
             memory: MemoryConfig {
                 budget_mb: Some(100),
@@ -849,6 +866,7 @@ mod tests {
     #[tokio::test]
     async fn disabled_provider_is_skipped() {
         let config = EngineConfig {
+            observability: Default::default(),
             listen: ListenConfig::default(),
             memory: MemoryConfig {
                 budget_mb: Some(100),

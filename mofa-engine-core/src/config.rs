@@ -22,6 +22,20 @@ pub struct EngineConfig {
     /// Provider definitions
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
+    /// Observability settings
+    #[serde(default)]
+    pub observability: ObservabilityConfig,
+}
+
+/// Observability configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ObservabilityConfig {
+    /// Whether observability is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The OpenTelemetry OTLP endpoint (e.g., http://localhost:4317)
+    #[serde(default)]
+    pub otlp_endpoint: Option<String>,
 }
 
 /// Network listen configuration.
@@ -399,6 +413,7 @@ impl EngineConfig {
             listen: ListenConfig::default(),
             memory: MemoryConfig::default(),
             providers,
+            observability: ObservabilityConfig::default(),
         }
     }
 }
@@ -470,6 +485,7 @@ mod tests {
     #[test]
     fn toml_roundtrip() {
         let cfg = EngineConfig {
+            observability: Default::default(),
             listen: ListenConfig::default(),
             memory: MemoryConfig::default(),
             providers: vec![ProviderConfig {
@@ -492,6 +508,7 @@ mod tests {
     #[test]
     fn validate_rejects_unknown_provider_kind() {
         let cfg = EngineConfig {
+            observability: Default::default(),
             listen: ListenConfig::default(),
             memory: MemoryConfig::default(),
             providers: vec![ProviderConfig {
