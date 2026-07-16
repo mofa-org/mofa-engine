@@ -183,7 +183,7 @@ impl GaugeFamily {
         }
     }
 
-    fn set(&mut self, labels: Labels, value: f64) {
+    pub fn set(&mut self, labels: Labels, value: f64) {
         self.last_seen.insert(labels.clone(), Instant::now());
         self.values.insert(labels, value);
     }
