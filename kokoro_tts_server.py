@@ -159,7 +159,17 @@ class KokoroHandler(BaseHTTPRequestHandler):
             return
 
         content_length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(content_length)) if content_length else {}
+        raw = self.rfile.read(content_length) if content_length else b"{}"
+        try:
+            body = json.loads(raw)
+        except json.JSONDecodeError:
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"error":"invalid_json"}')
+            return
+        if not isinstance(body, dict):
+            body = {}
         text = body.get("input", "Hello from Kokoro")
         raw_voice = body.get("voice", "xiaoxiao")
         voice = resolve_voice(raw_voice)
