@@ -11,5 +11,5 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y libssl-dev ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/src/mofa/target/release/examples/mock_harness /usr/local/bin/mock_harness
 
-EXPOSE 9090
+EXPOSE 9092
 CMD ["mock_harness"]

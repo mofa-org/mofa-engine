@@ -143,27 +143,24 @@ async fn events_handler(
 }
 
 use axum::extract::Path;
-use axum::response::IntoResponse;
 use axum::http::header;
+use axum::response::IntoResponse;
 
 async fn files_handler(Path(filename): Path<String>) -> Result<impl IntoResponse, StatusCode> {
     if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
         return Err(StatusCode::BAD_REQUEST);
     }
-    
+
     let temp_dir = std::env::temp_dir();
     let file_path = temp_dir.join(&filename);
-    
+
     if !file_path.exists() {
         return Err(StatusCode::NOT_FOUND);
     }
-    
+
     let bytes = std::fs::read(file_path).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    
-    Ok((
-        [(header::CONTENT_TYPE, "audio/wav")],
-        bytes,
-    ))
+
+    Ok(([(header::CONTENT_TYPE, "audio/wav")], bytes))
 }
 
 async fn dashboard_handler() -> Html<&'static str> {

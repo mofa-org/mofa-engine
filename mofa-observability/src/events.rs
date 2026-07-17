@@ -6,7 +6,7 @@
 //! Design principles:
 //! - Zero side effects: events are data, not actions.
 //! - Privacy: no prompt text, file contents, API keys, or user-identifying info. Ever.
-//! - Bounded enums: capability, reason, source, status use enums, not free-form strings.
+//! - Bounded enums: capability, unload reason, and signal source use enums (status is a bool).
 
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -576,11 +576,25 @@ mod tests {
     #[test]
     fn test_privacy_contract_no_forbidden_fields() {
         let forbidden_fields = [
-            "prompt", "text", "generated_text", "response_text",
-            "file_path", "file_content", "file_contents",
-            "api_key", "api_secret", "token", "auth_token", "access_token",
-            "password", "credential", "credentials",
-            "user_id", "username", "email", "ip_address",
+            "prompt",
+            "text",
+            "generated_text",
+            "response_text",
+            "file_path",
+            "file_content",
+            "file_contents",
+            "api_key",
+            "api_secret",
+            "token",
+            "auth_token",
+            "access_token",
+            "password",
+            "credential",
+            "credentials",
+            "user_id",
+            "username",
+            "email",
+            "ip_address",
         ];
 
         let events = vec![

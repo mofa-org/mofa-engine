@@ -14,7 +14,7 @@ use crate::events::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 // ─── Labels ──────────────────────────────────────────────────────────────────
 
@@ -118,7 +118,8 @@ impl CounterFamily {
                 true
             }
         });
-        self.last_seen.retain(|_, v| now.saturating_duration_since(*v) < max_idle);
+        self.last_seen
+            .retain(|_, v| now.saturating_duration_since(*v) < max_idle);
     }
 }
 
@@ -160,7 +161,8 @@ impl HistogramFamily {
                 true
             }
         });
-        self.last_seen.retain(|_, v| now.saturating_duration_since(*v) < max_idle);
+        self.last_seen
+            .retain(|_, v| now.saturating_duration_since(*v) < max_idle);
     }
 }
 
@@ -217,7 +219,8 @@ impl GaugeFamily {
                 true
             }
         });
-        self.last_seen.retain(|_, v| now.saturating_duration_since(*v) < max_idle);
+        self.last_seen
+            .retain(|_, v| now.saturating_duration_since(*v) < max_idle);
     }
 }
 
@@ -258,10 +261,7 @@ impl MetricsState {
     pub fn new() -> Self {
         Self {
             // Counters
-            requests_total: CounterFamily::new(
-                "mofa_requests_total",
-                "Total inference requests",
-            ),
+            requests_total: CounterFamily::new("mofa_requests_total", "Total inference requests"),
             model_loads_total: CounterFamily::new(
                 "mofa_model_loads_total",
                 "Total model load operations",
@@ -270,10 +270,7 @@ impl MetricsState {
                 "mofa_model_unloads_total",
                 "Total model unload operations",
             ),
-            failovers_total: CounterFamily::new(
-                "mofa_failovers_total",
-                "Total failover events",
-            ),
+            failovers_total: CounterFamily::new("mofa_failovers_total", "Total failover events"),
             evictions_total: CounterFamily::new(
                 "mofa_evictions_total",
                 "Total memory pressure evictions",
@@ -401,16 +398,12 @@ impl MetricsState {
 
                 // Counter: tokens
                 if let Some(tokens_in) = e.tokens_in {
-                    self.tokens_input_total.inc_by(
-                        Labels::new().add("model", &e.model_id),
-                        tokens_in,
-                    );
+                    self.tokens_input_total
+                        .inc_by(Labels::new().add("model", &e.model_id), tokens_in);
                 }
                 if let Some(tokens_out) = e.tokens_out {
-                    self.tokens_output_total.inc_by(
-                        Labels::new().add("model", &e.model_id),
-                        tokens_out,
-                    );
+                    self.tokens_output_total
+                        .inc_by(Labels::new().add("model", &e.model_id), tokens_out);
                 }
 
                 // Gauge: active requests down
@@ -473,14 +466,15 @@ impl MetricsState {
                 // Reconcile memory gauge against the absolute post-eviction value.
                 // This corrects any cumulative drift caused by dropped ModelUnloaded
                 // the authoritative value from the eviction subsystem.
-                self.memory_used_bytes.set(Labels::new(), e.memory_after_bytes as f64);
-                self.memory_budget_bytes.set(Labels::new(), e.budget_bytes as f64);
+                self.memory_used_bytes
+                    .set(Labels::new(), e.memory_after_bytes as f64);
+                self.memory_budget_bytes
+                    .set(Labels::new(), e.budget_bytes as f64);
             }
 
             EngineEvent::PreflightSignal(e) => {
-                self.preflight_predictions_total.inc(
-                    Labels::new().add("source", e.source.to_string()),
-                );
+                self.preflight_predictions_total
+                    .inc(Labels::new().add("source", e.source.to_string()));
             }
 
             EngineEvent::PreflightHit(_) => {
@@ -567,14 +561,20 @@ impl EventSender {
     /// Send a critical event asynchronously. If the channel is full, this will await
     /// and apply backpressure to the caller instead of dropping the event.
     /// Use for rare, critical events like `FailoverTriggered` and `EvictionTriggered`.
-    pub async fn send_critical(&self, event: EventEnvelope) -> Result<(), mpsc::error::SendError<EventEnvelope>> {
+    pub async fn send_critical(
+        &self,
+        event: EventEnvelope,
+    ) -> Result<(), mpsc::error::SendError<EventEnvelope>> {
         self.tx.send(event).await
     }
 
     /// Send a critical event synchronously. If the channel is full, this will block
     /// the current thread. Must not be called from within an async runtime context.
     #[allow(clippy::result_large_err)]
-    pub fn send_blocking(&self, event: EventEnvelope) -> Result<(), mpsc::error::SendError<EventEnvelope>> {
+    pub fn send_blocking(
+        &self,
+        event: EventEnvelope,
+    ) -> Result<(), mpsc::error::SendError<EventEnvelope>> {
         self.tx.blocking_send(event)
     }
 
@@ -681,7 +681,7 @@ pub fn init_pipeline(_otlp_endpoint: Option<&str>) -> (Arc<RwLock<MetricsState>>
     let (sender, receiver) = create_event_channel(10000);
     let collector_loop = MetricsCollector::new(receiver);
     let state = collector_loop.state();
-    
+
     tokio::spawn(async move {
         collector_loop.run().await;
     });
@@ -1037,10 +1037,7 @@ mod tests {
         let history_labels = Labels::new().add("source", "history");
 
         assert_eq!(state.preflight_predictions_total.values[&hint_labels], 2);
-        assert_eq!(
-            state.preflight_predictions_total.values[&history_labels],
-            1
-        );
+        assert_eq!(state.preflight_predictions_total.values[&history_labels], 1);
     }
 
     // ── Token counting tests ─────────────────────────────────────────────
@@ -1149,18 +1146,17 @@ mod tests {
 
         // Try to send critical event. It should block because the channel is full.
         // We use tokio::time::timeout to prove it blocks.
-        let critical_event = EventEnvelope::now(EngineEvent::FailoverTriggered(
-            FailoverTriggered {
+        let critical_event =
+            EventEnvelope::now(EngineEvent::FailoverTriggered(FailoverTriggered {
                 failed_model: "failed".into(),
                 failed_backend: "backend".into(),
                 fallback_model: "fallback".into(),
                 fallback_backend: "backend".into(),
-            },
-        ));
+            }));
 
         let send_future = sender.send_critical(critical_event.clone());
         let result = tokio::time::timeout(Duration::from_millis(50), send_future).await;
-        
+
         // It should timeout because it's blocking
         assert!(result.is_err());
 
@@ -1224,7 +1220,10 @@ mod tests {
 
         // Override the last_seen for the stale label to be 20 minutes ago
         let twenty_mins_ago = Instant::now() - Duration::from_secs(1200);
-        state.requests_total.last_seen.insert(labels_stale.clone(), twenty_mins_ago);
+        state
+            .requests_total
+            .last_seen
+            .insert(labels_stale.clone(), twenty_mins_ago);
 
         // Evict labels older than 10 minutes
         state.evict_stale_labels(Duration::from_secs(600));

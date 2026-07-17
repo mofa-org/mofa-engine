@@ -68,12 +68,12 @@
     },
     {
       "type": "piechart",
-      "title": "Requests by Backend",
+      "title": "Requests by Capability",
       "gridPos": { "x": 12, "y": 6, "w": 12, "h": 6 },
       "targets": [
         {
-          "expr": "sum(rate(mofa_requests_total[5m])) by (backend)",
-          "legendFormat": "{{backend}}"
+          "expr": "sum(rate(mofa_requests_total[5m])) by (capability)",
+          "legendFormat": "{{capability}}"
         }
       ]
     }

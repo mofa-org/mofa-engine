@@ -176,7 +176,9 @@ impl Engine {
                     for mut card in cards {
                         card.refresh_status();
                         let id = card.id.clone();
-                        if matches!(card.residency, ModelResidency::Loaded) && card.memory_estimate_bytes > 0 {
+                        if matches!(card.residency, ModelResidency::Loaded)
+                            && card.memory_estimate_bytes > 0
+                        {
                             // If it's already loaded but we don't have it allocated yet
                             let snapshot = self.memory.snapshot();
                             if !snapshot.iter().any(|(mem_id, _)| mem_id == &id) {

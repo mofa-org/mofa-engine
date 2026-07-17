@@ -93,7 +93,14 @@ fn render_gauge(buf: &mut String, family: &GaugeFamily) {
             )
             .unwrap();
         } else {
-            writeln!(buf, "{}{} {}", family.name, format_labels(labels), format_float(*value)).unwrap();
+            writeln!(
+                buf,
+                "{}{} {}",
+                family.name,
+                format_labels(labels),
+                format_float(*value)
+            )
+            .unwrap();
         }
     }
     buf.push('\n');
@@ -302,13 +309,25 @@ mod tests {
         // Must have TYPE histogram.
         assert!(output.contains("# TYPE mofa_model_load_seconds histogram"));
         // Must have bucket lines with le labels.
-        assert!(output.contains("mofa_model_load_seconds_bucket{backend=\"ollama\",model=\"qwen2.5:7b\",le=\"0.5\"} 0"));
-        assert!(output.contains("mofa_model_load_seconds_bucket{backend=\"ollama\",model=\"qwen2.5:7b\",le=\"2.0\"} 1"));
+        assert!(output.contains(
+            "mofa_model_load_seconds_bucket{backend=\"ollama\",model=\"qwen2.5:7b\",le=\"0.5\"} 0"
+        ));
+        assert!(output.contains(
+            "mofa_model_load_seconds_bucket{backend=\"ollama\",model=\"qwen2.5:7b\",le=\"2.0\"} 1"
+        ));
         // Must have +Inf bucket.
-        assert!(output.contains("mofa_model_load_seconds_bucket{backend=\"ollama\",model=\"qwen2.5:7b\",le=\"+Inf\"} 1"));
+        assert!(output.contains(
+            "mofa_model_load_seconds_bucket{backend=\"ollama\",model=\"qwen2.5:7b\",le=\"+Inf\"} 1"
+        ));
         // Must have sum and count.
-        assert!(output.contains("mofa_model_load_seconds_sum{backend=\"ollama\",model=\"qwen2.5:7b\"} 1.532"));
-        assert!(output.contains("mofa_model_load_seconds_count{backend=\"ollama\",model=\"qwen2.5:7b\"} 1"));
+        assert!(output.contains(
+            "mofa_model_load_seconds_sum{backend=\"ollama\",model=\"qwen2.5:7b\"} 1.532"
+        ));
+        assert!(
+            output.contains(
+                "mofa_model_load_seconds_count{backend=\"ollama\",model=\"qwen2.5:7b\"} 1"
+            )
+        );
     }
 
     #[test]
@@ -497,10 +516,21 @@ mod tests {
     #[test]
     fn test_float_formatting_spec_compliance() {
         let mut state = MetricsState::new();
-        state.memory_used_bytes.values.insert(Labels::new(), f64::INFINITY);
+        state
+            .memory_used_bytes
+            .values
+            .insert(Labels::new(), f64::INFINITY);
         state.active_requests.values.insert(Labels::new(), f64::NAN);
         let output = render(&state);
-        assert!(output.contains("mofa_memory_used_bytes +Inf"), "Failed to render +Inf: {}", output);
-        assert!(output.contains("mofa_active_requests NaN"), "Failed to render NaN: {}", output);
+        assert!(
+            output.contains("mofa_memory_used_bytes +Inf"),
+            "Failed to render +Inf: {}",
+            output
+        );
+        assert!(
+            output.contains("mofa_active_requests NaN"),
+            "Failed to render NaN: {}",
+            output
+        );
     }
 }

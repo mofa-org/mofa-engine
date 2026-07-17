@@ -6,13 +6,13 @@
 //!
 //! Run with: `cargo run --example mock_harness`
 
-use axum::{extract::State, routing::get, Router};
+use axum::{Router, extract::State, routing::get};
 use mofa_observability::{
-    collector::{create_event_channel, EventSender, MetricsCollector, MetricsState},
+    collector::{EventSender, MetricsCollector, MetricsState, create_event_channel},
     events::*,
     prometheus,
 };
-use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 
@@ -54,14 +54,17 @@ async fn simulate_engine_traffic(sender: EventSender) {
     })));
 
     // Send an initial event to seed the memory budget for Grafana
-    sender.send_critical(EventEnvelope::now(EngineEvent::EvictionTriggered(
-        EvictionTriggered {
-            evicted_model: "init".into(),
-            memory_before_bytes: 0,
-            memory_after_bytes: 0,
-            budget_bytes: 16_000_000_000,
-        },
-    ))).await.expect("Failed to send init event");
+    sender
+        .send_critical(EventEnvelope::now(EngineEvent::EvictionTriggered(
+            EvictionTriggered {
+                evicted_model: "init".into(),
+                memory_before_bytes: 0,
+                memory_after_bytes: 0,
+                budget_bytes: 16_000_000_000,
+            },
+        )))
+        .await
+        .expect("Failed to send init event");
     let mut active_models = 2; // We pre-loaded 2 models
     let mut current_memory = 4_000_000_000_u64;
 
@@ -99,7 +102,7 @@ async fn simulate_engine_traffic(sender: EventSender) {
                     continue; // Can't unload what isn't there!
                 }
                 active_models -= 1;
-                
+
                 // Don't free more than we have
                 let freed = mem_size.min(current_memory);
                 current_memory -= freed;
@@ -119,14 +122,17 @@ async fn simulate_engine_traffic(sender: EventSender) {
 
                 // If eviction, also trigger eviction event
                 if reason == UnloadReason::Eviction {
-                    sender.send_critical(EventEnvelope::now(EngineEvent::EvictionTriggered(
-                        EvictionTriggered {
-                            evicted_model: selected_model.0.into(),
-                            memory_before_bytes: current_memory + freed,
-                            memory_after_bytes: current_memory,
-                            budget_bytes: 16_000_000_000,
-                        },
-                    ))).await.expect("Failed to send eviction event");
+                    sender
+                        .send_critical(EventEnvelope::now(EngineEvent::EvictionTriggered(
+                            EvictionTriggered {
+                                evicted_model: selected_model.0.into(),
+                                memory_before_bytes: current_memory + freed,
+                                memory_after_bytes: current_memory,
+                                budget_bytes: 16_000_000_000,
+                            },
+                        )))
+                        .await
+                        .expect("Failed to send eviction event");
                 }
             }
 
@@ -170,14 +176,17 @@ async fn simulate_engine_traffic(sender: EventSender) {
 
             // 1% chance: Failover
             20..=20 => {
-                sender.send_critical(EventEnvelope::now(EngineEvent::FailoverTriggered(
-                    FailoverTriggered {
-                        failed_model: selected_model.0.into(),
-                        failed_backend: selected_model.1.into(),
-                        fallback_model: "fallback-model".into(),
-                        fallback_backend: "cloud".into(),
-                    },
-                ))).await.expect("Failed to send critical event");
+                sender
+                    .send_critical(EventEnvelope::now(EngineEvent::FailoverTriggered(
+                        FailoverTriggered {
+                            failed_model: selected_model.0.into(),
+                            failed_backend: selected_model.1.into(),
+                            fallback_model: "fallback-model".into(),
+                            fallback_backend: "cloud".into(),
+                        },
+                    )))
+                    .await
+                    .expect("Failed to send critical event");
             }
 
             // 79% chance: Normal Inference Request
@@ -245,7 +254,10 @@ async fn simulate_engine_traffic(sender: EventSender) {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("mofa_observability=info".parse().unwrap()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("mofa_observability=info".parse().unwrap()),
+        )
         .init();
 
     println!("Starting MoFA Engine Observability Mock Harness...");
@@ -275,7 +287,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=======================================================");
     println!("Mock Harness Running!");
     println!("Prometheus Endpoint: http://localhost:{}/metrics", port);
-    println!("Try running: curl -s http://localhost:{}/metrics | grep \"^mofa_\"", port);
+    println!(
+        "Try running: curl -s http://localhost:{}/metrics | grep \"^mofa_\"",
+        port
+    );
     println!("=======================================================");
 
     axum::serve(listener, app).await?;

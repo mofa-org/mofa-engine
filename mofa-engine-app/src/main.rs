@@ -6,28 +6,28 @@
 use clap::Parser;
 use mofa_engine_core::{Engine, EngineConfig};
 use mofa_engine_sdk::start_server;
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, fmt};
-use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::trace::SdkTracerProvider;
-use opentelemetry_sdk::Resource;
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-fn init_tracer(endpoint: &str) -> Result<opentelemetry_sdk::trace::SdkTracer, opentelemetry::trace::TraceError> {
+fn init_tracer(
+    endpoint: &str,
+) -> Result<opentelemetry_sdk::trace::SdkTracer, opentelemetry::trace::TraceError> {
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
         .with_endpoint(endpoint)
         .build()?;
-        
+
     let provider = SdkTracerProvider::builder()
         .with_batch_exporter(exporter)
-        .with_resource(
-            Resource::builder().with_service_name("mofa-engine").build()
-        )
+        .with_resource(Resource::builder().with_service_name("mofa-engine").build())
         .build();
-        
+
     opentelemetry::global::set_tracer_provider(provider.clone());
-    
+
     use opentelemetry::trace::TracerProvider;
     Ok(provider.tracer("mofa-engine"))
 }
@@ -96,7 +96,8 @@ async fn main() -> anyhow::Result<()> {
 
     if observability_enabled {
         tracing::info!("Initializing observability pipeline...");
-        let (metrics, sender) = mofa_observability::collector::init_pipeline(otlp_endpoint.as_deref());
+        let (metrics, sender) =
+            mofa_observability::collector::init_pipeline(otlp_endpoint.as_deref());
         metrics_state = Some(metrics);
         obs_sender = Some(sender);
     }
@@ -112,7 +113,8 @@ async fn main() -> anyhow::Result<()> {
         let engine_clone = Arc::clone(&engine);
         let metrics_clone = metrics_state.clone();
         tokio::spawn(async move {
-            mofa_engine_sdk::observability_bridge::run(rx, sender, engine_clone, metrics_clone).await;
+            mofa_engine_sdk::observability_bridge::run(rx, sender, engine_clone, metrics_clone)
+                .await;
         });
     }
 

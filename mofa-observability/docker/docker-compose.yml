@@ -4,7 +4,7 @@ services:
       context: ../../
       dockerfile: mofa-observability/docker/Dockerfile
     ports:
-      - "9090:9090"
+      - "9092:9092"
 
   prometheus:
     image: prom/prometheus:latest
