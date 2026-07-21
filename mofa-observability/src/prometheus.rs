@@ -215,6 +215,7 @@ pub fn render(state: &MetricsState) -> String {
     render_counter(&mut buf, &state.preflight_misses_total);
     render_counter(&mut buf, &state.tokens_input_total);
     render_counter(&mut buf, &state.tokens_output_total);
+    render_counter(&mut buf, &state.thought_tokens_total);
     render_counter(&mut buf, &state.events_dropped_total);
 
     // ── Histograms ───────────────────────────────────────────────────────
@@ -227,6 +228,7 @@ pub fn render(state: &MetricsState) -> String {
     render_gauge(&mut buf, &state.memory_budget_bytes);
     render_gauge(&mut buf, &state.models_loaded);
     render_gauge(&mut buf, &state.active_requests);
+    render_gauge(&mut buf, &state.estimated_cost_usd);
 
     buf
 }

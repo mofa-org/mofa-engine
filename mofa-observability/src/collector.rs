@@ -241,6 +241,7 @@ pub struct MetricsState {
     pub preflight_misses_total: CounterFamily,
     pub tokens_input_total: CounterFamily,
     pub tokens_output_total: CounterFamily,
+    pub thought_tokens_total: CounterFamily,
     pub events_dropped_total: CounterFamily,
 
     // ── Histograms ───────────────────────────────────────────────────────
@@ -253,6 +254,7 @@ pub struct MetricsState {
     pub memory_budget_bytes: GaugeFamily,
     pub models_loaded: GaugeFamily,
     pub active_requests: GaugeFamily,
+    pub estimated_cost_usd: GaugeFamily,
 }
 
 impl MetricsState {
@@ -294,6 +296,14 @@ impl MetricsState {
             tokens_output_total: CounterFamily::new(
                 "mofa_tokens_output_total",
                 "Total output tokens generated",
+            ),
+            thought_tokens_total: CounterFamily::new(
+                "mofa_thought_tokens_total",
+                "Total reasoning thought tokens generated",
+            ),
+            estimated_cost_usd: GaugeFamily::new(
+                "mofa_estimated_cost_usd",
+                "Total estimated USD cost incurred",
             ),
             events_dropped_total: CounterFamily::new(
                 "mofa_events_dropped_total",
@@ -396,7 +406,7 @@ impl MetricsState {
                     );
                 }
 
-                // Counter: tokens
+                // Counter: tokens & cost
                 if let Some(tokens_in) = e.tokens_in {
                     self.tokens_input_total
                         .inc_by(Labels::new().add("model", &e.model_id), tokens_in);
@@ -404,6 +414,22 @@ impl MetricsState {
                 if let Some(tokens_out) = e.tokens_out {
                     self.tokens_output_total
                         .inc_by(Labels::new().add("model", &e.model_id), tokens_out);
+                }
+                if let (Some(tokens_in), Some(tokens_out)) = (e.tokens_in, e.tokens_out) {
+                    let cost = crate::pricing::estimate_cost_usd(&e.backend, &e.model_id, tokens_in as u32, tokens_out as u32);
+                    let backend_lower = e.backend.to_lowercase();
+                    let locality = if backend_lower == "ollama" || backend_lower == "kokoro" || backend_lower == "funasr" || backend_lower == "local" {
+                        "local"
+                    } else {
+                        "cloud"
+                    };
+                    self.estimated_cost_usd.add(
+                        Labels::new()
+                            .add("provider", &e.backend)
+                            .add("locality", locality)
+                            .add("model", &e.model_id),
+                        cost,
+                    );
                 }
 
                 // Gauge: active requests down
@@ -1233,5 +1259,55 @@ mod tests {
         assert!(!state.requests_total.values.contains_key(&labels_stale));
         assert!(state.requests_total.last_seen.contains_key(&labels_fresh));
         assert!(!state.requests_total.last_seen.contains_key(&labels_stale));
+    }
+
+    #[test]
+    fn test_cost_accumulation_local_vs_cloud() {
+        let mut state = make_state();
+
+        // Local request (Ollama) -> $0.00
+        state.process_event(&EventEnvelope::now(EngineEvent::RequestCompleted(
+            RequestCompleted {
+                model_id: "gemma3:4b".into(),
+                backend: "ollama".into(),
+                capability: Capability::Chat,
+                duration_ms: 1000,
+                ttft_ms: None,
+                tokens_in: Some(1000),
+                tokens_out: Some(1000),
+                model_was_hot: Some(true),
+                success: true,
+                error_code: None,
+            },
+        )));
+
+        // Cloud request (OpenAI gpt-4o) -> $0.0125
+        state.process_event(&EventEnvelope::now(EngineEvent::RequestCompleted(
+            RequestCompleted {
+                model_id: "gpt-4o".into(),
+                backend: "openai".into(),
+                capability: Capability::Chat,
+                duration_ms: 500,
+                ttft_ms: None,
+                tokens_in: Some(1000),
+                tokens_out: Some(1000),
+                model_was_hot: Some(true),
+                success: true,
+                error_code: None,
+            },
+        )));
+
+        let local_labels = Labels::new()
+            .add("provider", "ollama")
+            .add("locality", "local")
+            .add("model", "gemma3:4b");
+        let cloud_labels = Labels::new()
+            .add("provider", "openai")
+            .add("locality", "cloud")
+            .add("model", "gpt-4o");
+
+        assert_eq!(*state.estimated_cost_usd.values.get(&local_labels).unwrap(), 0.0);
+        let cloud_cost = *state.estimated_cost_usd.values.get(&cloud_labels).unwrap();
+        assert!((cloud_cost - 0.0125).abs() < 1e-5);
     }
 }
