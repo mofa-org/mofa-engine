@@ -11,12 +11,13 @@ export function Badge({ className, variant = 'default', capability, children, ..
   let finalVariant = variant;
   
   if (capability) {
-    switch (capability) {
-      case 'Chat': finalVariant = 'blue'; break;
-      case 'Tts': finalVariant = 'purple'; break;
-      case 'Asr': finalVariant = 'cyan'; break;
-      case 'ImageGen': finalVariant = 'yellow'; break;
-      case 'Embedding': finalVariant = 'green'; break;
+    const capLower = capability.toLowerCase();
+    switch (capLower) {
+      case 'chat': finalVariant = 'blue'; break;
+      case 'tts': finalVariant = 'purple'; break;
+      case 'asr': finalVariant = 'cyan'; break;
+      case 'imagegen': case 'image_gen': finalVariant = 'yellow'; break;
+      case 'embedding': finalVariant = 'green'; break;
       default: finalVariant = 'default';
     }
   }

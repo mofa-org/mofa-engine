@@ -2,8 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { engine } from '../engine';
 import { ModelCard } from '../engine/types';
 import { StatusDot } from '../shared/StatusDot';
-import { Badge } from '../shared/Badge';
 import { Cpu } from 'lucide-react';
+
 
 export function ModelGrid() {
   const [models, setModels] = useState<ModelCard[]>([]);
@@ -26,7 +26,7 @@ export function ModelGrid() {
     return () => unsubscribe();
   }, []);
 
-  const activeModels = models.filter(m => m.status !== 'Cold' || m.residency === 'Remote');
+  const activeModels = models.filter(m => (m.status || '').toLowerCase() !== 'cold' || (m.residency || '').toLowerCase() === 'remote');
 
   if (activeModels.length === 0) {
     return (
@@ -41,21 +41,23 @@ export function ModelGrid() {
     <div className="grid gap-1">
       {activeModels.map(model => {
         const memGb = model.memory_estimate_bytes ? (model.memory_estimate_bytes / 1024 / 1024 / 1024).toFixed(1) + 'GB' : '0GB';
+        const isRemote = (model.residency || '').toLowerCase() === 'remote';
+        const statusLower = (model.status || '').toLowerCase();
         
         return (
-          <div key={model.id} className={`px-2.5 py-2 border-b border-black/[0.03] last:border-0 hover:bg-black/[0.02] transition-colors rounded-sm flex items-center justify-between ${model.residency === 'Remote' ? 'opacity-70' : ''}`}>
+          <div key={model.id} className={`px-2.5 py-2 border-b border-black/[0.03] last:border-0 hover:bg-black/[0.02] transition-colors rounded-sm flex items-center justify-between ${isRemote ? 'opacity-70' : ''}`}>
             <div className="flex items-center gap-2.5">
               <StatusDot status={
-                model.residency === 'Remote' ? 'Healthy' : 
-                model.status === 'Hot' || model.status === 'Busy' ? 'Healthy' : 
-                model.status === 'Warming' ? 'Connecting' : 
-                model.status === 'Failed' ? 'Failed' : 'Failed'
+                isRemote ? 'Healthy' : 
+                statusLower === 'hot' || statusLower === 'busy' ? 'Healthy' : 
+                statusLower === 'warming' ? 'Connecting' : 
+                statusLower === 'failed' ? 'Failed' : 'Failed'
               } />
               <div>
                 <div className="text-[12px] font-mono text-text-primary leading-none mb-1 tracking-tight">{model.id}</div>
                 <div className="text-[10px] text-text-dim leading-none flex gap-1.5 items-center">
                   <span>{model.provider}</span>
-                  {model.residency !== 'Remote' && (
+                  {!isRemote && (
                     <>
                       <span>·</span>
                       <span>{memGb}</span>
@@ -66,12 +68,12 @@ export function ModelGrid() {
             </div>
             <div className="flex flex-col items-end gap-1">
               <span className={`text-[9px] font-mono px-1 py-0.5 rounded ${
-                model.residency === 'Remote' ? 'bg-black/5 text-text-secondary' : 
-                model.status === 'Hot' ? 'bg-accent-green/10 text-accent-green' : 
-                model.status === 'Warming' ? 'bg-accent-cyan/10 text-accent-cyan' :
+                isRemote ? 'bg-black/5 text-text-secondary' : 
+                statusLower === 'hot' ? 'bg-accent-green/10 text-accent-green' : 
+                statusLower === 'warming' ? 'bg-accent-cyan/10 text-accent-cyan' :
                 'bg-black/5 text-text-dim'
               }`}>
-                {model.residency === 'Remote' ? 'REMOTE' : model.status.toUpperCase()}
+                {isRemote ? 'REMOTE' : statusLower.toUpperCase()}
               </span>
             </div>
           </div>
@@ -79,4 +81,5 @@ export function ModelGrid() {
       })}
     </div>
   );
+
 }

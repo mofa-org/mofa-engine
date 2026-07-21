@@ -1,12 +1,13 @@
-export type Capability = 'Chat' | 'Tts' | 'Asr' | 'ImageGen' | 'VideoGen' | 'Vlm' | 'Embedding';
-export type ModelStatus = 'Cold' | 'Warming' | 'Hot' | 'Busy' | 'Failed';
-export type ModelResidency = 'Unknown' | 'Unloaded' | 'Loading' | 'Loaded' | 'Unloading' | 'Remote';
-export type ModelAvailability = 'Discovered' | 'Configured' | 'Unavailable';
-export type ExecutionState = 'Idle' | 'Active' | 'Overloaded';
-export type CostTier = 'Free' | 'Low' | 'Medium' | 'High';
-export type CircuitState = 'Closed' | 'Open' | 'HalfOpen';
-export type BackendHealth = 'Healthy' | 'Degraded' | 'Unhealthy';
+export type Capability = 'Chat' | 'Tts' | 'Asr' | 'ImageGen' | 'VideoGen' | 'Vlm' | 'Embedding' | 'chat' | 'tts' | 'asr' | 'imagegen' | 'image_gen' | 'videogen' | 'video_gen' | 'vlm' | 'embedding';
+export type ModelStatus = 'Cold' | 'Warming' | 'Hot' | 'Busy' | 'Failed' | 'cold' | 'warming' | 'hot' | 'busy' | 'failed';
+export type ModelResidency = 'Unknown' | 'Unloaded' | 'Loading' | 'Loaded' | 'Unloading' | 'Remote' | 'unknown' | 'unloaded' | 'loading' | 'loaded' | 'unloading' | 'remote';
+export type ModelAvailability = 'Discovered' | 'Configured' | 'Unavailable' | 'discovered' | 'configured' | 'unavailable';
+export type ExecutionState = 'Idle' | 'Active' | 'Overloaded' | 'idle' | 'active' | 'overloaded';
+export type CostTier = 'Free' | 'Low' | 'Medium' | 'High' | 'free' | 'low' | 'medium' | 'high';
+export type CircuitState = 'Closed' | 'Open' | 'HalfOpen' | 'closed' | 'open' | 'half_open' | 'half-open';
+export type BackendHealth = 'Healthy' | 'Degraded' | 'Unhealthy' | 'healthy' | 'degraded' | 'unhealthy';
 export type FallbackPolicy = 'capability_only' | 'disabled' | 'allow_named';
+
 
 export interface HealthResponse {
   status: string;
