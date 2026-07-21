@@ -4,12 +4,21 @@
 //! Local execution providers (e.g., `ollama`, `kokoro`, `funasr`) yield $0.00 by default.
 
 /// Calculates estimated USD cost for a given provider, model, prompt tokens, and completion tokens.
-pub fn estimate_cost_usd(provider: &str, model: &str, prompt_tokens: u32, completion_tokens: u32) -> f64 {
+pub fn estimate_cost_usd(
+    provider: &str,
+    model: &str,
+    prompt_tokens: u32,
+    completion_tokens: u32,
+) -> f64 {
     let provider_lower = provider.to_lowercase();
     let model_lower = model.to_lowercase();
 
     // Local providers are free ($0.00)
-    if provider_lower == "ollama" || provider_lower == "kokoro" || provider_lower == "funasr" || provider_lower == "local" {
+    if provider_lower == "ollama"
+        || provider_lower == "kokoro"
+        || provider_lower == "funasr"
+        || provider_lower == "local"
+    {
         return 0.0;
     }
 

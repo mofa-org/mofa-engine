@@ -416,9 +416,18 @@ impl MetricsState {
                         .inc_by(Labels::new().add("model", &e.model_id), tokens_out);
                 }
                 if let (Some(tokens_in), Some(tokens_out)) = (e.tokens_in, e.tokens_out) {
-                    let cost = crate::pricing::estimate_cost_usd(&e.backend, &e.model_id, tokens_in as u32, tokens_out as u32);
+                    let cost = crate::pricing::estimate_cost_usd(
+                        &e.backend,
+                        &e.model_id,
+                        tokens_in as u32,
+                        tokens_out as u32,
+                    );
                     let backend_lower = e.backend.to_lowercase();
-                    let locality = if backend_lower == "ollama" || backend_lower == "kokoro" || backend_lower == "funasr" || backend_lower == "local" {
+                    let locality = if backend_lower == "ollama"
+                        || backend_lower == "kokoro"
+                        || backend_lower == "funasr"
+                        || backend_lower == "local"
+                    {
                         "local"
                     } else {
                         "cloud"
@@ -1306,7 +1315,10 @@ mod tests {
             .add("locality", "cloud")
             .add("model", "gpt-4o");
 
-        assert_eq!(*state.estimated_cost_usd.values.get(&local_labels).unwrap(), 0.0);
+        assert_eq!(
+            *state.estimated_cost_usd.values.get(&local_labels).unwrap(),
+            0.0
+        );
         let cloud_cost = *state.estimated_cost_usd.values.get(&cloud_labels).unwrap();
         assert!((cloud_cost - 0.0125).abs() < 1e-5);
     }
