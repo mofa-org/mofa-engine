@@ -1,0 +1,135 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "EngineEvent",
+  "description": "Exhaustive JSON Schema for all 10 EngineEvent variants in MoFA Engine, verified against origin/engine mofa-kernel/src/types.rs.",
+  "type": "object",
+  "required": ["type"],
+  "properties": {
+    "type": {
+      "type": "string",
+      "enum": [
+        "model_status_changed",
+        "model_residency_changed",
+        "request_started",
+        "request_completed",
+        "memory_changed",
+        "model_evicted",
+        "preflight_warm_started",
+        "preflight_warm_completed",
+        "provider_health_changed",
+        "discovery_completed"
+      ]
+    },
+    "timestamp": {
+      "type": "integer",
+      "description": "Unix timestamp in milliseconds when event was emitted."
+    }
+  },
+  "oneOf": [
+    {
+      "title": "ModelStatusChanged",
+      "description": "Emitted when model status transitions (e.g. Cold -> Hot)",
+      "properties": {
+        "type": { "const": "model_status_changed" },
+        "model_id": { "type": "string", "example": "ollama/gemma3:4b" },
+        "old": { "type": "string", "enum": ["cold", "warming", "hot", "busy", "failed"] },
+        "new": { "type": "string", "enum": ["cold", "warming", "hot", "busy", "failed"] }
+      },
+      "required": ["type", "model_id", "old", "new"]
+    },
+    {
+      "title": "ModelResidencyChanged",
+      "description": "Emitted when model residency changes (e.g. Unloaded -> Loaded)",
+      "properties": {
+        "type": { "const": "model_residency_changed" },
+        "model_id": { "type": "string", "example": "ollama/gemma3:4b" },
+        "old": { "type": "string", "enum": ["unknown", "unloaded", "loading", "loaded", "unloading", "remote"] },
+        "new": { "type": "string", "enum": ["unknown", "unloaded", "loading", "loaded", "unloading", "remote"] }
+      },
+      "required": ["type", "model_id", "old", "new"]
+    },
+    {
+      "title": "RequestStarted",
+      "description": "Emitted when inference request processing starts",
+      "properties": {
+        "type": { "const": "request_started" },
+        "request_id": { "type": "string", "example": "req-9842a1" },
+        "capability": { "type": ["string", "null"], "enum": ["chat", "tts", "asr", "image_gen", "video_gen", "vlm", "embedding", null] },
+        "model_id": { "type": "string", "example": "ollama/gemma3:4b" }
+      },
+      "required": ["type", "request_id", "model_id"]
+    },
+    {
+      "title": "RequestCompleted",
+      "description": "Emitted when inference request finishes successfully or with error",
+      "properties": {
+        "type": { "const": "request_completed" },
+        "request_id": { "type": "string", "example": "req-9842a1" },
+        "duration_ms": { "type": "integer", "example": 1850 },
+        "success": { "type": "boolean", "example": true }
+      },
+      "required": ["type", "request_id", "duration_ms", "success"]
+    },
+    {
+      "title": "MemoryChanged",
+      "description": "Emitted when overall system RAM/VRAM footprint allocation changes",
+      "properties": {
+        "type": { "const": "memory_changed" },
+        "used_bytes": { "type": "integer", "example": 3339000000 },
+        "total_bytes": { "type": "integer", "example": 8589934592 }
+      },
+      "required": ["type", "used_bytes", "total_bytes"]
+    },
+    {
+      "title": "ModelEvicted",
+      "description": "Emitted when LRU memory pressure forces a model eviction from VRAM",
+      "properties": {
+        "type": { "const": "model_evicted" },
+        "model_id": { "type": "string", "example": "ollama/llama3.2:1b" },
+        "reason": { "type": "string", "example": "memory_pressure" }
+      },
+      "required": ["type", "model_id", "reason"]
+    },
+    {
+      "title": "PreflightWarmStarted",
+      "description": "Emitted when preflight predictor initiates predictive model warming",
+      "properties": {
+        "type": { "const": "preflight_warm_started" },
+        "model_id": { "type": "string", "example": "kokoro/kokoro" },
+        "source": { "type": "string", "enum": ["hint", "subscription", "history"] }
+      },
+      "required": ["type", "model_id", "source"]
+    },
+    {
+      "title": "PreflightWarmCompleted",
+      "description": "Emitted when predictive warming finishes loading the model",
+      "properties": {
+        "type": { "const": "preflight_warm_completed" },
+        "model_id": { "type": "string", "example": "kokoro/kokoro" },
+        "success": { "type": "boolean", "example": true }
+      },
+      "required": ["type", "model_id", "success"]
+    },
+    {
+      "title": "ProviderHealthChanged",
+      "description": "Emitted when provider health check or circuit breaker state changes",
+      "properties": {
+        "type": { "const": "provider_health_changed" },
+        "provider": { "type": "string", "example": "ollama" },
+        "health": { "type": "string", "enum": ["healthy", "degraded", "unavailable", "unknown"] }
+      },
+      "required": ["type", "provider", "health"]
+    },
+    {
+      "title": "DiscoveryCompleted",
+      "description": "Emitted when provider model discovery task finishes",
+      "properties": {
+        "type": { "const": "discovery_completed" },
+        "provider": { "type": "string", "example": "ollama" },
+        "models": { "type": "integer", "example": 2 },
+        "success": { "type": "boolean", "example": true }
+      },
+      "required": ["type", "provider", "models", "success"]
+    }
+  ]
+}

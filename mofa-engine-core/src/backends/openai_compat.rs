@@ -385,15 +385,15 @@ impl OpenAiCompatProvider {
             detail: format!("TTS read error: {e}"),
         })?;
 
-        let path = std::env::temp_dir().join(format!("mofa_tts_{}.mp3", uuid::Uuid::new_v4()));
+        let file_name = format!("mofa_tts_{}.wav", uuid::Uuid::new_v4());
+        let path = std::env::temp_dir().join(&file_name);
         std::fs::write(&path, &bytes)
             .map_err(|e| EngineError::Internal(format!("write error: {e}")))?;
-        let path = path.to_string_lossy().to_string();
 
         let duration_ms = start.elapsed().as_millis() as u64;
         Ok(InferenceResponse {
             text: None,
-            file: Some(path),
+            file: Some(file_name),
             model_used: model_name.to_string(),
             provider: self.name.clone(),
             duration_ms,

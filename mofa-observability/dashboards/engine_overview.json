@@ -1,0 +1,99 @@
+{
+  "title": "MoFA Engine Overview",
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "timezone": "browser",
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Request Rate (1m)",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "sum(rate(mofa_requests_total[1m]))",
+          "legendFormat": "Requests / sec"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Error Rate",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "sum(rate(mofa_requests_total{status=\"error\"}[5m])) / sum(rate(mofa_requests_total[5m])) * 100",
+          "legendFormat": "Error %"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Models Loaded",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "mofa_models_loaded",
+          "legendFormat": "Count"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Memory Usage %",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "mofa_memory_used_bytes / mofa_memory_budget_bytes * 100",
+          "legendFormat": "%"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "P95 Request Latency by Capability",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(mofa_request_duration_seconds_bucket[5m])) by (le, capability))",
+          "legendFormat": "{{capability}} P95"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "P95 Time to First Token",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(mofa_ttft_seconds_bucket[5m])) by (le, model))",
+          "legendFormat": "{{model}} TTFT P95"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Requests per Second (by Capability)",
+      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(mofa_requests_total[1m])) by (capability)",
+          "legendFormat": "{{capability}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "fillOpacity": 70 } } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Output Tokens per Second (by Model)",
+      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(mofa_tokens_output_total[1m])) by (model)",
+          "legendFormat": "{{model}}"
+        }
+      ]
+    }
+  ]
+}

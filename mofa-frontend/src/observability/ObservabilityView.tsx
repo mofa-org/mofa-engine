@@ -3,11 +3,12 @@ import { motion } from 'framer-motion';
 import { Card } from '../shared/Card';
 import { Button } from '../shared/Button';
 import { MetricsStrip } from './MetricsStrip';
-import { Activity, LayoutDashboard, Cpu, Network, ExternalLink } from 'lucide-react';
+import { DualTrackView } from './DualTrackView';
+import { Activity, LayoutDashboard, Cpu, Network, ExternalLink, Layers } from 'lucide-react';
 
 const GRAFANA_URL = import.meta.env.VITE_GRAFANA_URL || 'http://localhost:3000';
 
-type TabId = 'overview' | 'memory' | 'routing';
+type TabId = 'dual-track' | 'overview' | 'memory' | 'routing';
 
 interface TabConfig {
   id: TabId;
@@ -18,6 +19,13 @@ interface TabConfig {
 }
 
 const TABS: TabConfig[] = [
+  {
+    id: 'dual-track',
+    label: 'Dual-Track Telemetry',
+    icon: <Layers className="w-4 h-4" />,
+    dashboardPath: '',
+    description: 'Real-time side-by-side comparison of local hardware footprint vs cloud financial cost.'
+  },
   {
     id: 'overview',
     label: 'Engine Overview',
@@ -42,7 +50,7 @@ const TABS: TabConfig[] = [
 ];
 
 export function ObservabilityView() {
-  const [activeTab, setActiveTab] = useState<TabId>('overview');
+  const [activeTab, setActiveTab] = useState<TabId>('dual-track');
   const [grafanaAvailable, setGrafanaAvailable] = useState<boolean | null>(null);
 
   useEffect(() => {
@@ -84,7 +92,7 @@ export function ObservabilityView() {
               Engine Observability
             </h1>
             <p className="text-[14px] text-text-dim mt-1 font-mono">
-              Powered by Prometheus + Grafana
+              Powered by Prometheus + Grafana & Local Telemetry Engine
             </p>
           </div>
           {grafanaAvailable && (
@@ -118,8 +126,10 @@ export function ObservabilityView() {
           ))}
         </div>
 
-        <div className="flex-1 min-h-[800px]">
-          {grafanaAvailable === null ? (
+        <div className="flex-1 min-h-[600px]">
+          {activeTab === 'dual-track' ? (
+            <DualTrackView />
+          ) : grafanaAvailable === null ? (
             <div className="w-full h-full flex items-center justify-center">
               <div className="text-text-dim animate-pulse text-sm">Checking observability stack...</div>
             </div>
@@ -129,10 +139,10 @@ export function ObservabilityView() {
                 <div className="text-[13px] font-medium text-text-primary">{activeConfig.label}</div>
                 <div className="text-[11px] text-text-dim">{activeConfig.description}</div>
               </div>
-              <div className="w-full h-[calc(100%-45px)] bg-black/5">
+              <div className="w-full h-[calc(100%-45px)] min-h-[600px] bg-black/5">
                 <iframe
                   src={`${GRAFANA_URL}${activeConfig.dashboardPath}?kiosk&from=now-5m&to=now&refresh=5s`}
-                  className="w-full h-full border-none"
+                  className="w-full h-full border-none min-h-[600px]"
                   title={activeConfig.label}
                 />
               </div>
