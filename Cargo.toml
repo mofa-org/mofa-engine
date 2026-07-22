@@ -5,6 +5,7 @@ members = [
     "mofa-engine-core",
     "mofa-engine-sdk",
     "mofa-engine-app",
+    "mofa-observability",
 ]
 
 [workspace.package]
@@ -36,6 +37,10 @@ anyhow = "1"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+opentelemetry = "0.28.0"
+opentelemetry_sdk = { version = "0.28.0", features = ["rt-tokio"] }
+tracing-opentelemetry = "0.29.0"
+opentelemetry-otlp = { version = "0.28.0", features = ["grpc-tonic", "trace"] }
 
 # Utilities
 uuid = { version = "1", features = ["v4"] }
