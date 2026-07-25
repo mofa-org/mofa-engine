@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use mofa_kernel::{
     BackendFeature, BackendHealth, Capability, CostTier, EngineError, InferenceRequest,
     InferenceResponse, LifecycleResult, ModelAvailability, ModelCard, ModelResidency, Provider,
-    ProviderKind, StreamSink, canonical_model_id, model_id_name,
+    ProviderKind, StreamDelta, StreamSink, canonical_model_id, model_id_name,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -475,7 +475,7 @@ impl Provider for OllamaProvider {
                 if let Some(chunk) = parse_stream_line(&line)
                     && let Some(delta) = apply(chunk, &mut full)
                 {
-                    let _ = sink.send(delta).await;
+                    let _ = sink.send(StreamDelta::Text(delta)).await;
                 }
             }
         }
@@ -483,7 +483,7 @@ impl Provider for OllamaProvider {
         if let Some(chunk) = parse_stream_line(&buf)
             && let Some(delta) = apply(chunk, &mut full)
         {
-            let _ = sink.send(delta).await;
+            let _ = sink.send(StreamDelta::Text(delta)).await;
         }
 
         let tokens_used = match (prompt_tokens, completion_tokens) {

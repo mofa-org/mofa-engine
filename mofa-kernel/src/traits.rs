@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use crate::error::EngineError;
 use crate::types::{
     BackendFeature, BackendHealth, InferenceRequest, InferenceResponse, LifecycleResult, ModelCard,
-    ProviderKind, StreamSink,
+    ProviderKind, StreamDelta, StreamSink,
 };
 
 /// A model provider backend.
@@ -62,7 +62,7 @@ pub trait Provider: Send + Sync {
         if let Some(text) = &response.text
             && !text.is_empty()
         {
-            let _ = sink.send(text.clone()).await;
+            let _ = sink.send(StreamDelta::Text(text.clone())).await;
         }
         Ok(response)
     }

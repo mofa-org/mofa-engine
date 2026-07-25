@@ -12,14 +12,16 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use mofa_kernel::{
     BackendHealth, BackendStatus, Capability, CostTier, EngineError, EngineEvent, EngineStatus,
-    FallbackPolicy, InferenceRequest, InferenceResponse, ModelCard, ModelResidency, Provider,
-    ProviderHealth, ProviderKind, StreamChunk, model_id_name,
+    FailedAttempt, FallbackPolicy, InferenceRequest, InferenceResponse, ModelCard, ModelResidency,
+    Provider, ProviderHealth, ProviderKind, StreamChunk, StreamDelta, model_id_name,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore, broadcast, mpsc};
 use tokio::task::{AbortHandle, JoinHandle};
 
-use crate::backends::{LocalTtsProvider, OllamaProvider, OpenAiCompatProvider};
+use crate::backends::{
+    LiterLLMProvider, LocalAsrProvider, LocalTtsProvider, OllamaProvider, OpenAiCompatProvider,
+};
 use crate::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerRegistry, CircuitState};
 use crate::config::{EngineConfig, PreflightConfig, TimeoutConfig};
 use crate::memory::{AllocationSnapshot, MemoryManager};
@@ -186,6 +188,14 @@ impl Engine {
                     cost_tier,
                     config.artifacts.dir.clone(),
                 )?),
+                ProviderKind::LiterLlm => Arc::new(LiterLLMProvider::new(
+                    &pc.name,
+                    pc.api_key.clone(),
+                    &pc.base_url,
+                    pc.models.clone(),
+                    cost_tier,
+                    config.artifacts.dir.clone(),
+                )?),
                 ProviderKind::LocalTts => {
                     let command = pc.command.clone().ok_or_else(|| {
                         EngineError::Config(format!(
@@ -198,6 +208,21 @@ impl Engine {
                         command,
                         pc.args.clone(),
                         pc.output_format.clone(),
+                        pc.output_dir.clone(),
+                        pc.models.clone(),
+                    ))
+                }
+                ProviderKind::LocalAsr => {
+                    let command = pc.command.clone().ok_or_else(|| {
+                        EngineError::Config(format!(
+                            "provider '{}' (local_asr) requires a command",
+                            pc.name
+                        ))
+                    })?;
+                    Arc::new(LocalAsrProvider::new(
+                        &pc.name,
+                        command,
+                        pc.args.clone(),
                         pc.output_dir.clone(),
                         pc.models.clone(),
                     ))
@@ -429,6 +454,10 @@ impl Engine {
     /// Run inference, recording request-level metrics + token/cost usage.
     pub async fn invoke(&self, req: InferenceRequest) -> Result<InferenceResponse, EngineError> {
         let started = Instant::now();
+        // Capture audit-relevant fields before `req` is consumed by inference.
+        let req_prefer = req.prefer;
+        let req_data_class = req.data_class;
+        let req_session = req.session_id.clone();
         let mut result = self.invoke_inner(req).await;
         let duration_ms = started.elapsed().as_millis() as u64;
         match &mut result {
@@ -437,11 +466,25 @@ impl Engine {
                     self.compute_cost(&resp.provider, resp.prompt_tokens, resp.completion_tokens);
                 self.metrics
                     .record_request(true, duration_ms, resp.fallback_used);
+                let is_local = self.provider_is_local(&resp.provider);
                 self.metrics.record_usage(
                     &resp.provider,
+                    is_local,
                     resp.prompt_tokens,
                     resp.completion_tokens,
                     resp.cost_usd,
+                );
+                // Data-flow audit (S5): record where each request was actually
+                // served so residency is traceable by request/session over time.
+                tracing::info!(
+                    target: "mofa::audit",
+                    request_id = %resp.request_id,
+                    session_id = req_session.as_deref().unwrap_or(""),
+                    data_class = ?req_data_class,
+                    prefer = ?req_prefer,
+                    provider = %resp.provider,
+                    locality = if is_local { "local" } else { "cloud" },
+                    "request served"
                 );
             }
             Err(_) => self.metrics.record_request(false, duration_ms, false),
@@ -460,6 +503,15 @@ impl Engine {
     ) -> Option<f64> {
         let (price_in, price_out) = self.pricing.get(provider).copied()?;
         estimate_cost(price_in, price_out, prompt_tokens, completion_tokens)
+    }
+
+    /// Whether the named provider serves models on-device (local track). Unknown
+    /// providers are treated as cloud so metrics never mislabel spend as local.
+    fn provider_is_local(&self, provider: &str) -> bool {
+        self.providers
+            .iter()
+            .find(|p| p.name == provider)
+            .is_some_and(|p| p.kind.is_local())
     }
 
     /// Run inference.
@@ -488,17 +540,27 @@ impl Engine {
             )));
         }
 
+        // Machine-readable routing reason of the primary candidate, surfaced on
+        // failure so an Agent can see why this plan was chosen.
+        let routing_reason = candidates.first().map(|d| d.reason.clone());
         let mut last_err: Option<EngineError> = None;
+        // Complete per-candidate failure chain (PRD §4.2), in attempt order.
+        let mut chain: Vec<FailedAttempt> = Vec::new();
         for (idx, decision) in candidates.iter().enumerate() {
+            let model_id = decision.model.id.clone();
+            let provider_name = decision.model.provider.clone();
+
             if remaining(overall_deadline).is_zero() {
-                last_err = Some(EngineError::Timeout(
-                    "overall request deadline exceeded".into(),
-                ));
+                let e = EngineError::Timeout("overall request deadline exceeded".into());
+                chain.push(FailedAttempt {
+                    provider: provider_name,
+                    model: model_id_name(&model_id).to_string(),
+                    reason: e.to_string(),
+                });
+                last_err = Some(e);
                 break;
             }
 
-            let model_id = decision.model.id.clone();
-            let provider_name = decision.model.provider.clone();
             let max_concurrency = decision.model.execution.max_concurrency;
 
             match self
@@ -522,13 +584,30 @@ impl Engine {
                         return Err(e);
                     }
                     tracing::warn!("candidate '{model_id}' failed (retryable): {e}");
+                    chain.push(FailedAttempt {
+                        provider: provider_name,
+                        model: model_id_name(&model_id).to_string(),
+                        reason: e.to_string(),
+                    });
                     last_err = Some(e);
                 }
             }
         }
 
-        Err(last_err
-            .unwrap_or_else(|| EngineError::NoCapableModel(Self::requested_capability(&req))))
+        let last = last_err
+            .unwrap_or_else(|| EngineError::NoCapableModel(Self::requested_capability(&req)));
+        // Wrap the exhausted-candidates case so the caller sees the whole chain,
+        // not just the last error. A lone failure keeps its original shape.
+        if chain.len() <= 1 {
+            return Err(last);
+        }
+        Err(EngineError::Failover {
+            code: last.code(),
+            message: last.to_string(),
+            retryable: last.retryable(),
+            chain,
+            routing_reason,
+        })
     }
 
     fn requested_capability(req: &InferenceRequest) -> String {
@@ -791,14 +870,19 @@ impl Engine {
             })
             .await;
 
-        // Forward the provider's text deltas into the output stream as they
-        // arrive. The provider drops its sink when it returns, ending the
-        // forwarder, so all deltas are flushed before the terminal chunk.
-        let (delta_tx, mut delta_rx) = mpsc::channel::<String>(64);
+        // Forward the provider's deltas into the output stream as they arrive,
+        // mapping text vs thought-chain deltas to their respective chunk types.
+        // The provider drops its sink when it returns, ending the forwarder, so
+        // all deltas are flushed before the terminal chunk.
+        let (delta_tx, mut delta_rx) = mpsc::channel::<StreamDelta>(64);
         let forward_out = out.clone();
         let forwarder = tokio::spawn(async move {
             while let Some(delta) = delta_rx.recv().await {
-                if forward_out.send(StreamChunk::Text { delta }).await.is_err() {
+                let chunk = match delta {
+                    StreamDelta::Text(delta) => StreamChunk::Text { delta },
+                    StreamDelta::Reasoning(delta) => StreamChunk::Reasoning { delta },
+                };
+                if forward_out.send(chunk).await.is_err() {
                     break;
                 }
             }
@@ -825,6 +909,7 @@ impl Engine {
                     self.compute_cost(&provider_name, resp.prompt_tokens, resp.completion_tokens);
                 self.metrics.record_usage(
                     &provider_name,
+                    self.provider_is_local(&provider_name),
                     resp.prompt_tokens,
                     resp.completion_tokens,
                     cost_usd,
@@ -1954,6 +2039,7 @@ mod tests {
             messages: vec![Message {
                 role: "user".into(),
                 content: "hello".into(),
+                ..Default::default()
             }],
             input_file: None,
             params: serde_json::Value::Null,
@@ -2123,7 +2209,7 @@ mod tests {
         engine.refresh_resources().await;
 
         let mut req = chat_request(None);
-        req.locality = mofa_kernel::Locality::LocalOnly;
+        req.prefer = mofa_kernel::Prefer::Local;
         // Only a cloud model exists → the request fails rather than leaving the device.
         assert!(matches!(
             engine.invoke(req).await,
@@ -2177,6 +2263,35 @@ mod tests {
         let resp = engine.invoke(chat_request(None)).await.unwrap();
         assert_eq!(resp.provider, "openai");
         assert!(resp.fallback_used);
+    }
+
+    #[tokio::test]
+    async fn exhausted_failover_returns_full_failed_chain() {
+        // Both the local and cloud candidate fail retryably; the engine exhausts
+        // the plan and returns a Failover error carrying *every* attempt (PRD §4.2),
+        // not just the last one — so an Agent can see the whole chain.
+        let local = Arc::new(
+            TestProvider::new("ollama", ProviderKind::Ollama)
+                .with_model("qwen", Capability::Chat, ModelResidency::Loaded, 10 * MB, 1)
+                .behavior(InvokeBehavior::FailRetryable),
+        );
+        let cloud = Arc::new(
+            TestProvider::new("openai", ProviderKind::OpenAiCompatible)
+                .with_model("gpt", Capability::Chat, ModelResidency::Remote, 0, 32)
+                .behavior(InvokeBehavior::FailRetryable),
+        );
+        let engine = build_engine(vec![local, cloud], 1000, 0);
+        engine.refresh_resources().await;
+
+        let err = engine.invoke(chat_request(None)).await.unwrap_err();
+        let info = err.info();
+        assert_eq!(info.failed_chain.len(), 2);
+        // Local is tried first (locality bias), then the cloud fallback.
+        assert_eq!(info.failed_chain[0].provider, "ollama");
+        assert_eq!(info.failed_chain[0].model, "qwen");
+        assert_eq!(info.failed_chain[1].provider, "openai");
+        assert!(info.retryable);
+        assert!(info.routing_reason.is_some());
     }
 
     #[tokio::test]
@@ -2663,9 +2778,11 @@ mod tests {
 
     /// A provider that emits several real text deltas, to prove the engine
     /// forwards incremental output in order (not just the compatibility path).
+    /// `reasoning` deltas (if any) are emitted first as thought-chain increments.
     struct MultiDeltaProvider {
         name: String,
         deltas: Vec<String>,
+        reasoning: Vec<String>,
     }
 
     #[async_trait]
@@ -2728,8 +2845,11 @@ mod tests {
             request: &InferenceRequest,
             sink: mofa_kernel::StreamSink,
         ) -> Result<InferenceResponse, EngineError> {
+            for r in &self.reasoning {
+                let _ = sink.send(StreamDelta::Reasoning(r.clone())).await;
+            }
             for d in &self.deltas {
-                let _ = sink.send(d.clone()).await;
+                let _ = sink.send(StreamDelta::Text(d.clone())).await;
             }
             self.invoke(model_id, request).await
         }
@@ -2768,6 +2888,7 @@ mod tests {
         let provider = Arc::new(MultiDeltaProvider {
             name: "ollama".into(),
             deltas: vec!["Hello".into(), ", ".into(), "world".into()],
+            reasoning: vec![],
         });
         let engine = build_engine(vec![provider], 1000, 0);
         engine.refresh_resources().await;
@@ -2788,6 +2909,38 @@ mod tests {
             }
             other => panic!("expected Completed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn stream_separates_reasoning_from_answer_deltas() {
+        // S2: the thought chain surfaces as `Reasoning` chunks, distinct from the
+        // final answer's `Text` chunks, and both precede the terminal `Completed`.
+        let provider = Arc::new(MultiDeltaProvider {
+            name: "ollama".into(),
+            deltas: vec!["4".into()],
+            reasoning: vec!["2+2".into(), " = ".into()],
+        });
+        let engine = build_engine(vec![provider], 1000, 0);
+        engine.refresh_resources().await;
+
+        let chunks = collect_stream(engine.invoke_stream(chat_request(None))).await;
+        let reasoning: Vec<String> = chunks
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::Reasoning { delta } => Some(delta.clone()),
+                _ => None,
+            })
+            .collect();
+        let text: Vec<String> = chunks
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::Text { delta } => Some(delta.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasoning, vec!["2+2", " = "]);
+        assert_eq!(text, vec!["4"]);
+        assert!(matches!(chunks.last(), Some(StreamChunk::Completed { .. })));
     }
 
     #[tokio::test]

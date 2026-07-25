@@ -132,6 +132,7 @@ async fn main() -> anyhow::Result<()> {
                 messages: vec![Message {
                     role: "user".into(),
                     content: text,
+                    ..Default::default()
                 }],
                 input_file: None,
                 params: serde_json::Value::Null,

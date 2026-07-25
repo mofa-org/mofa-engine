@@ -73,6 +73,53 @@ price_output_per_1k = 0.01
   name = "whisper-1"
   capability = "asr"
 
+# Multi-vendor cloud gateway via the `liter-llm` crate (140+ vendors behind one
+# OpenAI-style contract). Each model `name` is a liter-llm `provider/model` id, so
+# one entry per vendor gives named + capability routing across them while MoFA keeps
+# routing, failover, and dual-track cost/token observability. Leave `api_key` empty
+# to let liter-llm read the vendor's env var (e.g. DEEPSEEK_API_KEY); set `base_url`
+# only to override the vendor default (e.g. a private gateway). Supports chat
+# (streaming) and image generation.
+[[providers]]
+name = "deepseek"
+kind = "liter_llm"
+base_url = ""            # empty → liter-llm uses the vendor default endpoint
+api_key = "${DEEPSEEK_API_KEY}"
+priority = 10
+cost_tier = "low"
+enabled = false          # opt-in: set true once the vendor key is available
+price_input_per_1k = 0.00027
+price_output_per_1k = 0.0011
+
+  # `reasoning_tier` lets `reasoning.effort` (low/medium/high) route to the
+  # matching model: a low-effort request prefers the cheap chat model, a
+  # high-effort one the stronger reasoner.
+  [[providers.models]]
+  name = "deepseek/deepseek-chat"
+  capability = "chat"
+  context_window = 65536
+  reasoning_tier = "low"
+
+  [[providers.models]]
+  name = "deepseek/deepseek-reasoner"
+  capability = "chat"
+  context_window = 65536
+  reasoning_tier = "high"
+
+# A second liter-llm entry for image generation. One entry per vendor: this key
+# authenticates its own models, and liter-llm formats each request per the model's
+# `provider/` prefix (e.g. `openai/dall-e-3` → OpenAI images API).
+# [[providers]]
+# name = "openai-images"
+# kind = "liter_llm"
+# base_url = ""
+# api_key = "${OPENAI_API_KEY}"
+# priority = 10
+# cost_tier = "high"
+#   [[providers.models]]
+#   name = "openai/dall-e-3"
+#   capability = "image_gen"
+
 # Local TTS process-adapter backend. Runs a local command (an MLX/Kokoro or
 # Piper-style CLI) once per synthesis and returns the produced audio file.
 # Enable and point `command`/`args` at your installed runtime. Placeholders:
@@ -92,4 +139,25 @@ enabled = false          # opt-in: set true once the command is installed
   [[providers.models]]
   name = "kokoro"
   capability = "tts"
+  memory_mb = 1024
+
+# Local ASR process-adapter backend. Runs a local command (a FunASR or
+# whisper.cpp-style CLI) once per transcription and returns the recognized text.
+# Enables on-device transcription of long/confidential audio (`prefer=local`).
+# Placeholders:
+#   {input}     path to the source audio file
+#   {output}    path the command must write the transcript to (omit to read stdout)
+#   {language}  language hint from params.language (default `auto`)
+[[providers]]
+name = "local-asr"
+kind = "local_asr"
+base_url = ""            # unused for local_asr, but the field is required
+command = "funasr"
+args = ["--input", "{input}", "--language", "{language}", "--output", "{output}"]
+priority = 2
+enabled = false          # opt-in: set true once the command is installed
+
+  [[providers.models]]
+  name = "funasr"
+  capability = "asr"
   memory_mb = 1024

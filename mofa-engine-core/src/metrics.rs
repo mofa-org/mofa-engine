@@ -21,6 +21,9 @@ struct ProviderUsage {
     /// Accumulated cost in micro-USD (millionths of a dollar) to avoid float
     /// atomics; rendered back to USD.
     cost_micro_usd: AtomicU64,
+    /// Track this provider serves — `"local"` or `"cloud"` (a provider is always
+    /// one or the other). Set on first use; drives the dual-track `locality` label.
+    locality: std::sync::OnceLock<&'static str>,
 }
 
 /// Process-wide engine counters.
@@ -84,14 +87,21 @@ impl EngineMetrics {
     }
 
     /// Record per-provider token usage and cost for one successful request.
+    ///
+    /// `is_local` tags the series with the dual-track `locality` label so the
+    /// dashboard can compare on-device vs cloud spend/throughput (PRD §5.3).
     pub fn record_usage(
         &self,
         provider: &str,
+        is_local: bool,
         prompt_tokens: Option<u32>,
         completion_tokens: Option<u32>,
         cost_usd: Option<f64>,
     ) {
         let entry = self.per_provider.entry(provider.to_string()).or_default();
+        entry
+            .locality
+            .get_or_init(|| if is_local { "local" } else { "cloud" });
         if let Some(p) = prompt_tokens {
             entry.prompt_tokens.fetch_add(p as u64, Ordering::Relaxed);
         }
@@ -248,30 +258,33 @@ impl EngineMetrics {
             ));
         }
 
-        // Dual-track observability: per-provider token and cost totals.
+        // Dual-track observability: per-provider token and cost totals, tagged by
+        // `locality` (local/cloud) so on-device and cloud tracks are comparable.
         out.push_str(
-            "# HELP mofa_tokens_total Tokens processed, by provider and direction.\n\
+            "# HELP mofa_tokens_total Tokens processed, by provider, locality, and direction.\n\
              # TYPE mofa_tokens_total counter\n",
         );
         for entry in self.per_provider.iter() {
             let provider = escape_label_value(entry.key());
+            let locality = entry.locality.get().copied().unwrap_or("unknown");
             out.push_str(&format!(
-                "mofa_tokens_total{{provider=\"{provider}\",direction=\"prompt\"}} {}\n",
+                "mofa_tokens_total{{provider=\"{provider}\",locality=\"{locality}\",direction=\"prompt\"}} {}\n",
                 entry.prompt_tokens.load(Ordering::Relaxed)
             ));
             out.push_str(&format!(
-                "mofa_tokens_total{{provider=\"{provider}\",direction=\"completion\"}} {}\n",
+                "mofa_tokens_total{{provider=\"{provider}\",locality=\"{locality}\",direction=\"completion\"}} {}\n",
                 entry.completion_tokens.load(Ordering::Relaxed)
             ));
         }
         out.push_str(
-            "# HELP mofa_cost_usd_total Estimated spend in USD, by provider.\n\
+            "# HELP mofa_cost_usd_total Estimated spend in USD, by provider and locality.\n\
              # TYPE mofa_cost_usd_total counter\n",
         );
         for entry in self.per_provider.iter() {
             let usd = entry.cost_micro_usd.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+            let locality = entry.locality.get().copied().unwrap_or("unknown");
             out.push_str(&format!(
-                "mofa_cost_usd_total{{provider=\"{}\"}} {usd}\n",
+                "mofa_cost_usd_total{{provider=\"{}\",locality=\"{locality}\"}} {usd}\n",
                 escape_label_value(entry.key())
             ));
         }
@@ -345,19 +358,23 @@ mod tests {
     #[test]
     fn per_provider_token_and_cost_render() {
         let m = EngineMetrics::default();
-        m.record_usage("openai", Some(100), Some(40), Some(0.0021));
-        m.record_usage("openai", Some(50), Some(10), Some(0.0009));
-        m.record_usage("ollama", Some(30), Some(20), None); // local → no cost
+        m.record_usage("openai", false, Some(100), Some(40), Some(0.0021));
+        m.record_usage("openai", false, Some(50), Some(10), Some(0.0009));
+        m.record_usage("ollama", true, Some(30), Some(20), None); // local → no cost
 
         let text = m.render_prometheus(&MetricsGauges::default());
-        assert!(text.contains("mofa_tokens_total{provider=\"openai\",direction=\"prompt\"} 150"));
-        assert!(
-            text.contains("mofa_tokens_total{provider=\"openai\",direction=\"completion\"} 50")
-        );
-        assert!(text.contains("mofa_tokens_total{provider=\"ollama\",direction=\"prompt\"} 30"));
-        // 0.0021 + 0.0009 = 0.003 USD accumulated for openai; ollama has none.
-        assert!(text.contains("mofa_cost_usd_total{provider=\"openai\"} 0.003"));
-        assert!(text.contains("mofa_cost_usd_total{provider=\"ollama\"} 0"));
+        assert!(text.contains(
+            "mofa_tokens_total{provider=\"openai\",locality=\"cloud\",direction=\"prompt\"} 150"
+        ));
+        assert!(text.contains(
+            "mofa_tokens_total{provider=\"openai\",locality=\"cloud\",direction=\"completion\"} 50"
+        ));
+        assert!(text.contains(
+            "mofa_tokens_total{provider=\"ollama\",locality=\"local\",direction=\"prompt\"} 30"
+        ));
+        // 0.0021 + 0.0009 = 0.003 USD accumulated for openai; ollama (local) has none.
+        assert!(text.contains("mofa_cost_usd_total{provider=\"openai\",locality=\"cloud\"} 0.003"));
+        assert!(text.contains("mofa_cost_usd_total{provider=\"ollama\",locality=\"local\"} 0"));
     }
 
     #[test]

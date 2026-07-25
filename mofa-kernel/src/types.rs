@@ -68,6 +68,11 @@ pub enum ProviderKind {
     OpenAiCompatible,
     /// Local process-adapter backend (e.g. an MLX/Kokoro or Piper TTS CLI).
     LocalTts,
+    /// Local process-adapter ASR backend (e.g. a FunASR or whisper.cpp CLI).
+    LocalAsr,
+    /// Multi-vendor cloud gateway via the `liter-llm` crate (143+ providers,
+    /// unified OpenAI-style contract).
+    LiterLlm,
 }
 
 impl ProviderKind {
@@ -75,7 +80,7 @@ impl ProviderKind {
     /// API). Used by routing to prefer local models and by the memory manager
     /// to account for on-device residency.
     pub fn is_local(self) -> bool {
-        matches!(self, Self::Ollama | Self::LocalTts)
+        matches!(self, Self::Ollama | Self::LocalTts | Self::LocalAsr)
     }
 }
 
@@ -268,6 +273,11 @@ pub struct ModelCard {
     pub context_window: u32,
     /// Estimated memory footprint in bytes.
     pub memory_estimate_bytes: u64,
+    /// Reasoning tier this model serves, when configured. Lets `reasoning.effort`
+    /// route `low | medium | high` to cheaper/stronger models (S2). `None` for
+    /// non-tiered models.
+    #[serde(default)]
+    pub reasoning_tier: Option<ReasoningEffort>,
 }
 
 impl ModelCard {
@@ -297,6 +307,7 @@ impl ModelCard {
             cost_tier,
             context_window: 4096,
             memory_estimate_bytes: 0,
+            reasoning_tier: None,
         }
     }
 
@@ -335,12 +346,16 @@ pub fn model_id_name(model_id: &str) -> &str {
 }
 
 /// A single message in a conversation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Message {
     /// Role: "system", "user", "assistant".
     pub role: String,
-    /// Message content.
+    /// Message text content.
     pub content: String,
+    /// Image references for multimodal (VLM) requests — HTTP(S) URLs, `data:`
+    /// URLs, or local file paths. Empty for text-only messages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
 }
 
 /// Named-model fallback behavior.
@@ -356,20 +371,84 @@ pub enum FallbackPolicy {
     AllowNamed,
 }
 
-/// Locality preference for routing (privacy / data-residency guardrail).
+/// Backend-locality preference for routing (privacy / data-residency guardrail).
+///
+/// Matches the PRD `prefer` request field: `auto | local | cloud`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum Locality {
-    /// Normal ranking: local models are preferred but a cloud model can be
-    /// selected or used as a fallback.
+pub enum Prefer {
+    /// Default seven-dimensional scoring: local models are preferred but a cloud
+    /// model can be selected or used as a fallback.
     #[default]
     Auto,
-    /// Local models are ranked strictly ahead of any cloud model, which remains
-    /// available only as a fallback.
-    PreferLocal,
-    /// Hard constraint: only local models may serve the request. If none can,
-    /// the request fails rather than leaving the device.
-    LocalOnly,
+    /// Hard constraint: only local models may serve the request. If none can, the
+    /// request fails rather than leaving the device (fail-not-fallback).
+    #[serde(alias = "local_only")]
+    Local,
+    /// Hard constraint: only cloud models may serve the request.
+    Cloud,
+}
+
+/// Extended-thinking effort for reasoning-capable models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    /// Minimal deliberation — cheapest, routes to the lightest tier.
+    Low,
+    /// Balanced deliberation (default).
+    #[default]
+    Medium,
+    /// Maximum deliberation — routes to the strongest reasoning tier.
+    High,
+}
+
+impl ReasoningEffort {
+    /// Parse a loose config/string value (`low`/`medium`/`high`, any case).
+    pub fn from_str_loose(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "low" => Some(Self::Low),
+            "medium" | "med" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
+}
+
+/// Data-sensitivity classification for a request (S5 privacy moat).
+///
+/// `Confidential` is a hard data-residency constraint: the request is pinned to
+/// local backends regardless of `prefer`, and fails rather than sending sensitive
+/// data to the cloud. Every request's effective locality is written to the audit
+/// log so data flow is traceable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DataClass {
+    /// No residency constraint (default).
+    #[default]
+    Public,
+    /// Organization-internal; no hard constraint, but audited.
+    Internal,
+    /// Sensitive: must never leave the device (implies local-only routing).
+    Confidential,
+}
+
+impl DataClass {
+    /// Whether this class forbids sending the request to a cloud backend.
+    pub fn requires_local(self) -> bool {
+        matches!(self, Self::Confidential)
+    }
+}
+
+/// Deep-thinking controls for a request (S2 Code/PR Review).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Reasoning {
+    /// How much thinking effort to spend; also used for tier routing.
+    #[serde(default)]
+    pub effort: ReasoningEffort,
+    /// Whether the thought chain should be surfaced (streamed as `reasoning`
+    /// increments and returned) rather than stripped from the output.
+    #[serde(default)]
+    pub include: bool,
 }
 
 /// A request to the engine for inference.
@@ -386,9 +465,17 @@ pub struct InferenceRequest {
     /// Named fallback policy.
     #[serde(default)]
     pub fallback_policy: FallbackPolicy,
-    /// Locality preference (privacy guardrail).
+    /// Backend-locality preference / privacy guardrail (`auto | local | cloud`).
+    #[serde(default, alias = "locality")]
+    pub prefer: Prefer,
+    /// Data-sensitivity class. `confidential` pins the request to local backends
+    /// regardless of `prefer` (privacy moat).
     #[serde(default)]
-    pub locality: Locality,
+    pub data_class: DataClass,
+    /// Deep-thinking controls (effort tier + thought-chain visibility). `None`
+    /// keeps standard behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<Reasoning>,
     /// Conversation messages.
     #[serde(default)]
     pub messages: Vec<Message>,
@@ -412,7 +499,9 @@ impl Default for InferenceRequest {
             app_id: None,
             session_id: None,
             fallback_policy: FallbackPolicy::default(),
-            locality: Locality::default(),
+            prefer: Prefer::default(),
+            data_class: DataClass::default(),
+            reasoning: None,
             messages: Vec::new(),
             input_file: None,
             params: serde_json::Value::Null,
@@ -482,6 +571,13 @@ pub enum StreamChunk {
         /// Text delta appended to the output so far.
         delta: String,
     },
+    /// An incremental piece of the model's thought chain (reasoning-capable
+    /// models). Kept distinct from `Text` so callers can display or audit the
+    /// thought chain separately from the final answer (S2).
+    Reasoning {
+        /// Thought-chain delta.
+        delta: String,
+    },
     /// Terminal success event with aggregate metadata and any file output.
     Completed {
         /// Wall-clock duration in milliseconds.
@@ -508,11 +604,32 @@ pub enum StreamChunk {
     Error(ErrorInfo),
 }
 
-/// Channel a provider uses to emit incremental text deltas while streaming.
+/// One incremental delta a provider pushes while streaming: either final-answer
+/// text or a piece of the model's thought chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamDelta {
+    /// A piece of the final answer.
+    Text(String),
+    /// A piece of the thought chain (reasoning-capable models).
+    Reasoning(String),
+}
+
+impl StreamDelta {
+    /// Borrow the delta text regardless of kind.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Text(s) | Self::Reasoning(s) => s,
+        }
+    }
+}
+
+/// Channel a provider uses to emit incremental deltas while streaming.
 ///
 /// The engine owns the surrounding envelope (`Started`/`Completed`/`Error`);
-/// providers push only text deltas here and return the final aggregate response.
-pub type StreamSink = tokio::sync::mpsc::Sender<String>;
+/// providers push [`StreamDelta`] items here and return the final aggregate
+/// response. `Text` deltas become `StreamChunk::Text`, `Reasoning` deltas become
+/// `StreamChunk::Reasoning`.
+pub type StreamSink = tokio::sync::mpsc::Sender<StreamDelta>;
 
 /// Result of a lifecycle operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -731,5 +848,60 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("model_status_changed"));
+    }
+
+    #[test]
+    fn message_images_are_backward_compatible() {
+        // A legacy text-only message (no `images`) still deserializes, and a
+        // text-only message serializes without an `images` field.
+        let m: Message = serde_json::from_str(r#"{"role":"user","content":"hi"}"#).unwrap();
+        assert!(m.images.is_empty());
+        assert!(!serde_json::to_string(&m).unwrap().contains("images"));
+
+        // A multimodal message round-trips its image references.
+        let mm: Message = serde_json::from_str(
+            r#"{"role":"user","content":"what is this?","images":["https://x/a.png"]}"#,
+        )
+        .unwrap();
+        assert_eq!(mm.images, vec!["https://x/a.png"]);
+    }
+
+    #[test]
+    fn prefer_and_reasoning_deserialize_from_contract() {
+        // PRD wire contract: `prefer: local` + `reasoning: { effort: high }`.
+        let req: InferenceRequest = serde_json::from_str(
+            r#"{"prefer":"local","reasoning":{"effort":"high","include":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(req.prefer, Prefer::Local);
+        let r = req.reasoning.unwrap();
+        assert_eq!(r.effort, ReasoningEffort::High);
+        assert!(r.include);
+        // Legacy alias still accepted.
+        let legacy: InferenceRequest =
+            serde_json::from_str(r#"{"locality":"local_only"}"#).unwrap();
+        assert_eq!(legacy.prefer, Prefer::Local);
+    }
+
+    #[test]
+    fn data_class_defaults_public_and_confidential_requires_local() {
+        let default: InferenceRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(default.data_class, DataClass::Public);
+        assert!(!default.data_class.requires_local());
+
+        let sensitive: InferenceRequest =
+            serde_json::from_str(r#"{"data_class":"confidential"}"#).unwrap();
+        assert_eq!(sensitive.data_class, DataClass::Confidential);
+        assert!(sensitive.data_class.requires_local());
+    }
+
+    #[test]
+    fn reasoning_stream_chunk_has_distinct_tag() {
+        let chunk = StreamChunk::Reasoning {
+            delta: "thinking".into(),
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert!(json.contains(r#""type":"reasoning""#));
+        assert!(json.contains(r#""delta":"thinking""#));
     }
 }

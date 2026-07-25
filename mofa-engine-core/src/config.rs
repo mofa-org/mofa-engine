@@ -342,7 +342,7 @@ fn default_enabled() -> bool {
 }
 
 /// A model definition within a provider config.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelDef {
     /// Model name / identifier
     pub name: String,
@@ -352,6 +352,10 @@ pub struct ModelDef {
     pub context_window: Option<u32>,
     /// Estimated memory in megabytes
     pub memory_mb: Option<u64>,
+    /// Reasoning tier (`low`/`medium`/`high`) this model serves, for
+    /// `reasoning.effort` tier routing (S2). Omit for non-reasoning models.
+    #[serde(default)]
+    pub reasoning_tier: Option<String>,
 }
 
 impl EngineConfig {
@@ -508,30 +512,35 @@ impl EngineConfig {
                         capability: "chat".into(),
                         context_window: Some(128000),
                         memory_mb: None,
+                        ..Default::default()
                     },
                     ModelDef {
                         name: "gpt-4o-mini".into(),
                         capability: "chat".into(),
                         context_window: Some(128000),
                         memory_mb: None,
+                        ..Default::default()
                     },
                     ModelDef {
                         name: "tts-1".into(),
                         capability: "tts".into(),
                         context_window: None,
                         memory_mb: None,
+                        ..Default::default()
                     },
                     ModelDef {
                         name: "tts-1-hd".into(),
                         capability: "tts".into(),
                         context_window: None,
                         memory_mb: None,
+                        ..Default::default()
                     },
                     ModelDef {
                         name: "whisper-1".into(),
                         capability: "asr".into(),
                         context_window: None,
                         memory_mb: None,
+                        ..Default::default()
                     },
                 ],
                 enabled: true,
@@ -554,12 +563,14 @@ impl EngineConfig {
                         capability: "chat".into(),
                         context_window: Some(64000),
                         memory_mb: None,
+                        ..Default::default()
                     },
                     ModelDef {
                         name: "deepseek-reasoner".into(),
                         capability: "chat".into(),
                         context_window: Some(64000),
                         memory_mb: None,
+                        ..Default::default()
                     },
                 ],
                 enabled: true,
@@ -582,18 +593,21 @@ impl EngineConfig {
                         capability: "chat".into(),
                         context_window: Some(131072),
                         memory_mb: None,
+                        ..Default::default()
                     },
                     ModelDef {
                         name: "qwen-turbo".into(),
                         capability: "chat".into(),
                         context_window: Some(131072),
                         memory_mb: None,
+                        ..Default::default()
                     },
                     ModelDef {
                         name: "qwen-max".into(),
                         capability: "chat".into(),
                         context_window: Some(32768),
                         memory_mb: None,
+                        ..Default::default()
                     },
                 ],
                 enabled: true,
@@ -615,6 +629,7 @@ impl EngineConfig {
                     capability: "chat".into(),
                     context_window: Some(128000),
                     memory_mb: None,
+                    ..Default::default()
                 }],
                 enabled: true,
                 ..Default::default()
@@ -635,6 +650,7 @@ impl EngineConfig {
                     capability: "chat".into(),
                     context_window: Some(128000),
                     memory_mb: None,
+                    ..Default::default()
                 }],
                 enabled: true,
                 ..Default::default()
@@ -655,6 +671,7 @@ impl EngineConfig {
                     capability: "chat".into(),
                     context_window: Some(128000),
                     memory_mb: None,
+                    ..Default::default()
                 }],
                 enabled: true,
                 ..Default::default()
@@ -692,6 +709,8 @@ impl ProviderConfig {
             "ollama" => Ok(ProviderKind::Ollama),
             "openai_compatible" => Ok(ProviderKind::OpenAiCompatible),
             "local_tts" => Ok(ProviderKind::LocalTts),
+            "local_asr" => Ok(ProviderKind::LocalAsr),
+            "liter_llm" => Ok(ProviderKind::LiterLlm),
             other => Err(EngineError::Config(format!(
                 "unknown provider kind '{}' for provider '{}'",
                 other, self.name

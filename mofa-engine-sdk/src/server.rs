@@ -271,7 +271,9 @@ fn error_status(e: &EngineError) -> StatusCode {
         EngineError::InvalidRequest(_) | EngineError::UnsupportedOperation(_) => {
             StatusCode::BAD_REQUEST
         }
-        EngineError::CircuitOpen(_) => StatusCode::SERVICE_UNAVAILABLE,
+        EngineError::CircuitOpen(_) | EngineError::Failover { .. } => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
         EngineError::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }

@@ -325,6 +325,7 @@ mod tests {
             capability: "tts".into(),
             context_window: None,
             memory_mb: Some(64),
+            ..Default::default()
         }]
     }
 
@@ -338,6 +339,7 @@ mod tests {
             messages: vec![Message {
                 role: "user".into(),
                 content: text.into(),
+                ..Default::default()
             }],
             input_file: None,
             params: serde_json::Value::Null,

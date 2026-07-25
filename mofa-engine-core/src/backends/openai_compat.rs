@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use mofa_kernel::{
     BackendFeature, BackendHealth, Capability, CostTier, EngineError, InferenceRequest,
     InferenceResponse, LifecycleResult, ModelAvailability, ModelCard, ModelResidency, Provider,
-    ProviderKind, canonical_model_id, model_id_name,
+    ProviderKind, ReasoningEffort, StreamDelta, StreamSink, canonical_model_id, model_id_name,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -82,12 +82,23 @@ impl OpenAiCompatProvider {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Default)]
 struct ChatCompletionRequest {
     model: String,
     messages: Vec<ChatMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
+}
+
+/// Ask the server to emit a final usage-only chunk during streaming (OpenAI
+/// only reports token counts in a stream when this is set).
+#[derive(Debug, Serialize, Default)]
+struct StreamOptions {
+    include_usage: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -114,6 +125,59 @@ struct ChatUsage {
     prompt_tokens: Option<u32>,
     #[serde(default)]
     completion_tokens: Option<u32>,
+}
+
+/// One `chat.completion.chunk` object from an OpenAI-style SSE stream.
+#[derive(Debug, Deserialize)]
+struct ChatCompletionChunk {
+    #[serde(default)]
+    choices: Vec<ChatChunkChoice>,
+    /// Present only on the terminal usage chunk (requires `stream_options`).
+    #[serde(default)]
+    usage: Option<ChatUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatChunkChoice {
+    #[serde(default)]
+    delta: ChatDelta,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ChatDelta {
+    #[serde(default)]
+    content: Option<String>,
+}
+
+/// A parsed SSE event from the chat stream.
+enum SseEvent {
+    /// A `chat.completion.chunk` payload.
+    Chunk(ChatCompletionChunk),
+    /// The terminal `data: [DONE]` sentinel.
+    Done,
+}
+
+/// Parse one SSE event block (the bytes preceding a blank-line delimiter).
+///
+/// Concatenates any `data:` field lines, ignoring comments/`event:` lines and
+/// tolerating `\r\n`. Blank blocks and unparseable payloads yield `None`.
+fn parse_sse_event(block: &[u8]) -> Option<SseEvent> {
+    let text = std::str::from_utf8(block).ok()?;
+    let mut data = String::new();
+    for line in text.lines() {
+        if let Some(rest) = line.trim_start().strip_prefix("data:") {
+            data.push_str(rest.trim());
+        }
+    }
+    if data.is_empty() {
+        return None;
+    }
+    if data == "[DONE]" {
+        return Some(SseEvent::Done);
+    }
+    serde_json::from_str::<ChatCompletionChunk>(&data)
+        .ok()
+        .map(SseEvent::Chunk)
 }
 
 #[derive(Debug, Serialize)]
@@ -152,6 +216,10 @@ impl Provider for OpenAiCompatProvider {
                 card.context_window = m.context_window.unwrap_or(4096);
                 card.memory_estimate_bytes = m.memory_mb.unwrap_or(0) * 1024 * 1024;
                 card.execution.max_concurrency = 32;
+                card.reasoning_tier = m
+                    .reasoning_tier
+                    .as_deref()
+                    .and_then(ReasoningEffort::from_str_loose);
                 card.refresh_status();
                 Some(card)
             })
@@ -239,6 +307,147 @@ impl Provider for OpenAiCompatProvider {
             ))),
         }
     }
+
+    /// Real per-token streaming over OpenAI-style Server-Sent Events.
+    ///
+    /// Overrides the pseudo-streaming default: sends `stream: true`, reads the
+    /// response body incrementally, and forwards each `choices[].delta.content`
+    /// token through `sink` as it arrives. Only chat streams token-by-token;
+    /// other capabilities fall back to a single-shot emit via [`invoke`].
+    async fn stream(
+        &self,
+        model_id: &str,
+        request: &InferenceRequest,
+        sink: StreamSink,
+    ) -> Result<InferenceResponse, EngineError> {
+        let capability = request.capability.unwrap_or(Capability::Chat);
+        if capability != Capability::Chat {
+            let response = self.invoke(model_id, request).await?;
+            if let Some(text) = &response.text
+                && !text.is_empty()
+            {
+                let _ = sink.send(StreamDelta::Text(text.clone())).await;
+            }
+            return Ok(response);
+        }
+
+        let model_name = model_id_name(model_id);
+        let messages: Vec<ChatMessage> = request
+            .messages
+            .iter()
+            .map(|m| ChatMessage {
+                role: m.role.clone(),
+                content: m.content.clone(),
+            })
+            .collect();
+        if messages.is_empty() {
+            return Err(EngineError::InvalidRequest("no messages provided".into()));
+        }
+        let max_tokens = request
+            .params
+            .get("max_tokens")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+
+        let body = ChatCompletionRequest {
+            model: model_name.to_string(),
+            messages,
+            max_tokens,
+            stream: Some(true),
+            stream_options: Some(StreamOptions {
+                include_usage: true,
+            }),
+        };
+
+        let url = format!("{}/chat/completions", self.base_url);
+        let start = std::time::Instant::now();
+        let mut resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: e.to_string(),
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("HTTP {status}: {text}"),
+            });
+        }
+
+        // OpenAI SSE: events are delimited by a blank line (`\n\n`). Buffer bytes,
+        // emit each token's `delta.content` as its event completes, and capture the
+        // token counts from the terminal usage-only chunk.
+        let mut buf: Vec<u8> = Vec::new();
+        let mut full = String::new();
+        let mut prompt_tokens = None;
+        let mut completion_tokens = None;
+        let mut total_tokens = None;
+
+        let mut apply = |event: SseEvent, full: &mut String| -> Option<String> {
+            let SseEvent::Chunk(chunk) = event else {
+                return None;
+            };
+            if let Some(u) = chunk.usage {
+                prompt_tokens = u.prompt_tokens;
+                completion_tokens = u.completion_tokens;
+                total_tokens = u.total_tokens;
+            }
+            let content = chunk.choices.into_iter().next()?.delta.content?;
+            if content.is_empty() {
+                return None;
+            }
+            full.push_str(&content);
+            Some(content)
+        };
+
+        while let Some(bytes) = resp.chunk().await.map_err(|e| EngineError::ProviderError {
+            provider: self.name.clone(),
+            detail: format!("stream read error: {e}"),
+        })? {
+            buf.extend_from_slice(&bytes);
+            while let Some(idx) = buf.windows(2).position(|w| w == b"\n\n") {
+                let block: Vec<u8> = buf.drain(..idx + 2).collect();
+                if let Some(event) = parse_sse_event(&block)
+                    && let Some(delta) = apply(event, &mut full)
+                {
+                    let _ = sink.send(StreamDelta::Text(delta)).await;
+                }
+            }
+        }
+        // Any trailing event without a final blank line.
+        if let Some(event) = parse_sse_event(&buf)
+            && let Some(delta) = apply(event, &mut full)
+        {
+            let _ = sink.send(StreamDelta::Text(delta)).await;
+        }
+
+        let tokens_used = total_tokens.or(match (prompt_tokens, completion_tokens) {
+            (None, None) => None,
+            (p, c) => Some(p.unwrap_or(0) + c.unwrap_or(0)),
+        });
+        Ok(InferenceResponse {
+            text: Some(full),
+            file: None,
+            model_used: model_name.to_string(),
+            provider: self.name.clone(),
+            duration_ms: start.elapsed().as_millis() as u64,
+            request_id: request.request_id.clone(),
+            tokens_used,
+            prompt_tokens,
+            completion_tokens,
+            fallback_used: false,
+            routing_reason: None,
+            ..Default::default()
+        })
+    }
 }
 
 impl OpenAiCompatProvider {
@@ -259,6 +468,7 @@ impl OpenAiCompatProvider {
                 content: "hi".into(),
             }],
             max_tokens: Some(1),
+            ..Default::default()
         };
 
         let url = format!("{}/chat/completions", self.base_url);
@@ -302,6 +512,7 @@ impl OpenAiCompatProvider {
             model: model_name.to_string(),
             messages,
             max_tokens,
+            ..Default::default()
         };
 
         let url = format!("{}/chat/completions", self.base_url);
@@ -537,12 +748,14 @@ mod tests {
                     capability: "chat".into(),
                     context_window: Some(8192),
                     memory_mb: None,
+                    ..Default::default()
                 },
                 ModelDef {
                     name: "model-b".into(),
                     capability: "tts".into(),
                     context_window: None,
                     memory_mb: Some(512),
+                    ..Default::default()
                 },
             ],
             CostTier::Medium,
@@ -564,5 +777,63 @@ mod tests {
             .unwrap();
         assert_eq!(p.kind(), ProviderKind::OpenAiCompatible);
         assert_eq!(p.name(), "x");
+    }
+
+    #[test]
+    fn sse_events_accumulate_text_and_usage() {
+        // A realistic OpenAI `stream: true` sequence: two content deltas, an empty
+        // delta, a terminal usage-only chunk, and the `[DONE]` sentinel.
+        let blocks: Vec<&[u8]> = vec![
+            br#"data: {"choices":[{"delta":{"role":"assistant","content":"He"}}]}"#,
+            br#"data: {"choices":[{"delta":{"content":"llo"}}]}"#,
+            br#"data: {"choices":[{"delta":{"content":""}}]}"#,
+            br#"data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}"#,
+            b"data: [DONE]",
+        ];
+
+        let mut full = String::new();
+        let mut deltas = Vec::new();
+        let mut prompt = None;
+        let mut completion = None;
+        let mut total = None;
+        for block in blocks {
+            match parse_sse_event(block) {
+                Some(SseEvent::Chunk(chunk)) => {
+                    if let Some(u) = chunk.usage {
+                        prompt = u.prompt_tokens;
+                        completion = u.completion_tokens;
+                        total = u.total_tokens;
+                    }
+                    if let Some(content) = chunk
+                        .choices
+                        .into_iter()
+                        .next()
+                        .and_then(|c| c.delta.content)
+                        && !content.is_empty()
+                    {
+                        full.push_str(&content);
+                        deltas.push(content);
+                    }
+                }
+                Some(SseEvent::Done) | None => {}
+            }
+        }
+
+        assert_eq!(deltas, vec!["He", "llo"]);
+        assert_eq!(full, "Hello");
+        assert_eq!(prompt, Some(5));
+        assert_eq!(completion, Some(3));
+        assert_eq!(total, Some(8));
+    }
+
+    #[test]
+    fn parse_sse_event_handles_done_blank_and_garbage() {
+        assert!(matches!(
+            parse_sse_event(b"data: [DONE]"),
+            Some(SseEvent::Done)
+        ));
+        assert!(parse_sse_event(b"").is_none());
+        assert!(parse_sse_event(b": keep-alive comment").is_none());
+        assert!(parse_sse_event(b"data: not json").is_none());
     }
 }

@@ -275,13 +275,42 @@ components:
           type: string
           enum: [capability_only, disabled, allow_named]
           default: capability_only
-        locality:
+        prefer:
           type: string
-          enum: [auto, prefer_local, local_only]
+          enum: [auto, local, cloud]
           default: auto
           description: >
-            Routing locality guardrail. `local_only` restricts the request to
-            local backends (privacy); `prefer_local` ranks local ahead of cloud.
+            Backend-locality preference / privacy guardrail. `local` is a hard
+            constraint restricting the request to local backends (confidential data
+            never leaves the device; fails rather than falling back to cloud);
+            `cloud` restricts to cloud backends; `auto` (default) ranks local ahead
+            of cloud while keeping cloud as a fallback. Accepts the legacy field
+            name `locality` and value `local_only` as aliases.
+        data_class:
+          type: string
+          enum: [public, internal, confidential]
+          default: public
+          description: >
+            Data-sensitivity class. `confidential` is a hard data-residency
+            constraint — the request is pinned to local backends regardless of
+            `prefer` (and overrides a conflicting `prefer=cloud`), failing rather
+            than sending sensitive data to the cloud. Every request's effective
+            locality is written to the `mofa::audit` log for traceability.
+        reasoning:
+          type: object
+          description: >
+            Deep-thinking controls for reasoning-capable models. Omit for standard
+            behavior. `effort` also drives inference-tier routing; when `include`
+            is true the thought chain is streamed as `reasoning` chunks (distinct
+            from answer `text`) rather than stripped.
+          properties:
+            effort:
+              type: string
+              enum: [low, medium, high]
+              default: medium
+            include:
+              type: boolean
+              default: false
         messages:
           type: array
           items:
@@ -303,6 +332,13 @@ components:
           type: string
         content:
           type: string
+        images:
+          type: array
+          description: >
+            Image references for multimodal (VLM) requests — HTTP(S) URLs, `data:`
+            URLs, or local file paths. Omitted for text-only messages.
+          items:
+            type: string
     InferenceResponse:
       type: object
       properties:
@@ -395,6 +431,22 @@ components:
           type: boolean
         source:
           type: string
+        failed_chain:
+          type: array
+          description: >
+            Complete per-candidate failure chain (present when failover was
+            attempted and every candidate failed). Lets an Agent decide whether to
+            retry or switch tiers rather than seeing only the last error.
+          items:
+            type: object
+            required: [provider, model, reason]
+            properties:
+              provider: { type: string }
+              model: { type: string }
+              reason: { type: string }
+        routing_reason:
+          type: string
+          description: Machine-readable routing reason for the primary candidate.
     AllocationSnapshot:
       type: object
       properties:
