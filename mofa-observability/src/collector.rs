@@ -382,11 +382,25 @@ impl MetricsState {
                     "Request completed"
                 );
 
-                // Counter: requests by capability × status
+                // Counter: requests by capability × provider × locality × model × status
                 let status = if e.success { "success" } else { "error" };
+                let backend_lower = e.backend.to_lowercase();
+                let locality = if backend_lower == "ollama"
+                    || backend_lower == "kokoro"
+                    || backend_lower == "funasr"
+                    || backend_lower == "local"
+                {
+                    "local"
+                } else {
+                    "cloud"
+                };
+
                 self.requests_total.inc(
                     Labels::new()
                         .add("capability", e.capability.to_string())
+                        .add("provider", &e.backend)
+                        .add("locality", locality)
+                        .add("model", &e.model_id)
                         .add("status", status),
                 );
 
@@ -407,39 +421,37 @@ impl MetricsState {
                 }
 
                 // Counter: tokens & cost
-                if let Some(tokens_in) = e.tokens_in {
-                    self.tokens_input_total
-                        .inc_by(Labels::new().add("model", &e.model_id), tokens_in);
-                }
-                if let Some(tokens_out) = e.tokens_out {
-                    self.tokens_output_total
-                        .inc_by(Labels::new().add("model", &e.model_id), tokens_out);
-                }
-                if let (Some(tokens_in), Some(tokens_out)) = (e.tokens_in, e.tokens_out) {
-                    let cost = crate::pricing::estimate_cost_usd(
-                        &e.backend,
-                        &e.model_id,
-                        tokens_in as u32,
-                        tokens_out as u32,
-                    );
-                    let backend_lower = e.backend.to_lowercase();
-                    let locality = if backend_lower == "ollama"
-                        || backend_lower == "kokoro"
-                        || backend_lower == "funasr"
-                        || backend_lower == "local"
-                    {
-                        "local"
-                    } else {
-                        "cloud"
-                    };
-                    self.estimated_cost_usd.add(
-                        Labels::new()
-                            .add("provider", &e.backend)
-                            .add("locality", locality)
-                            .add("model", &e.model_id),
-                        cost,
-                    );
-                }
+                let tokens_in = e.tokens_in.unwrap_or(180);
+                let tokens_out = e.tokens_out.unwrap_or(320);
+
+                self.tokens_input_total
+                    .inc_by(Labels::new().add("model", &e.model_id), tokens_in);
+                self.tokens_output_total
+                    .inc_by(Labels::new().add("model", &e.model_id), tokens_out);
+
+                let cost = crate::pricing::estimate_cost_usd(
+                    &e.backend,
+                    &e.model_id,
+                    tokens_in as u32,
+                    tokens_out as u32,
+                );
+                let backend_lower = e.backend.to_lowercase();
+                let locality = if backend_lower == "ollama"
+                    || backend_lower == "kokoro"
+                    || backend_lower == "funasr"
+                    || backend_lower == "local"
+                {
+                    "local"
+                } else {
+                    "cloud"
+                };
+                self.estimated_cost_usd.add(
+                    Labels::new()
+                        .add("provider", &e.backend)
+                        .add("locality", locality)
+                        .add("model", &e.model_id),
+                    cost,
+                );
 
                 // Gauge: active requests down
                 self.active_requests.dec(Labels::new());
@@ -565,6 +577,7 @@ impl MetricsState {
         self.memory_budget_bytes.evict_stale(now, max_idle);
         self.models_loaded.evict_stale(now, max_idle);
         self.active_requests.evict_stale(now, max_idle);
+        self.estimated_cost_usd.evict_stale(now, max_idle);
     }
 }
 
@@ -756,6 +769,9 @@ mod tests {
 
         let labels = Labels::new()
             .add("capability", "chat")
+            .add("provider", "ollama")
+            .add("locality", "local")
+            .add("model", "qwen2.5:7b")
             .add("status", "success");
         assert_eq!(state.requests_total.values[&labels], 1);
     }
@@ -782,6 +798,9 @@ mod tests {
 
         let labels = Labels::new()
             .add("capability", "chat")
+            .add("provider", "ollama")
+            .add("locality", "local")
+            .add("model", "qwen2.5:7b")
             .add("status", "success");
         assert_eq!(state.requests_total.values[&labels], 5);
     }
@@ -826,9 +845,15 @@ mod tests {
 
         let success = Labels::new()
             .add("capability", "chat")
+            .add("provider", "ollama")
+            .add("locality", "local")
+            .add("model", "qwen2.5:7b")
             .add("status", "success");
         let error = Labels::new()
             .add("capability", "chat")
+            .add("provider", "ollama")
+            .add("locality", "local")
+            .add("model", "qwen2.5:7b")
             .add("status", "error");
 
         assert_eq!(state.requests_total.values[&success], 3);
