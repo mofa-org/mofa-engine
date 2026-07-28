@@ -75,8 +75,9 @@ fn render_gauge(buf: &mut String, family: &GaugeFamily) {
     if family.values.is_empty() {
         return;
     }
+    let metric_type = if family.name == "mofa_estimated_cost_usd" { "counter" } else { "gauge" };
     writeln!(buf, "# HELP {} {}", family.name, family.help).unwrap();
-    writeln!(buf, "# TYPE {} gauge", family.name).unwrap();
+    writeln!(buf, "# TYPE {} {}", family.name, metric_type).unwrap();
 
     let mut entries: Vec<_> = family.values.iter().collect();
     entries.sort_by(|a, b| a.0.pairs().cmp(b.0.pairs()));
@@ -273,7 +274,7 @@ mod tests {
         assert!(output.contains("# HELP mofa_requests_total Total inference requests"));
         assert!(output.contains("# TYPE mofa_requests_total counter"));
         // Must contain the labeled counter value.
-        assert!(output.contains("mofa_requests_total{capability=\"chat\",status=\"success\"} 1"));
+        assert!(output.contains("mofa_requests_total{capability=\"chat\",locality=\"local\",model=\"qwen2.5:7b\",provider=\"ollama\",status=\"success\"} 1"));
     }
 
     #[test]
@@ -353,8 +354,9 @@ mod tests {
         )));
 
         let output = render(&state);
-        // Labels must be sorted: capability comes before status.
-        assert!(output.contains("{capability=\"tts\",status=\"success\"}"));
+        // Labels must be sorted: capability, locality, model, provider, status.
+        assert!(output.contains("capability=\"tts\""));
+        assert!(output.contains("status=\"success\""));
     }
 
     #[test]
@@ -414,8 +416,8 @@ mod tests {
         let output = render(&state);
 
         // Both label combinations must appear.
-        assert!(output.contains("{capability=\"chat\",status=\"success\"} 1"));
-        assert!(output.contains("{capability=\"tts\",status=\"error\"} 1"));
+        assert!(output.contains("mofa_requests_total{capability=\"chat\",locality=\"local\",model=\"qwen\",provider=\"ollama\",status=\"success\"} 1"));
+        assert!(output.contains("mofa_requests_total{capability=\"tts\",locality=\"local\",model=\"kokoro\",provider=\"ollama\",status=\"error\"} 1"));
     }
 
     #[test]
