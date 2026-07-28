@@ -1,0 +1,113 @@
+{
+  "uid": "engine-cost",
+  "title": "MoFA Financial Cost & Cloud Billing",
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "timezone": "browser",
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Accumulated Cloud Spend ($)",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(mofa_estimated_cost_usd) or vector(0)",
+          "legendFormat": "Total Spend"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Local Free-Tier Savings Rate (%)",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "green", "value": 80 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "(sum(mofa_requests_total{locality=\"local\"}) or vector(0)) / (sum(mofa_requests_total) or vector(1)) * 100",
+          "legendFormat": "Savings %"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Deep Reasoning Thought Tokens",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "sum(mofa_thought_tokens_total) or vector(0)",
+          "legendFormat": "Thought Tokens"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Cloud Billing Velocity ($/min)",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 4
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(mofa_estimated_cost_usd[1m])) * 60 or vector(0)",
+          "legendFormat": "$/min"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Financial Cost Accumulation by Provider & Model ($)",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "fillOpacity": 20,
+            "gradientMode": "opacity"
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (provider, model) (mofa_estimated_cost_usd) or vector(0)",
+          "legendFormat": "{{provider}} - {{model}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Token Consumption Velocity (Prompt vs Completion)",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum(rate(mofa_tokens_input_total[1m])) or sum(mofa_tokens_input_total) or vector(0)",
+          "legendFormat": "Prompt Tokens / sec"
+        },
+        {
+          "expr": "sum(rate(mofa_tokens_output_total[1m])) or sum(mofa_tokens_output_total) or vector(0)",
+          "legendFormat": "Completion Tokens / sec"
+        }
+      ]
+    }
+  ]
+}
