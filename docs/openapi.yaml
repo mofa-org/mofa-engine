@@ -311,6 +311,17 @@ components:
             include:
               type: boolean
               default: false
+        max_cost_usd:
+          type: number
+          format: double
+          description: >
+            Per-request spend ceiling in USD. A candidate whose estimated cost
+            exceeds this is skipped during routing (and listed in the error's
+            `failed_chain`), so spend stays bounded and cheaper/local models win.
+            Free and local models estimate to $0 and are always affordable, so
+            `0.0` means "free/local only". Omit for no ceiling. The estimate is a
+            pre-flight approximation (token counts from input size); the
+            authoritative cost is reported per response as `cost_usd`.
         messages:
           type: array
           items:
@@ -320,6 +331,11 @@ components:
           description: Path on the engine host.
         params:
           type: object
+          description: >
+            Capability-specific passthrough options. Recognized keys include
+            `language` and `diarize` (ASR speaker separation, S1), `detail`
+            (VLM billing tier), `voice` (TTS), `size` (ImageGen), and
+            `max_tokens` (also used for the `max_cost_usd` estimate).
         hint_next:
           type: string
         request_id:

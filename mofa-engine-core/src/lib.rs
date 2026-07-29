@@ -12,6 +12,7 @@ pub mod engine;
 pub mod memory;
 pub mod metrics;
 pub mod preflight;
+pub mod quality_gate;
 pub mod router;
 pub mod subscription;
 

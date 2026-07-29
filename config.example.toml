@@ -47,6 +47,17 @@ base_url = "http://127.0.0.1:11434"
 priority = 1
 cost_tier = "free"
 
+  # Ollama models are auto-discovered, so listing them is optional. Declare a
+  # model here only to annotate it — currently to give a *local* reasoning model
+  # a `reasoning_tier` (low/medium/high) so `reasoning.effort` routes to it.
+  # `name` must match the Ollama model name exactly (as `ollama list` shows it).
+  # Local reasoning tiers win over cloud ones of equal effort (local-first), so a
+  # high-effort code review can stay on-device.
+  [[providers.models]]
+  name = "deepseek-r1:8b"
+  capability = "chat"
+  reasoning_tier = "high"
+
 # Cloud OpenAI-compatible backend. Models are declared explicitly.
 [[providers]]
 name = "openai"
@@ -154,6 +165,9 @@ kind = "local_asr"
 base_url = ""            # unused for local_asr, but the field is required
 command = "funasr"
 args = ["--input", "{input}", "--language", "{language}", "--output", "{output}"]
+# Appended only when a request sets params.diarize = true (S1 speaker separation);
+# placeholder-substituted like `args`. Leave unset if the CLI can't diarize.
+diarize_args = ["--diarize"]
 priority = 2
 enabled = false          # opt-in: set true once the command is installed
 
@@ -161,3 +175,29 @@ enabled = false          # opt-in: set true once the command is installed
   name = "funasr"
   capability = "asr"
   memory_mb = 1024
+
+# Local image-generation process-adapter backend. Runs a local Stable Diffusion
+# CLI once per image and returns the produced file. Enables fully-offline scene
+# generation for the flagship S4 pipeline (`prefer=local`, cost ~= $0), failing
+# over to a cloud image backend (liter_llm) when unavailable. Placeholders:
+#   {prompt} {negative_prompt} {width} {height} {output}
+[[providers]]
+name = "local-sd"
+kind = "local_image_gen"
+base_url = ""            # unused for local_image_gen, but the field is required
+command = "sd"           # e.g. stable-diffusion.cpp's `sd`, or a wrapper script
+args = [
+  "--prompt", "{prompt}",
+  "--negative-prompt", "{negative_prompt}",
+  "--width", "{width}",
+  "--height", "{height}",
+  "--output", "{output}",
+]
+output_format = "png"
+priority = 2
+enabled = false          # opt-in: set true once the command is installed
+
+  [[providers.models]]
+  name = "sd"
+  capability = "image_gen"
+  memory_mb = 4096

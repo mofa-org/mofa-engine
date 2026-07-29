@@ -299,6 +299,11 @@ pub struct ProviderConfig {
     /// Directory for `local_tts` audio artifacts (default: the system temp dir).
     #[serde(default)]
     pub output_dir: Option<String>,
+    /// Extra arguments a `local_asr` command receives when a request enables
+    /// speaker diarization (`params.diarize = true`). Placeholder-substituted like
+    /// `args`. Leave empty when the CLI cannot separate speakers.
+    #[serde(default)]
+    pub diarize_args: Vec<String>,
     /// USD price per 1000 prompt (input) tokens. Used for cost tracking; `0`
     /// (the default, e.g. local models) means no cost is attributed.
     #[serde(default)]
@@ -323,6 +328,7 @@ impl Default for ProviderConfig {
             args: Vec::new(),
             output_format: None,
             output_dir: None,
+            diarize_args: Vec::new(),
             price_input_per_1k: 0.0,
             price_output_per_1k: 0.0,
         }
@@ -710,6 +716,7 @@ impl ProviderConfig {
             "openai_compatible" => Ok(ProviderKind::OpenAiCompatible),
             "local_tts" => Ok(ProviderKind::LocalTts),
             "local_asr" => Ok(ProviderKind::LocalAsr),
+            "local_image_gen" => Ok(ProviderKind::LocalImageGen),
             "liter_llm" => Ok(ProviderKind::LiterLlm),
             other => Err(EngineError::Config(format!(
                 "unknown provider kind '{}' for provider '{}'",

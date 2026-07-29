@@ -62,6 +62,10 @@ async fn main() {
             effort: ReasoningEffort::High,
             include: true,
         }),
+        // Cost control (S2): cap spend at $0.05/review. A pricier cloud candidate
+        // is priced out (listed in `failed_chain`) so a cheaper/local reasoning
+        // model wins; a local distilled R1 estimates to $0 and always fits.
+        max_cost_usd: Some(0.05),
         ..Default::default()
     };
 

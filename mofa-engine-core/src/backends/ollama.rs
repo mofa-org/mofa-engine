@@ -6,12 +6,14 @@ use async_trait::async_trait;
 use mofa_kernel::{
     BackendFeature, BackendHealth, Capability, CostTier, EngineError, InferenceRequest,
     InferenceResponse, LifecycleResult, ModelAvailability, ModelCard, ModelResidency, Provider,
-    ProviderKind, StreamDelta, StreamSink, canonical_model_id, model_id_name,
+    ProviderKind, ReasoningEffort, StreamDelta, StreamSink, canonical_model_id, model_id_name,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
+
+use crate::config::ModelDef;
 
 /// Provider for a local Ollama instance.
 pub struct OllamaProvider {
@@ -21,6 +23,13 @@ pub struct OllamaProvider {
     base_url: String,
     /// HTTP client.
     client: Client,
+    /// Config-supplied reasoning-tier overrides, keyed by Ollama model name
+    /// (e.g. `"deepseek-r1:8b"`). Ollama auto-discovers its models, so these are
+    /// applied as annotations on the discovered card rather than a replacement
+    /// enumeration — they let a *local* reasoning model participate in
+    /// `reasoning.effort` → tier routing (S2), which cloud-configured backends
+    /// already get from their explicit model list.
+    reasoning_tiers: HashMap<String, ReasoningEffort>,
 }
 
 impl OllamaProvider {
@@ -29,7 +38,15 @@ impl OllamaProvider {
     /// Fails (rather than panicking or silently dropping the configured
     /// timeouts/`no_proxy`) if the system TLS/HTTP stack cannot build a client,
     /// so the engine surfaces a clean startup error instead of crashing.
-    pub fn new(name: impl Into<String>, base_url: impl Into<String>) -> Result<Self, EngineError> {
+    ///
+    /// `models` are optional per-model annotations; only entries carrying a
+    /// `reasoning_tier` are retained (as tier-routing overrides). All other model
+    /// metadata is auto-discovered from Ollama, so the list may be empty.
+    pub fn new(
+        name: impl Into<String>,
+        base_url: impl Into<String>,
+        models: &[ModelDef],
+    ) -> Result<Self, EngineError> {
         let client = Client::builder()
             .no_proxy()
             .connect_timeout(Duration::from_secs(5))
@@ -37,10 +54,20 @@ impl OllamaProvider {
             .build()
             .map_err(|e| EngineError::Config(format!("failed to build Ollama HTTP client: {e}")))?;
 
+        let reasoning_tiers = models
+            .iter()
+            .filter_map(|m| {
+                let tier = m.reasoning_tier.as_deref()?;
+                let tier = ReasoningEffort::from_str_loose(tier)?;
+                Some((m.name.clone(), tier))
+            })
+            .collect();
+
         Ok(Self {
             name: name.into(),
             base_url: base_url.into(),
             client,
+            reasoning_tiers,
         })
     }
 
@@ -214,6 +241,9 @@ impl Provider for OllamaProvider {
                 };
                 card.context_window = 4096;
                 card.memory_estimate_bytes = m.size.unwrap_or(0);
+                // Config-supplied tier override lets this local model take part in
+                // `reasoning.effort` → tier routing (S2).
+                card.reasoning_tier = self.reasoning_tiers.get(&model_name).copied();
                 card.refresh_status();
                 Some(card)
             })
@@ -513,10 +543,56 @@ mod tests {
 
     #[test]
     fn provider_metadata() {
-        let p = OllamaProvider::new("test-ollama", "http://localhost:11434").unwrap();
+        let p = OllamaProvider::new("test-ollama", "http://localhost:11434", &[]).unwrap();
         assert_eq!(p.kind(), ProviderKind::Ollama);
         assert_eq!(p.name(), "test-ollama");
         assert!(p.features().contains(&BackendFeature::Discovery));
+    }
+
+    #[test]
+    fn config_reasoning_tiers_are_parsed_and_filtered() {
+        // Only models with a recognizable reasoning_tier become overrides; a
+        // plain chat model and an unparseable tier are dropped, so a card without
+        // an override simply keeps `reasoning_tier = None`.
+        let models = vec![
+            ModelDef {
+                name: "deepseek-r1:8b".into(),
+                capability: "chat".into(),
+                reasoning_tier: Some("high".into()),
+                ..Default::default()
+            },
+            ModelDef {
+                name: "qwen3:4b".into(),
+                capability: "chat".into(),
+                reasoning_tier: Some("low".into()),
+                ..Default::default()
+            },
+            ModelDef {
+                name: "llama3:8b".into(),
+                capability: "chat".into(),
+                reasoning_tier: None,
+                ..Default::default()
+            },
+            ModelDef {
+                name: "mystery:1b".into(),
+                capability: "chat".into(),
+                reasoning_tier: Some("not-a-tier".into()),
+                ..Default::default()
+            },
+        ];
+        let p = OllamaProvider::new("ollama", "http://localhost:11434", &models).unwrap();
+
+        assert_eq!(
+            p.reasoning_tiers.get("deepseek-r1:8b"),
+            Some(&ReasoningEffort::High)
+        );
+        assert_eq!(
+            p.reasoning_tiers.get("qwen3:4b"),
+            Some(&ReasoningEffort::Low)
+        );
+        assert!(!p.reasoning_tiers.contains_key("llama3:8b"));
+        assert!(!p.reasoning_tiers.contains_key("mystery:1b"));
+        assert_eq!(p.reasoning_tiers.len(), 2);
     }
 
     #[test]

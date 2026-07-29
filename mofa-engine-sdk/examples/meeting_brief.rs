@@ -34,12 +34,14 @@ fn main() {
     println!("== S1 Meeting Brief — confidential, local-first ==");
     println!("audio: {audio}\n");
 
-    // 1. ASR — long audio → transcript, pinned local (confidential).
+    // 1. ASR — long audio → transcript, pinned local (confidential), with speaker
+    // diarization so the minutes can attribute resolutions/todos to people.
     let asr = InferenceRequest {
         capability: Some(Capability::Asr),
         input_file: Some(audio),
         prefer: Prefer::Local,
         data_class: DataClass::Confidential,
+        params: serde_json::json!({ "diarize": true }),
         hint_next: Some("chat".into()),
         ..Default::default()
     };

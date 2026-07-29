@@ -20,7 +20,8 @@ use tokio::sync::{Mutex as AsyncMutex, Semaphore, broadcast, mpsc};
 use tokio::task::{AbortHandle, JoinHandle};
 
 use crate::backends::{
-    LiterLLMProvider, LocalAsrProvider, LocalTtsProvider, OllamaProvider, OpenAiCompatProvider,
+    LiterLLMProvider, LocalAsrProvider, LocalImageGenProvider, LocalTtsProvider, OllamaProvider,
+    OpenAiCompatProvider,
 };
 use crate::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerRegistry, CircuitState};
 use crate::config::{EngineConfig, PreflightConfig, TimeoutConfig};
@@ -148,6 +149,30 @@ fn estimate_cost(
     Some(prompt / 1000.0 * price_in_per_1k + completion / 1000.0 * price_out_per_1k)
 }
 
+/// Completion tokens assumed when a request does not cap them via
+/// `params.max_tokens` — a deliberately generous default so the pre-flight
+/// budget estimate errs toward *over*-counting rather than blowing the ceiling.
+const DEFAULT_COMPLETION_TOKEN_ESTIMATE: u32 = 1024;
+
+/// Rough prompt-token estimate for pre-flight budgeting, using the ~4-chars-per
+/// token rule of thumb over the message contents. Approximate by design (the
+/// authoritative token count only exists post-call); a floor of 1 avoids a
+/// zero estimate for an empty prompt.
+fn estimate_prompt_tokens(req: &InferenceRequest) -> u32 {
+    let chars: usize = req.messages.iter().map(|m| m.content.len()).sum();
+    ((chars / 4) as u32).max(1)
+}
+
+/// Completion-token estimate for pre-flight budgeting: the request's
+/// `params.max_tokens` cap when present, otherwise [`DEFAULT_COMPLETION_TOKEN_ESTIMATE`].
+fn estimate_completion_tokens(req: &InferenceRequest) -> u32 {
+    req.params
+        .get("max_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .map(|v| v as u32)
+        .unwrap_or(DEFAULT_COMPLETION_TOKEN_ESTIMATE)
+}
+
 impl Engine {
     /// Create and initialize a new engine from configuration.
     ///
@@ -179,7 +204,9 @@ impl Engine {
             let kind = pc.provider_kind()?;
             let cost_tier = CostTier::from_str_loose(&pc.cost_tier);
             let provider: Arc<dyn Provider> = match kind {
-                ProviderKind::Ollama => Arc::new(OllamaProvider::new(&pc.name, &pc.base_url)?),
+                ProviderKind::Ollama => {
+                    Arc::new(OllamaProvider::new(&pc.name, &pc.base_url, &pc.models)?)
+                }
                 ProviderKind::OpenAiCompatible => Arc::new(OpenAiCompatProvider::with_output_dir(
                     &pc.name,
                     &pc.base_url,
@@ -219,10 +246,29 @@ impl Engine {
                             pc.name
                         ))
                     })?;
-                    Arc::new(LocalAsrProvider::new(
+                    Arc::new(
+                        LocalAsrProvider::new(
+                            &pc.name,
+                            command,
+                            pc.args.clone(),
+                            pc.output_dir.clone(),
+                            pc.models.clone(),
+                        )
+                        .with_diarize_args(pc.diarize_args.clone()),
+                    )
+                }
+                ProviderKind::LocalImageGen => {
+                    let command = pc.command.clone().ok_or_else(|| {
+                        EngineError::Config(format!(
+                            "provider '{}' (local_image_gen) requires a command",
+                            pc.name
+                        ))
+                    })?;
+                    Arc::new(LocalImageGenProvider::new(
                         &pc.name,
                         command,
                         pc.args.clone(),
+                        pc.output_format.clone(),
                         pc.output_dir.clone(),
                         pc.models.clone(),
                     ))
@@ -505,6 +551,24 @@ impl Engine {
         estimate_cost(price_in, price_out, prompt_tokens, completion_tokens)
     }
 
+    /// Conservative pre-flight cost estimate (USD) for serving `req` on
+    /// `provider`, used to enforce a `max_cost_usd` ceiling *before* spending.
+    ///
+    /// Free/local providers (no configured price) and providers with unknown
+    /// pricing estimate to `0.0`, so a ceiling never blocks a local model and an
+    /// unpriced provider is never spuriously skipped. Cloud providers are priced
+    /// from a rough token estimate (see [`estimate_prompt_tokens`] /
+    /// [`estimate_completion_tokens`]); the authoritative cost is still computed
+    /// post-call from real token counts by [`Self::compute_cost`].
+    fn estimate_request_cost(&self, provider: &str, req: &InferenceRequest) -> f64 {
+        self.compute_cost(
+            provider,
+            Some(estimate_prompt_tokens(req)),
+            Some(estimate_completion_tokens(req)),
+        )
+        .unwrap_or(0.0)
+    }
+
     /// Whether the named provider serves models on-device (local track). Unknown
     /// providers are treated as cloud so metrics never mislabel spend as local.
     fn provider_is_local(&self, provider: &str) -> bool {
@@ -559,6 +623,28 @@ impl Engine {
                 });
                 last_err = Some(e);
                 break;
+            }
+
+            // Budget ceiling (PRD §S2/W3): skip a candidate whose estimated cost
+            // would exceed the request's ceiling, recording it in the chain so an
+            // Agent can see it was priced out (and could raise the budget or fall
+            // back to a local model). Free/local candidates estimate to $0.
+            if let Some(ceiling) = req.max_cost_usd {
+                let est = self.estimate_request_cost(&provider_name, &req);
+                if est > ceiling {
+                    tracing::info!(
+                        "candidate '{model_id}' skipped: est cost ${est:.4} exceeds ceiling ${ceiling:.4}"
+                    );
+                    chain.push(FailedAttempt {
+                        provider: provider_name.clone(),
+                        model: model_id_name(&model_id).to_string(),
+                        reason: format!("estimated cost ${est:.4} exceeds budget ${ceiling:.4}"),
+                    });
+                    last_err = Some(EngineError::NoCapableModel(format!(
+                        "all candidates exceed cost ceiling ${ceiling:.4}"
+                    )));
+                    continue;
+                }
             }
 
             let max_concurrency = decision.model.execution.max_concurrency;
@@ -1975,6 +2061,15 @@ mod tests {
         budget_mb: u64,
         idle_secs: u64,
     ) -> Arc<Engine> {
+        build_engine_with_pricing(providers, budget_mb, idle_secs, HashMap::new())
+    }
+
+    fn build_engine_with_pricing(
+        providers: Vec<Arc<dyn Provider>>,
+        budget_mb: u64,
+        idle_secs: u64,
+        pricing: HashMap<String, (f64, f64)>,
+    ) -> Arc<Engine> {
         let (event_tx, _) = broadcast::channel(256);
         let registered = providers
             .into_iter()
@@ -2012,7 +2107,7 @@ mod tests {
             weak_self: OnceLock::new(),
             event_tx,
             metrics: EngineMetrics::default(),
-            pricing: HashMap::new(),
+            pricing,
             input_roots: Vec::new(),
             started_at: Instant::now(),
         });
@@ -2292,6 +2387,138 @@ mod tests {
         assert_eq!(info.failed_chain[1].provider, "openai");
         assert!(info.retryable);
         assert!(info.routing_reason.is_some());
+    }
+
+    #[test]
+    fn token_estimates_from_request() {
+        // ~4 chars/token over message content; floor of 1 for an empty prompt.
+        let mut req = chat_request(None); // content = "hello" (5 chars)
+        assert_eq!(estimate_prompt_tokens(&req), 1);
+        req.messages[0].content = "x".repeat(400);
+        assert_eq!(estimate_prompt_tokens(&req), 100);
+        // Completion defaults to the generous estimate, or the params cap.
+        assert_eq!(
+            estimate_completion_tokens(&req),
+            DEFAULT_COMPLETION_TOKEN_ESTIMATE
+        );
+        req.params = serde_json::json!({ "max_tokens": 64 });
+        assert_eq!(estimate_completion_tokens(&req), 64);
+    }
+
+    #[tokio::test]
+    async fn budget_ceiling_prices_out_cloud_and_prefers_local() {
+        // A free local model and a priced cloud model both serve chat. A request
+        // whose per-call budget is below the cloud estimate must route to the
+        // free local model instead of the (pricier, higher-priority) cloud one.
+        let local = Arc::new(
+            TestProvider::new("ollama", ProviderKind::Ollama).with_model(
+                "qwen",
+                Capability::Chat,
+                ModelResidency::Loaded,
+                10 * MB,
+                1,
+            ),
+        );
+        let cloud = Arc::new(
+            TestProvider::new("openai", ProviderKind::OpenAiCompatible).with_model(
+                "gpt",
+                Capability::Chat,
+                ModelResidency::Remote,
+                0,
+                32,
+            ),
+        );
+        // openai: $0.01/1k in, $0.03/1k out → default estimate (1 + 1024 tokens)
+        // ≈ $0.0307, well above the $0.001 ceiling. ollama is free.
+        let pricing = HashMap::from([("openai".to_string(), (0.01, 0.03))]);
+        let engine = build_engine_with_pricing(vec![local, cloud], 1000, 0, pricing);
+        engine.refresh_resources().await;
+
+        let mut req = chat_request(None);
+        req.max_cost_usd = Some(0.001);
+        let resp = engine.invoke(req).await.unwrap();
+        assert_eq!(resp.provider, "ollama");
+    }
+
+    #[tokio::test]
+    async fn budget_ceiling_exhausts_when_all_priced_out() {
+        // Two priced cloud models, no local option; a sub-cent ceiling prices both
+        // out, so the request fails over the whole plan and the budget reason is
+        // recorded per candidate — the Agent sees *why* nothing ran, rather than
+        // the engine silently overspending.
+        let cloud_a = Arc::new(
+            TestProvider::new("openai", ProviderKind::OpenAiCompatible).with_model(
+                "gpt",
+                Capability::Chat,
+                ModelResidency::Remote,
+                0,
+                32,
+            ),
+        );
+        let cloud_b = Arc::new(
+            TestProvider::new("deepseek", ProviderKind::OpenAiCompatible).with_model(
+                "r1",
+                Capability::Chat,
+                ModelResidency::Remote,
+                0,
+                32,
+            ),
+        );
+        let pricing = HashMap::from([
+            ("openai".to_string(), (0.01, 0.03)),
+            ("deepseek".to_string(), (0.005, 0.02)),
+        ]);
+        let engine = build_engine_with_pricing(vec![cloud_a, cloud_b], 1000, 0, pricing);
+        engine.refresh_resources().await;
+
+        let mut req = chat_request(None);
+        req.max_cost_usd = Some(0.0001);
+        let err = engine.invoke(req).await.unwrap_err();
+        let info = err.info();
+        assert_eq!(info.code, mofa_kernel::ErrorCode::NoCapableModel);
+        assert_eq!(info.failed_chain.len(), 2);
+        assert!(
+            info.failed_chain
+                .iter()
+                .all(|a| a.reason.contains("exceeds budget"))
+        );
+
+        // Without the ceiling the same request succeeds on a cloud model.
+        let resp = engine.invoke(chat_request(None)).await.unwrap();
+        assert!(resp.provider == "openai" || resp.provider == "deepseek");
+    }
+
+    #[tokio::test]
+    async fn prefer_local_routes_image_gen_to_local_backend() {
+        // The offline flagship (S4): with a local image-gen backend present, a
+        // `prefer=local` ImageGen request must route on-device rather than to the
+        // higher-priority cloud image API — verifying the new `LocalImageGen` kind
+        // participates in the local-first hard filter.
+        let local = Arc::new(
+            TestProvider::new("local-sd", ProviderKind::LocalImageGen).with_model(
+                "sd",
+                Capability::ImageGen,
+                ModelResidency::Loaded,
+                10 * MB,
+                1,
+            ),
+        );
+        let cloud = Arc::new(
+            TestProvider::new("openai", ProviderKind::OpenAiCompatible).with_model(
+                "dall-e",
+                Capability::ImageGen,
+                ModelResidency::Remote,
+                0,
+                32,
+            ),
+        );
+        let engine = build_engine(vec![local, cloud], 1000, 0);
+        engine.refresh_resources().await;
+
+        let mut req = request(Capability::ImageGen, None, FallbackPolicy::default());
+        req.prefer = mofa_kernel::Prefer::Local;
+        let resp = engine.invoke(req).await.unwrap();
+        assert_eq!(resp.provider, "local-sd");
     }
 
     #[tokio::test]

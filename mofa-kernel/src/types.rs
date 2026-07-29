@@ -70,6 +70,8 @@ pub enum ProviderKind {
     LocalTts,
     /// Local process-adapter ASR backend (e.g. a FunASR or whisper.cpp CLI).
     LocalAsr,
+    /// Local process-adapter image-generation backend (e.g. a Stable Diffusion CLI).
+    LocalImageGen,
     /// Multi-vendor cloud gateway via the `liter-llm` crate (143+ providers,
     /// unified OpenAI-style contract).
     LiterLlm,
@@ -80,7 +82,10 @@ impl ProviderKind {
     /// API). Used by routing to prefer local models and by the memory manager
     /// to account for on-device residency.
     pub fn is_local(self) -> bool {
-        matches!(self, Self::Ollama | Self::LocalTts | Self::LocalAsr)
+        matches!(
+            self,
+            Self::Ollama | Self::LocalTts | Self::LocalAsr | Self::LocalImageGen
+        )
     }
 }
 
@@ -476,6 +481,13 @@ pub struct InferenceRequest {
     /// keeps standard behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<Reasoning>,
+    /// Per-request spend ceiling in USD. A candidate whose *estimated* cost
+    /// exceeds this is skipped during routing (and recorded in `failed_chain`),
+    /// so spend stays bounded and cheaper/local models win. Free and local
+    /// models estimate to `$0` and are always affordable; `0.0` therefore means
+    /// "free/local only". `None` = no ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cost_usd: Option<f64>,
     /// Conversation messages.
     #[serde(default)]
     pub messages: Vec<Message>,
@@ -502,6 +514,7 @@ impl Default for InferenceRequest {
             prefer: Prefer::default(),
             data_class: DataClass::default(),
             reasoning: None,
+            max_cost_usd: None,
             messages: Vec::new(),
             input_file: None,
             params: serde_json::Value::Null,

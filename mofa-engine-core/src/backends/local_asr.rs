@@ -21,6 +21,11 @@
 //!     command's stdout is taken as the transcript,
 //!   - `{language}` — language hint from `params.language` (default `auto`).
 //!
+//! When a request sets `params.diarize = true` (S1 speaker separation) the
+//! configured `diarize_args` are appended (with the same placeholder
+//! substitution); if none are configured the request degrades to a plain
+//! transcript rather than failing.
+//!
 //! Child processes are spawned with `kill_on_drop(true)`, so an inference
 //! timeout that drops the future terminates the process rather than leaking it.
 
@@ -44,6 +49,11 @@ pub struct LocalAsrProvider {
     command: String,
     /// Argument template with `{input}`, `{output}`, and `{language}` placeholders.
     args: Vec<String>,
+    /// Extra arguments appended (with the same placeholder substitution) when a
+    /// request asks for speaker diarization via `params.diarize = true`. Empty
+    /// when the configured CLI does not do speaker separation, in which case a
+    /// diarize request degrades to a plain transcript.
+    diarize_args: Vec<String>,
     /// Directory for transient transcript files.
     output_dir: PathBuf,
     /// Configured models this backend serves.
@@ -63,12 +73,46 @@ impl LocalAsrProvider {
             name: name.into(),
             command: command.into(),
             args,
+            diarize_args: Vec::new(),
             output_dir: output_dir
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from)
                 .unwrap_or_else(std::env::temp_dir),
             models,
         }
+    }
+
+    /// Set the arguments appended when a request enables speaker diarization
+    /// (`params.diarize = true`). These are placeholder-substituted like the base
+    /// `args`, so a CLI flag such as `--speaker-diarize` (or a value derived from
+    /// `{input}`/`{output}`) can be supplied.
+    pub fn with_diarize_args(mut self, diarize_args: Vec<String>) -> Self {
+        self.diarize_args = diarize_args;
+        self
+    }
+
+    /// Build the resolved argument vector for one transcription, substituting the
+    /// `{input}`/`{output}`/`{language}` placeholders and, when `diarize` is set,
+    /// appending the (also-substituted) diarization arguments. Pure over the
+    /// provider's configured templates, so placeholder + diarize wiring is
+    /// unit-testable without spawning a process.
+    fn resolve_args(
+        &self,
+        input: &str,
+        output: &str,
+        language: &str,
+        diarize: bool,
+    ) -> Vec<String> {
+        let subst = |arg: &str| {
+            arg.replace("{input}", input)
+                .replace("{output}", output)
+                .replace("{language}", language)
+        };
+        let mut resolved: Vec<String> = self.args.iter().map(|a| subst(a)).collect();
+        if diarize {
+            resolved.extend(self.diarize_args.iter().map(|a| subst(a)));
+        }
+        resolved
     }
 
     /// Resolve the configured program to an executable path, searching `PATH`
@@ -109,9 +153,27 @@ impl LocalAsrProvider {
             .and_then(|v| v.as_str())
             .unwrap_or("auto");
 
+        // Speaker diarization (S1): requested per-call, honored only when the
+        // backend has diarize arguments configured (otherwise transcribe plainly).
+        let diarize = request
+            .params
+            .get("diarize")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if diarize && self.diarize_args.is_empty() {
+            tracing::debug!(
+                provider = %self.name,
+                "diarization requested but no diarize_args configured; transcribing without speaker separation"
+            );
+        }
+
         // Materialize a transcript output path only if the template references it;
         // otherwise the command's stdout is the transcript.
-        let uses_output = self.args.iter().any(|a| a.contains("{output}"));
+        let uses_output = self
+            .args
+            .iter()
+            .chain(self.diarize_args.iter())
+            .any(|a| a.contains("{output}"));
         let output_file = uses_output.then(|| {
             self.output_dir
                 .join(format!("mofa_asr_{}.txt", uuid::Uuid::new_v4()))
@@ -121,15 +183,7 @@ impl LocalAsrProvider {
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        let resolved_args: Vec<String> = self
-            .args
-            .iter()
-            .map(|arg| {
-                arg.replace("{input}", input_file)
-                    .replace("{output}", &output_str)
-                    .replace("{language}", language)
-            })
-            .collect();
+        let resolved_args = self.resolve_args(input_file, &output_str, language, diarize);
 
         let result = Command::new(&self.command)
             .args(&resolved_args)
@@ -451,6 +505,58 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, EngineError::ProviderError { .. }));
+    }
+
+    #[test]
+    fn resolve_args_appends_diarize_args_only_when_requested() {
+        let p = LocalAsrProvider::new(
+            "local-asr",
+            "asr",
+            vec!["{input}".into(), "--lang".into(), "{language}".into()],
+            None,
+            asr_models(),
+        )
+        .with_diarize_args(vec!["--diarize".into(), "--out".into(), "{output}".into()]);
+
+        // Without diarization: base args only.
+        let plain = p.resolve_args("clip.wav", "out.txt", "en", false);
+        assert_eq!(plain, vec!["clip.wav", "--lang", "en"]);
+
+        // With diarization: the diarize args are appended, placeholders substituted.
+        let diarized = p.resolve_args("clip.wav", "out.txt", "en", true);
+        assert_eq!(
+            diarized,
+            vec!["clip.wav", "--lang", "en", "--diarize", "--out", "out.txt"]
+        );
+    }
+
+    #[tokio::test]
+    async fn diarize_flag_from_params_reaches_the_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("clip.wav");
+        std::fs::write(&audio, b"fake-audio").unwrap();
+        // The fixture echoes its first argument, so the transcript reveals whether
+        // the diarize marker was passed through from `params.diarize`.
+        let p = LocalAsrProvider::new(
+            "local-asr",
+            "sh",
+            vec!["-c".into(), "echo \"$1\"".into(), "sh".into()],
+            Some(dir.path().to_string_lossy().to_string()),
+            asr_models(),
+        )
+        .with_diarize_args(vec!["SPEAKERS".into()]);
+
+        // diarize = true → the marker is appended and echoed back.
+        let mut req = asr_request(Some(audio.to_str().unwrap()));
+        req.params = serde_json::json!({ "diarize": true });
+        let resp = p.invoke("local-asr/fixture", &req).await.unwrap();
+        assert_eq!(resp.text.as_deref(), Some("SPEAKERS"));
+
+        // diarize omitted → no marker (empty first arg).
+        let plain = asr_request(Some(audio.to_str().unwrap()));
+        let resp = p.invoke("local-asr/fixture", &plain).await.unwrap_err();
+        // No first arg → empty stdout → treated as an empty transcript.
+        assert!(matches!(resp, EngineError::ProviderError { .. }));
     }
 
     #[tokio::test]

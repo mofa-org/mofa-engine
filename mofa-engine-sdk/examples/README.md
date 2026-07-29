@@ -8,13 +8,18 @@ gracefully: with no capable backend they print the structured error (including a
 
 | Example | Scenario | Engine capabilities exercised |
 |---|---|---|
-| `code_review.rs` | **S2** Code/PR Review | `reasoning.effort` (tier routing) + **streamed thought chain** (`Reasoning` vs `Text` chunks) + token/cost |
+| `explainer_video.rs` | **S4** Explainer Video (flagship) | `Chat`→`ImageGen`→`Tts`→`Asr` orchestration + **hard quality gate** (ffprobe duration + slideshow-risk + VLM seam) — "no gate, no output" |
+| `code_review.rs` | **S2** Code/PR Review | `reasoning.effort` (tier routing) + **streamed thought chain** (`Reasoning` vs `Text` chunks) + `max_cost_usd` budget ceiling + token/cost |
 | `doc_ai.rs` | **S3** Document/Screenshot AI | `Vlm` understanding, multimodal `Message.images`, `detail` billing tier |
 | `meeting_brief.rs` | **S1** Meeting → Minutes + Brief | local-first `Asr → Chat → Tts` pipeline, `prefer=local` + `data_class=confidential`, `hint_next` warmup |
 
 ## Running
 
 ```bash
+# S4 — flagship. Orchestration degrades gracefully; pass a composed mp4 to run
+# the real quality gate (needs ffmpeg/ffprobe on PATH).
+cargo run -p mofa-engine-sdk --example explainer_video -- ./final.mp4
+
 # S2 — needs a chat/reasoning backend (Ollama or a cloud key)
 cargo run -p mofa-engine-sdk --example code_review
 
