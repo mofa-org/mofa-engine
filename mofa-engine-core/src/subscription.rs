@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Registry of active capability subscriptions.
-pub struct SubscriptionRegistry {
+pub(crate) struct SubscriptionRegistry {
     inner: Mutex<Vec<Subscription>>,
     next_id: AtomicU64,
 }
@@ -106,7 +106,8 @@ impl SubscriptionRegistry {
             .collect()
     }
 
-    /// Whether `capability` is currently subscribed.
+    /// Whether `capability` is currently subscribed. Test-support.
+    #[cfg(test)]
     pub fn is_subscribed(&self, capability: Capability) -> bool {
         self.active_capabilities().contains(&capability)
     }

@@ -22,10 +22,10 @@ const DECAY_INTERVAL: u64 = 100;
 /// stream of unique identifiers by evicting the least-recently-used scope.
 const MAX_SCOPES: usize = 2048;
 /// Scope key under which cross-application history is aggregated.
-pub const GLOBAL_SCOPE: &str = "__global__";
+pub(crate) const GLOBAL_SCOPE: &str = "__global__";
 
 /// Per-scope Markov chain transition tracker with decay.
-pub struct PreflightPredictor {
+pub(crate) struct PreflightPredictor {
     inner: Mutex<HashMap<String, ScopeChain>>,
 }
 
@@ -104,7 +104,7 @@ impl ScopeChain {
 
 /// Prediction result.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Prediction {
+pub(crate) struct Prediction {
     /// Predicted next capability.
     pub capability: Capability,
     /// Confidence score (0.0 – 1.0).
@@ -220,7 +220,7 @@ impl Default for PreflightPredictor {
 
 /// Live counters describing Preflight effectiveness.
 #[derive(Debug, Default)]
-pub struct PreflightMetrics {
+pub(crate) struct PreflightMetrics {
     warms_started: AtomicU64,
     warms_completed: AtomicU64,
     warms_failed: AtomicU64,

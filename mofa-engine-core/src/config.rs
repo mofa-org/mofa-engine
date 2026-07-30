@@ -451,7 +451,7 @@ impl EngineConfig {
     }
 
     /// Validate configuration before constructing the engine.
-    pub fn validate(&self) -> Result<(), EngineError> {
+    pub(crate) fn validate(&self) -> Result<(), EngineError> {
         if !(0.0..=1.0).contains(&self.preflight.confidence_threshold) {
             return Err(EngineError::Config(format!(
                 "preflight.confidence_threshold must be within 0.0..=1.0, got {}",
@@ -733,7 +733,7 @@ impl ProviderConfig {
     }
 
     /// Parse the configured provider kind.
-    pub fn provider_kind(&self) -> Result<ProviderKind, EngineError> {
+    pub(crate) fn provider_kind(&self) -> Result<ProviderKind, EngineError> {
         match self.kind.as_str() {
             "ollama" => Ok(ProviderKind::Ollama),
             "openai_compatible" => Ok(ProviderKind::OpenAiCompatible),

@@ -1742,8 +1742,8 @@ impl Engine {
         }
     }
 
-    /// Get backend status snapshots.
-    pub fn backend_statuses(&self) -> Vec<BackendStatus> {
+    /// Snapshot every provider's backend status, for `status()`.
+    fn backend_statuses(&self) -> Vec<BackendStatus> {
         self.providers
             .iter()
             .map(|registered| BackendStatus {
@@ -1837,11 +1837,6 @@ impl Engine {
         }
         self.unload_model(model_id, "manual").await;
         Ok(true)
-    }
-
-    /// Engine uptime in seconds.
-    pub fn uptime_secs(&self) -> u64 {
-        self.started_at.elapsed().as_secs()
     }
 }
 
