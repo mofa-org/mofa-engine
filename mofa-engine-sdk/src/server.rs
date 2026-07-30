@@ -23,7 +23,7 @@ use mofa_kernel::{Capability, EngineError, ErrorInfo, InferenceRequest};
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing::Instrument;
 
@@ -64,6 +64,13 @@ impl Server {
             .map(Arc::new);
         if api_token.is_some() {
             tracing::info!("API authentication enabled (bearer token required on /v1)");
+        } else if !Self::is_loopback_host(host) {
+            // Binding off-host with no token leaves the /v1 API open to the
+            // network. Warn loudly so this is a deliberate choice, not an accident.
+            tracing::warn!(
+                "binding {host} without MOFA_API_TOKEN: the /v1 API is UNAUTHENTICATED and \
+                 reachable off-host — set MOFA_API_TOKEN to require a bearer token"
+            );
         }
 
         let state = AppState {
@@ -81,6 +88,16 @@ impl Server {
         axum::serve(listener, app).await?;
 
         Ok(())
+    }
+
+    /// Whether `host` names the loopback interface, in which case the API is only
+    /// reachable from the local machine.
+    fn is_loopback_host(host: &str) -> bool {
+        matches!(host, "localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .map(|ip| ip.is_loopback())
+                .unwrap_or(false)
     }
 }
 
@@ -122,12 +139,38 @@ impl AppState {
             .route("/metrics", get(AppState::metrics_handler))
             .merge(api)
             .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-            .layer(CorsLayer::permissive())
+            .layer(Self::cors_layer())
             .layer(TraceLayer::new_for_http())
             // Outermost, so the request-id span encloses the trace layer and every
             // response (including framework rejections) carries `x-request-id`.
             .layer(middleware::from_fn(AppState::correlation_middleware))
             .with_state(state)
+    }
+
+    /// Cross-origin policy for the API.
+    ///
+    /// Restrictive by default: the same-origin dashboard needs no CORS headers,
+    /// and omitting them prevents a malicious web page from scripting a user's
+    /// engine cross-origin (a DNS-rebinding / drive-by vector against `/v1`,
+    /// especially with auth disabled). An operator who fronts the API from a
+    /// separate web origin opts specific origins in via `MOFA_CORS_ALLOW_ORIGINS`
+    /// (comma-separated); an unset or empty value yields a same-origin-only policy.
+    fn cors_layer() -> CorsLayer {
+        match std::env::var("MOFA_CORS_ALLOW_ORIGINS") {
+            Ok(origins) if !origins.trim().is_empty() => {
+                let allowed: Vec<HeaderValue> = origins
+                    .split(',')
+                    .filter_map(|o| HeaderValue::from_str(o.trim()).ok())
+                    .collect();
+                CorsLayer::new()
+                    .allow_origin(allowed)
+                    .allow_methods(Any)
+                    .allow_headers(Any)
+            }
+            // No allowlist configured → add no CORS headers, so browsers block
+            // cross-origin reads and preflighted requests to `/v1`.
+            _ => CorsLayer::new(),
+        }
     }
 }
 

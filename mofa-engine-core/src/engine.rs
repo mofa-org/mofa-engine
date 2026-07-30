@@ -11,9 +11,10 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use mofa_kernel::{
-    BackendHealth, BackendStatus, Capability, CostTier, EngineError, EngineEvent, EngineStatus,
-    FailedAttempt, FallbackPolicy, InferenceRequest, InferenceResponse, ModelCard, ModelId,
-    ModelResidency, Provider, ProviderHealth, ProviderKind, StreamChunk, StreamDelta,
+    BackendHealth, BackendStatus, Capability, CostTier, DataClass, EngineError, EngineEvent,
+    EngineStatus, FailedAttempt, FallbackPolicy, InferenceRequest, InferenceResponse, ModelCard,
+    ModelId, ModelResidency, Prefer, Provider, ProviderHealth, ProviderKind, StreamChunk,
+    StreamDelta,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore, broadcast, mpsc};
@@ -162,7 +163,10 @@ impl Engine {
     /// authoritative token count only exists post-call); a floor of 1 avoids a
     /// zero estimate for an empty prompt.
     fn estimate_prompt_tokens(req: &InferenceRequest) -> u32 {
-        let chars: usize = req.messages.iter().map(|m| m.content.len()).sum();
+        // Count Unicode scalar values, not bytes: a byte count would over-count
+        // multi-byte (e.g. CJK) prompts several-fold and could spuriously price a
+        // request out of its `max_cost_usd` ceiling.
+        let chars: usize = req.messages.iter().map(|m| m.content.chars().count()).sum();
         ((chars / 4) as u32).max(1)
     }
 
@@ -410,23 +414,37 @@ impl Engine {
                     let count = cards.len();
                     let mut freed = false;
                     for mut card in cards {
-                        // Reconcile with the engine's current view. `.map` drops the
-                        // shard guard immediately so the later insert cannot deadlock.
-                        let previous = self.models.get(&card.id).map(|c| c.residency);
-                        match previous {
-                            // A load is in flight; don't let discovery regress it.
-                            Some(ModelResidency::Loading) => {
-                                card.residency = ModelResidency::Loading;
+                        // Reconcile with the engine's current view. Capture the
+                        // residency *and* the live execution counters so a
+                        // rediscovery that lands mid-request does not reset an
+                        // in-flight model's `active_requests` (which would corrupt
+                        // its Busy status and capacity score, and let a later
+                        // `end_execution` saturate to zero). `.map` drops the shard
+                        // guard immediately so the later insert cannot deadlock.
+                        let previous = self
+                            .models
+                            .get(&card.id)
+                            .map(|c| (c.residency, c.execution.active_requests));
+                        if let Some((prev_residency, active_requests)) = previous {
+                            // Freshly discovered cards start with zero in-flight
+                            // requests; carry the live count forward. The new card's
+                            // `max_concurrency` is kept so config changes still apply.
+                            card.execution.active_requests = active_requests;
+                            match prev_residency {
+                                // A load is in flight; don't let discovery regress it.
+                                ModelResidency::Loading => {
+                                    card.residency = ModelResidency::Loading;
+                                }
+                                // The backend reports the model is no longer resident,
+                                // so release the reservation we still held for it.
+                                ModelResidency::Loaded
+                                    if !matches!(card.residency, ModelResidency::Loaded) =>
+                                {
+                                    self.memory.deallocate(&card.id);
+                                    freed = true;
+                                }
+                                _ => {}
                             }
-                            // The backend reports the model is no longer resident, so
-                            // release the reservation we still held for it.
-                            Some(ModelResidency::Loaded)
-                                if !matches!(card.residency, ModelResidency::Loaded) =>
-                            {
-                                self.memory.deallocate(&card.id);
-                                freed = true;
-                            }
-                            _ => {}
                         }
                         card.refresh_status();
                         self.models.insert(card.id.clone(), card);
@@ -527,15 +545,12 @@ impl Engine {
                 );
                 // Data-flow audit (S5): record where each request was actually
                 // served so residency is traceable by request/session over time.
-                tracing::info!(
-                    target: "mofa::audit",
-                    request_id = %resp.request_id,
-                    session_id = req_session.as_deref().unwrap_or(""),
-                    data_class = ?req_data_class,
-                    prefer = ?req_prefer,
-                    provider = %resp.provider,
-                    locality = if is_local { "local" } else { "cloud" },
-                    "request served"
+                self.audit_served(
+                    &resp.request_id,
+                    &resp.provider,
+                    req_prefer,
+                    req_data_class,
+                    req_session.as_deref(),
                 );
             }
             Err(_) => self.metrics.record_request(false, duration_ms, false),
@@ -581,6 +596,30 @@ impl Engine {
             .iter()
             .find(|p| p.name == provider)
             .is_some_and(|p| p.kind.is_local())
+    }
+
+    /// Emit the S5 data-flow audit record for one served request: where it ran
+    /// and under what residency constraint. Both the unary [`invoke`](Self::invoke)
+    /// and the streaming path call this so *every* served request — not just
+    /// non-streamed ones — is traceable by request/session over time.
+    fn audit_served(
+        &self,
+        request_id: &str,
+        provider: &str,
+        prefer: Prefer,
+        data_class: DataClass,
+        session_id: Option<&str>,
+    ) {
+        tracing::info!(
+            target: "mofa::audit",
+            request_id = %request_id,
+            session_id = session_id.unwrap_or(""),
+            data_class = ?data_class,
+            prefer = ?prefer,
+            provider = %provider,
+            locality = if self.provider_is_local(provider) { "local" } else { "cloud" },
+            "request served"
+        );
     }
 
     /// Run inference.
@@ -906,6 +945,21 @@ impl Engine {
         let routing_reason = decision.reason.clone();
         let overall_deadline = Instant::now() + self.timeouts.request();
 
+        // Budget ceiling parity with `invoke`: streaming targets a single
+        // candidate, so if that candidate's estimated cost exceeds the request's
+        // ceiling the stream fails up front rather than spending. Free/local
+        // candidates estimate to $0 and are always affordable.
+        if let Some(ceiling) = req.max_cost_usd {
+            let est = self.estimate_request_cost(&provider_name, &req);
+            if est > ceiling {
+                let err = EngineError::NoCapableModel(format!(
+                    "estimated cost ${est:.4} exceeds budget ${ceiling:.4}"
+                ));
+                let _ = out.send(StreamChunk::Error(err.info())).await;
+                return;
+            }
+        }
+
         if !self.circuit_breakers.allow_request(&provider_name) {
             let err = EngineError::CircuitOpen(provider_name.clone());
             let _ = out.send(StreamChunk::Error(err.info())).await;
@@ -1004,6 +1058,15 @@ impl Engine {
                     resp.prompt_tokens,
                     resp.completion_tokens,
                     cost_usd,
+                );
+                // Data-flow audit (S5): streamed requests are traced exactly like
+                // unary ones, so the residency guarantee has no streaming blind spot.
+                self.audit_served(
+                    &req.request_id,
+                    &provider_name,
+                    req.prefer,
+                    req.data_class,
+                    req.session_id.as_deref(),
                 );
                 StreamChunk::Completed {
                     duration_ms,
@@ -1145,7 +1208,17 @@ impl Engine {
             .get(model_id)
             .and_then(|card| self.find_provider(&card.provider));
         if let Some(provider) = provider {
-            let _ = provider.unload(model_id).await;
+            // Bound the backend unload with the load timeout: during memory-pressure
+            // admission this runs under `load_gate`, so a hung backend unload must
+            // not wedge every concurrent load. A timed-out (or failed) unload still
+            // falls through to release the engine's own accounting below.
+            match tokio::time::timeout(self.timeouts.load(), provider.unload(model_id)).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => tracing::warn!("backend unload of '{model_id}' failed: {e}"),
+                Err(_) => {
+                    tracing::warn!("backend unload of '{model_id}' timed out; releasing accounting")
+                }
+            }
         }
         // Frees the reservation and emits residency/memory events.
         self.set_model_residency(model_id, ModelResidency::Unloaded);

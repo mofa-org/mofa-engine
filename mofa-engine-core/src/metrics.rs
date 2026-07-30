@@ -290,13 +290,14 @@ impl EngineMetrics {
 
 impl EngineMetrics {
     /// Escape a Prometheus label value per the exposition format: backslash,
-    /// double-quote, and newline must be escaped so a provider name cannot produce
-    /// malformed output.
+    /// double-quote, and line breaks must be escaped so a provider name cannot
+    /// produce malformed output. A carriage return is normalized to `\n` (the
+    /// format defines no `\r` escape) so it cannot terminate the line early.
     fn escape_label_value(value: &str) -> String {
         value
             .replace('\\', "\\\\")
             .replace('"', "\\\"")
-            .replace('\n', "\\n")
+            .replace(['\r', '\n'], "\\n")
     }
 }
 

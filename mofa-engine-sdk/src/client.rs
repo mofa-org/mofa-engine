@@ -219,6 +219,19 @@ impl DaemonClient {
         Self::decode(resp).await
     }
 
+    async fn post_json<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+    ) -> Result<T, ClientError> {
+        let resp = self
+            .authed(self.http.post(self.url(path)).json(&body))
+            .send()
+            .await
+            .map_err(|e| ClientError::Transport(e.to_string()))?;
+        Self::decode(resp).await
+    }
+
     async fn decode<T: serde::de::DeserializeOwned>(
         resp: reqwest::Response,
     ) -> Result<T, ClientError> {
@@ -294,6 +307,81 @@ impl DaemonClient {
             .map_err(|e| ClientError::Transport(e.to_string()))?;
         Self::decode(resp).await
     }
+
+    /// `POST /v1/subscriptions` — register a capability subscription and warm its
+    /// models; returns the new subscription id.
+    pub async fn subscribe(
+        &self,
+        app_id: Option<String>,
+        session_id: Option<String>,
+        capabilities: Vec<Capability>,
+        ttl_secs: Option<u64>,
+    ) -> Result<u64, ClientError> {
+        #[derive(serde::Deserialize)]
+        struct SubscribeResponse {
+            id: u64,
+        }
+        let body = serde_json::json!({
+            "app_id": app_id,
+            "session_id": session_id,
+            "capabilities": capabilities,
+            "ttl_secs": ttl_secs,
+        });
+        let resp: SubscribeResponse = self.post_json("/v1/subscriptions", body).await?;
+        Ok(resp.id)
+    }
+
+    /// `DELETE /v1/subscriptions/{id}` — remove a subscription; returns whether
+    /// one existed. A not-found id is reported as `Ok(false)`, not an error.
+    pub async fn unsubscribe(&self, id: u64) -> Result<bool, ClientError> {
+        let resp = self
+            .authed(
+                self.http
+                    .delete(self.url(&format!("/v1/subscriptions/{id}"))),
+            )
+            .send()
+            .await
+            .map_err(|e| ClientError::Transport(e.to_string()))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        #[derive(serde::Deserialize)]
+        struct UnsubscribeResponse {
+            removed: bool,
+        }
+        let resp: UnsubscribeResponse = Self::decode(resp).await?;
+        Ok(resp.removed)
+    }
+
+    /// `POST /v1/models/load` — manually warm a model; returns whether backend
+    /// state changed.
+    pub async fn load_model(&self, model_id: &str) -> Result<bool, ClientError> {
+        #[derive(serde::Deserialize)]
+        struct ModelActionResponse {
+            changed: bool,
+        }
+        let body = serde_json::json!({ "model_id": model_id });
+        let resp: ModelActionResponse = self.post_json("/v1/models/load", body).await?;
+        Ok(resp.changed)
+    }
+
+    /// `POST /v1/models/unload` — manually unload a model; returns whether the
+    /// model was known.
+    pub async fn unload_model(&self, model_id: &str) -> Result<bool, ClientError> {
+        #[derive(serde::Deserialize)]
+        struct ModelActionResponse {
+            changed: bool,
+        }
+        let body = serde_json::json!({ "model_id": model_id });
+        let resp: ModelActionResponse = self.post_json("/v1/models/unload", body).await?;
+        Ok(resp.changed)
+    }
+
+    // Streaming endpoints (`POST /v1/invoke/stream` and `GET /v1/events`) are
+    // intentionally not part of this typed client: SSE consumption is
+    // caller-specific (framing, backpressure, reconnection), so a caller drives
+    // them with `reqwest` directly, or uses the in-process `EmbeddedEngine` /
+    // `Engine::invoke_stream` for a typed `StreamChunk` receiver.
 }
 
 #[cfg(test)]

@@ -162,14 +162,21 @@ enum SseEvent {
 impl OpenAiCompatProvider {
     /// Parse one SSE event block (the bytes preceding a blank-line delimiter).
     ///
-    /// Concatenates any `data:` field lines, ignoring comments/`event:` lines and
-    /// tolerating `\r\n`. Blank blocks and unparseable payloads yield `None`.
+    /// Joins the event's `data:` field lines with newlines per the SSE spec
+    /// (a single leading space after `data:` is stripped), ignoring
+    /// comments/`event:` lines and tolerating `\r\n` (`str::lines` drops the
+    /// terminator). Blank blocks and unparseable payloads yield `None`.
     fn parse_sse_event(block: &[u8]) -> Option<SseEvent> {
         let text = std::str::from_utf8(block).ok()?;
         let mut data = String::new();
         for line in text.lines() {
-            if let Some(rest) = line.trim_start().strip_prefix("data:") {
-                data.push_str(rest.trim());
+            if let Some(rest) = line.strip_prefix("data:") {
+                if !data.is_empty() {
+                    data.push('\n');
+                }
+                // Per the spec a single space immediately after the colon is part
+                // of the delimiter, not the value; any further whitespace is content.
+                data.push_str(rest.strip_prefix(' ').unwrap_or(rest));
             }
         }
         if data.is_empty() {
@@ -181,6 +188,25 @@ impl OpenAiCompatProvider {
         serde_json::from_str::<ChatCompletionChunk>(&data)
             .ok()
             .map(SseEvent::Chunk)
+    }
+
+    /// Length (in bytes) of the first complete SSE event frame in `buf`,
+    /// including its blank-line delimiter, or `None` if no complete frame is
+    /// buffered yet. Recognizes both `\n\n` and the spec-permitted `\r\n\r\n`
+    /// (as `\n` followed by `\r\n`), so a CRLF-emitting server or proxy streams
+    /// correctly rather than buffering the whole body.
+    fn sse_frame_len(buf: &[u8]) -> Option<usize> {
+        for i in 0..buf.len() {
+            if buf[i] != b'\n' {
+                continue;
+            }
+            match buf.get(i + 1) {
+                Some(b'\n') => return Some(i + 2),
+                Some(b'\r') if buf.get(i + 2) == Some(&b'\n') => return Some(i + 3),
+                _ => {}
+            }
+        }
+        None
     }
 }
 
@@ -412,17 +438,21 @@ impl Provider for OpenAiCompatProvider {
             Some(content)
         };
 
-        while let Some(bytes) = resp.chunk().await.map_err(|e| EngineError::ProviderError {
-            provider: self.name.clone(),
-            detail: format!("stream read error: {e}"),
-        })? {
+        'read: while let Some(bytes) =
+            resp.chunk().await.map_err(|e| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("stream read error: {e}"),
+            })?
+        {
             buf.extend_from_slice(&bytes);
-            while let Some(idx) = buf.windows(2).position(|w| w == b"\n\n") {
-                let block: Vec<u8> = buf.drain(..idx + 2).collect();
+            while let Some(frame_len) = Self::sse_frame_len(&buf) {
+                let block: Vec<u8> = buf.drain(..frame_len).collect();
                 if let Some(event) = Self::parse_sse_event(&block)
                     && let Some(delta) = apply(event, &mut full)
+                    && sink.send(StreamDelta::Text(delta)).await.is_err()
                 {
-                    let _ = sink.send(StreamDelta::Text(delta)).await;
+                    // Receiver dropped (client disconnected): stop draining upstream.
+                    break 'read;
                 }
             }
         }
@@ -839,5 +869,39 @@ mod tests {
         assert!(OpenAiCompatProvider::parse_sse_event(b"").is_none());
         assert!(OpenAiCompatProvider::parse_sse_event(b": keep-alive comment").is_none());
         assert!(OpenAiCompatProvider::parse_sse_event(b"data: not json").is_none());
+    }
+
+    #[test]
+    fn sse_frame_len_detects_lf_and_crlf_delimiters() {
+        // `\n\n` frame: `"data: a\n\n"` is 9 bytes (the drained frame incl. both
+        // newlines), leaving `"rest"`.
+        assert_eq!(
+            OpenAiCompatProvider::sse_frame_len(b"data: a\n\nrest"),
+            Some(9)
+        );
+        // `\r\n\r\n` frame (CRLF server/proxy): `"data: a\r\n\r\n"` is 11 bytes.
+        assert_eq!(
+            OpenAiCompatProvider::sse_frame_len(b"data: a\r\n\r\nrest"),
+            Some(11)
+        );
+        // A lone trailing `\n` is not a complete frame yet.
+        assert_eq!(OpenAiCompatProvider::sse_frame_len(b"data: a\n"), None);
+    }
+
+    #[test]
+    fn parse_sse_event_joins_multiple_data_lines() {
+        // Two `data:` lines are joined with a newline, yielding valid JSON.
+        let block = b"data: {\"choices\":[{\"delta\":\ndata: {\"content\":\"hi\"}}]}";
+        let Some(SseEvent::Chunk(chunk)) = OpenAiCompatProvider::parse_sse_event(block) else {
+            panic!("expected a parsed chunk from joined data lines");
+        };
+        assert_eq!(
+            chunk
+                .choices
+                .into_iter()
+                .next()
+                .and_then(|c| c.delta.content),
+            Some("hi".to_string())
+        );
     }
 }

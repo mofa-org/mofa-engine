@@ -3,6 +3,7 @@
 //! Communicates with a local Ollama instance via its HTTP API.
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use mofa_kernel::{
     BackendFeature, BackendHealth, Capability, CostTier, EngineError, InferenceRequest,
     InferenceResponse, LifecycleResult, ModelAvailability, ModelCard, ModelId, ModelResidency,
@@ -127,6 +128,11 @@ struct OllamaChatRequest {
 struct OllamaMessage {
     role: String,
     content: String,
+    /// Base64-encoded image data for multimodal (vision) models such as `llava`.
+    /// Ollama expects raw base64 (no `data:` prefix); empty for text-only turns,
+    /// in which case the field is omitted entirely.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    images: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -167,6 +173,56 @@ impl OllamaProvider {
             return None;
         }
         serde_json::from_slice(line).ok()
+    }
+
+    /// Convert MoFA conversation messages to Ollama's wire form, resolving any
+    /// attached image references to the raw base64 a vision model (e.g. `llava`)
+    /// expects. A message with no images serializes as a plain text turn.
+    ///
+    /// Note: Ollama models are discovered as [`Capability::Chat`], so the router
+    /// only sends chat requests here; attaching images lets a locally-pulled
+    /// vision model still answer an image-bearing chat turn on-device.
+    async fn to_ollama_messages(&self, request: &InferenceRequest) -> Vec<OllamaMessage> {
+        let mut out = Vec::with_capacity(request.messages.len());
+        for m in &request.messages {
+            let mut images = Vec::with_capacity(m.images.len());
+            for image in &m.images {
+                if let Some(b64) = Self::resolve_image_b64(image).await {
+                    images.push(b64);
+                }
+            }
+            out.push(OllamaMessage {
+                role: m.role.clone(),
+                content: m.content.clone(),
+                images,
+            });
+        }
+        out
+    }
+
+    /// Resolve one image reference to the raw base64 payload Ollama accepts.
+    /// A `data:` URL is stripped to its payload; a local file is read and
+    /// encoded; an `http(s)` URL is skipped (Ollama cannot fetch remote images)
+    /// with a warning. Unreadable references are skipped rather than failing the
+    /// whole request.
+    async fn resolve_image_b64(image: &str) -> Option<String> {
+        if image.starts_with("data:") {
+            // `data:<mime>;base64,<payload>` → keep only the base64 payload.
+            return image
+                .split_once(',')
+                .map(|(_, payload)| payload.to_string());
+        }
+        if image.starts_with("http://") || image.starts_with("https://") {
+            tracing::warn!("Ollama cannot fetch remote image URL '{image}'; skipping");
+            return None;
+        }
+        match tokio::fs::read(image).await {
+            Ok(bytes) => Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+            Err(e) => {
+                tracing::warn!("cannot read local image '{image}': {e}; skipping");
+                None
+            }
+        }
     }
 }
 
@@ -228,6 +284,12 @@ impl Provider for OllamaProvider {
                     return None;
                 }
 
+                // TODO: Ollama's `/api/tags` does not report modality, so every
+                // non-embedding model is typed as `Chat`. A locally-pulled vision
+                // model therefore won't be routed for a `Vlm` capability request,
+                // though it can still answer an image-bearing *chat* turn (see
+                // `to_ollama_messages`). Modality inference from the model family is
+                // deferred.
                 let mut card = ModelCard::new(
                     self.name.clone(),
                     model_name.clone(),
@@ -274,6 +336,7 @@ impl Provider for OllamaProvider {
             messages: vec![OllamaMessage {
                 role: "user".into(),
                 content: " ".into(),
+                images: Vec::new(),
             }],
             stream: false,
             keep_alive: Some("5m".into()),
@@ -314,6 +377,7 @@ impl Provider for OllamaProvider {
             messages: vec![OllamaMessage {
                 role: "user".into(),
                 content: " ".into(),
+                images: Vec::new(),
             }],
             stream: false,
             keep_alive: Some("0".into()),
@@ -355,15 +419,7 @@ impl Provider for OllamaProvider {
     ) -> Result<InferenceResponse, EngineError> {
         let model_name = ModelId::name(model_id);
 
-        let messages: Vec<OllamaMessage> = request
-            .messages
-            .iter()
-            .map(|m| OllamaMessage {
-                role: m.role.clone(),
-                content: m.content.clone(),
-            })
-            .collect();
-
+        let messages = self.to_ollama_messages(request).await;
         if messages.is_empty() {
             return Err(EngineError::InvalidRequest("no messages provided".into()));
         }
@@ -436,14 +492,7 @@ impl Provider for OllamaProvider {
         sink: StreamSink,
     ) -> Result<InferenceResponse, EngineError> {
         let model_name = ModelId::name(model_id);
-        let messages: Vec<OllamaMessage> = request
-            .messages
-            .iter()
-            .map(|m| OllamaMessage {
-                role: m.role.clone(),
-                content: m.content.clone(),
-            })
-            .collect();
+        let messages = self.to_ollama_messages(request).await;
         if messages.is_empty() {
             return Err(EngineError::InvalidRequest("no messages provided".into()));
         }
@@ -497,17 +546,23 @@ impl Provider for OllamaProvider {
             Some(content)
         };
 
-        while let Some(bytes) = resp.chunk().await.map_err(|e| EngineError::ProviderError {
-            provider: self.name.clone(),
-            detail: format!("stream read error: {e}"),
-        })? {
+        'read: while let Some(bytes) =
+            resp.chunk().await.map_err(|e| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("stream read error: {e}"),
+            })?
+        {
             buf.extend_from_slice(&bytes);
             while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
                 let line: Vec<u8> = buf.drain(..=pos).collect();
                 if let Some(chunk) = Self::parse_stream_line(&line)
                     && let Some(delta) = apply(chunk, &mut full)
+                    && sink.send(StreamDelta::Text(delta)).await.is_err()
                 {
-                    let _ = sink.send(StreamDelta::Text(delta)).await;
+                    // The receiver was dropped (client disconnected): stop draining
+                    // the upstream generation rather than paying for tokens no one
+                    // will read.
+                    break 'read;
                 }
             }
         }

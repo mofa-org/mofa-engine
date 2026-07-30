@@ -542,17 +542,22 @@ impl Provider for LiterLLMProvider {
                 continue;
             };
             // Thought-chain deltas are forwarded distinctly from answer text so
-            // callers can display/audit the reasoning separately (S2).
+            // callers can display/audit the reasoning separately (S2). A send
+            // error means the receiver was dropped (client disconnected), so we
+            // stop consuming the upstream stream rather than paying for unread tokens.
             if let Some(rc) = choice.delta.reasoning_content
                 && !rc.is_empty()
+                && sink.send(StreamDelta::Reasoning(rc)).await.is_err()
             {
-                let _ = sink.send(StreamDelta::Reasoning(rc)).await;
+                break;
             }
             if let Some(content) = choice.delta.content
                 && !content.is_empty()
             {
                 full.push_str(&content);
-                let _ = sink.send(StreamDelta::Text(content)).await;
+                if sink.send(StreamDelta::Text(content)).await.is_err() {
+                    break;
+                }
             }
         }
 
