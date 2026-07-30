@@ -55,7 +55,7 @@ async fn main() {
         hint_next: Some("image_gen".into()),
         ..Default::default()
     };
-    let script = stage(&engine, script, "Script (chat)").await;
+    let script = ExplainerVideo::stage(&engine, script, "Script (chat)").await;
 
     // 2. Scene images (ImageGen, prefer local SD when available).
     let scene_prompt = "flat vector animation frame: a neuron adjusting its weights";
@@ -73,7 +73,7 @@ async fn main() {
         hint_next: Some("tts".into()),
         ..Default::default()
     };
-    stage(&engine, image, "Scene image (image_gen)").await;
+    ExplainerVideo::stage(&engine, image, "Scene image (image_gen)").await;
 
     // 3. Narration (TTS).
     let narration = InferenceRequest {
@@ -86,7 +86,7 @@ async fn main() {
         hint_next: Some("asr".into()),
         ..Default::default()
     };
-    stage(&engine, narration, "Narration (tts)").await;
+    ExplainerVideo::stage(&engine, narration, "Narration (tts)").await;
 
     // 4. (compose) — external: scenes + narration + captions → final.mp4 via
     //    Remotion/FFmpeg. Out of engine scope; supply the result as an argument.
@@ -95,7 +95,7 @@ async fn main() {
     // 5. Quality gate — the hard gate. Runs against a real mp4 when provided.
     println!("\n== quality gate ==");
     match final_mp4.as_deref() {
-        Some(path) => run_gate(Path::new(path)).await,
+        Some(path) => ExplainerVideo::run_gate(Path::new(path)).await,
         None => println!(
             "no composed mp4 supplied — pass one to run the gate:\n  \
              cargo run -p mofa-engine-sdk --example explainer_video -- ./final.mp4"
@@ -103,42 +103,47 @@ async fn main() {
     }
 }
 
-/// Run one orchestration stage, reporting where it was routed or the structured
-/// error (the pipeline continues either way — this demo showcases orchestration,
-/// not a live render). Returns the text output when present.
-async fn stage(engine: &Engine, req: InferenceRequest, label: &str) -> Option<String> {
-    match engine.invoke(req).await {
-        Ok(resp) => {
-            println!(
-                "[{label}] served by {} in {}ms",
-                resp.provider, resp.duration_ms
-            );
-            resp.text
-        }
-        Err(e) => {
-            let info = e.info();
-            println!("[{label}] skipped — {:?}: {}", info.code, info.message);
-            None
-        }
-    }
-}
+/// Namespace for this demo's helpers.
+struct ExplainerVideo;
 
-/// Run the real quality gate over a composed video and print the verdict. The
-/// optional VLM image/text check is omitted here (`None`); a full pipeline would
-/// pass the engine's `Vlm` verdict over sampled frames.
-async fn run_gate(path: &Path) {
-    let report = QualityGate::new().check(path, None).await;
-    for c in &report.checks {
-        println!(
-            "  [{}] {}: {}",
-            if c.passed { "PASS" } else { "FAIL" },
-            c.name,
-            c.detail
-        );
+impl ExplainerVideo {
+    /// Run one orchestration stage, reporting where it was routed or the structured
+    /// error (the pipeline continues either way — this demo showcases orchestration,
+    /// not a live render). Returns the text output when present.
+    async fn stage(engine: &Engine, req: InferenceRequest, label: &str) -> Option<String> {
+        match engine.invoke(req).await {
+            Ok(resp) => {
+                println!(
+                    "[{label}] served by {} in {}ms",
+                    resp.provider, resp.duration_ms
+                );
+                resp.text
+            }
+            Err(e) => {
+                let info = e.info();
+                println!("[{label}] skipped — {:?}: {}", info.code, info.message);
+                None
+            }
+        }
     }
-    if report.passed {
-        println!("verdict: ACCEPTED ✅");
-    } else {
-        println!("verdict: REJECTED ❌ (no gate, no output)");
+
+    /// Run the real quality gate over a composed video and print the verdict. The
+    /// optional VLM image/text check is omitted here (`None`); a full pipeline would
+    /// pass the engine's `Vlm` verdict over sampled frames.
+    async fn run_gate(path: &Path) {
+        let report = QualityGate::new().check(path, None).await;
+        for c in &report.checks {
+            println!(
+                "  [{}] {}: {}",
+                if c.passed { "PASS" } else { "FAIL" },
+                c.name,
+                c.detail
+            );
+        }
+        if report.passed {
+            println!("verdict: ACCEPTED ✅");
+        } else {
+            println!("verdict: REJECTED ❌ (no gate, no output)");
+        }
     }
 }

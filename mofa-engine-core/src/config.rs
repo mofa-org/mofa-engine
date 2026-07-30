@@ -44,7 +44,7 @@ pub struct ArtifactConfig {
     pub dir: Option<String>,
     /// Delete engine artifacts older than this many seconds. `0` disables the
     /// background sweep (artifacts are then the caller's responsibility).
-    #[serde(default = "default_artifact_retention")]
+    #[serde(default = "ArtifactConfig::default_artifact_retention")]
     pub retention_secs: u64,
 }
 
@@ -52,13 +52,16 @@ impl Default for ArtifactConfig {
     fn default() -> Self {
         Self {
             dir: None,
-            retention_secs: default_artifact_retention(),
+            retention_secs: Self::default_artifact_retention(),
         }
     }
 }
 
-fn default_artifact_retention() -> u64 {
-    3600
+impl ArtifactConfig {
+    /// Retain generated artifacts for one hour by default.
+    fn default_artifact_retention() -> u64 {
+        3600
+    }
 }
 
 /// Security and file-access constraints.
@@ -75,28 +78,32 @@ pub struct SecurityConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListenConfig {
     /// Bind address
-    #[serde(default = "default_host")]
+    #[serde(default = "ListenConfig::default_host")]
     pub host: String,
     /// Bind port
-    #[serde(default = "default_port")]
+    #[serde(default = "ListenConfig::default_port")]
     pub port: u16,
 }
 
 impl Default for ListenConfig {
     fn default() -> Self {
         Self {
-            host: default_host(),
-            port: default_port(),
+            host: Self::default_host(),
+            port: Self::default_port(),
         }
     }
 }
 
-fn default_host() -> String {
-    "127.0.0.1".into()
-}
+impl ListenConfig {
+    /// Bind loopback by default — the API is exposed to the local machine only
+    /// unless the operator opts into a wider host.
+    fn default_host() -> String {
+        "127.0.0.1".into()
+    }
 
-fn default_port() -> u16 {
-    8420
+    fn default_port() -> u16 {
+        8420
+    }
 }
 
 /// Memory management configuration.
@@ -105,7 +112,7 @@ pub struct MemoryConfig {
     /// Memory budget in megabytes (None = auto-detect from system)
     pub budget_mb: Option<u64>,
     /// Seconds of idle time before evicting a model
-    #[serde(default = "default_idle_timeout")]
+    #[serde(default = "MemoryConfig::default_idle_timeout")]
     pub idle_timeout_secs: u64,
 }
 
@@ -113,13 +120,16 @@ impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             budget_mb: None,
-            idle_timeout_secs: default_idle_timeout(),
+            idle_timeout_secs: Self::default_idle_timeout(),
         }
     }
 }
 
-fn default_idle_timeout() -> u64 {
-    120
+impl MemoryConfig {
+    /// Evict a model after two minutes idle by default.
+    fn default_idle_timeout() -> u64 {
+        120
+    }
 }
 
 /// Timeouts for the distinct phases of a request, all in seconds.
@@ -131,34 +141,34 @@ fn default_idle_timeout() -> u64 {
 pub struct TimeoutConfig {
     /// Overall budget for a single `invoke`, spanning queueing, loading, and
     /// inference across every candidate attempted.
-    #[serde(default = "default_request_timeout")]
+    #[serde(default = "TimeoutConfig::default_request_timeout")]
     pub request_secs: u64,
     /// Maximum time a request may wait for a concurrency permit before failing.
-    #[serde(default = "default_queue_timeout")]
+    #[serde(default = "TimeoutConfig::default_queue_timeout")]
     pub queue_secs: u64,
     /// Maximum time to load/warm a single model.
-    #[serde(default = "default_load_timeout")]
+    #[serde(default = "TimeoutConfig::default_load_timeout")]
     pub load_secs: u64,
     /// Maximum time for a single inference call to a provider.
-    #[serde(default = "default_inference_timeout")]
+    #[serde(default = "TimeoutConfig::default_inference_timeout")]
     pub inference_secs: u64,
     /// Maximum time for a single provider discovery probe.
-    #[serde(default = "default_discovery_timeout")]
+    #[serde(default = "TimeoutConfig::default_discovery_timeout")]
     pub discovery_secs: u64,
     /// Maximum time for a single provider health probe.
-    #[serde(default = "default_health_timeout")]
+    #[serde(default = "TimeoutConfig::default_health_timeout")]
     pub health_secs: u64,
 }
 
 impl Default for TimeoutConfig {
     fn default() -> Self {
         Self {
-            request_secs: default_request_timeout(),
-            queue_secs: default_queue_timeout(),
-            load_secs: default_load_timeout(),
-            inference_secs: default_inference_timeout(),
-            discovery_secs: default_discovery_timeout(),
-            health_secs: default_health_timeout(),
+            request_secs: Self::default_request_timeout(),
+            queue_secs: Self::default_queue_timeout(),
+            load_secs: Self::default_load_timeout(),
+            inference_secs: Self::default_inference_timeout(),
+            discovery_secs: Self::default_discovery_timeout(),
+            health_secs: Self::default_health_timeout(),
         }
     }
 }
@@ -190,72 +200,80 @@ impl TimeoutConfig {
     }
 }
 
-fn default_request_timeout() -> u64 {
-    240
-}
-fn default_queue_timeout() -> u64 {
-    30
-}
-fn default_load_timeout() -> u64 {
-    60
-}
-fn default_inference_timeout() -> u64 {
-    180
-}
-fn default_discovery_timeout() -> u64 {
-    8
-}
-fn default_health_timeout() -> u64 {
-    5
+impl TimeoutConfig {
+    fn default_request_timeout() -> u64 {
+        240
+    }
+    fn default_queue_timeout() -> u64 {
+        30
+    }
+    fn default_load_timeout() -> u64 {
+        60
+    }
+    fn default_inference_timeout() -> u64 {
+        180
+    }
+    fn default_discovery_timeout() -> u64 {
+        8
+    }
+    fn default_health_timeout() -> u64 {
+        5
+    }
 }
 
 /// Preflight (predictive warming) configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreflightConfig {
     /// Master switch for all predictive warming.
-    #[serde(default = "default_true")]
+    #[serde(default = "PreflightConfig::default_true")]
     pub enabled: bool,
     /// Whether the engine learns capability transition history.
-    #[serde(default = "default_true")]
+    #[serde(default = "PreflightConfig::default_true")]
     pub history_learning: bool,
     /// Whether the engine speculatively warms models from hints/history/subscriptions.
-    #[serde(default = "default_true")]
+    #[serde(default = "PreflightConfig::default_true")]
     pub speculative_warming: bool,
     /// Minimum confidence (0.0–1.0) a history prediction needs before it warms a model.
-    #[serde(default = "default_confidence_threshold")]
+    #[serde(default = "PreflightConfig::default_confidence_threshold")]
     pub confidence_threshold: f64,
     /// Minimum number of observed transitions before history is trusted.
-    #[serde(default = "default_min_samples")]
+    #[serde(default = "PreflightConfig::default_min_samples")]
     pub min_samples: u64,
     /// Default lifetime of a capability subscription, in seconds.
-    #[serde(default = "default_subscription_ttl")]
+    #[serde(default = "PreflightConfig::default_subscription_ttl")]
     pub subscription_ttl_secs: u64,
 }
 
 impl Default for PreflightConfig {
     fn default() -> Self {
         Self {
-            enabled: default_true(),
-            history_learning: default_true(),
-            speculative_warming: default_true(),
-            confidence_threshold: default_confidence_threshold(),
-            min_samples: default_min_samples(),
-            subscription_ttl_secs: default_subscription_ttl(),
+            enabled: Self::default_true(),
+            history_learning: Self::default_true(),
+            speculative_warming: Self::default_true(),
+            confidence_threshold: Self::default_confidence_threshold(),
+            min_samples: Self::default_min_samples(),
+            subscription_ttl_secs: Self::default_subscription_ttl(),
         }
     }
 }
 
-fn default_true() -> bool {
-    true
-}
-fn default_confidence_threshold() -> f64 {
-    0.6
-}
-fn default_min_samples() -> u64 {
-    3
-}
-fn default_subscription_ttl() -> u64 {
-    3600
+impl PreflightConfig {
+    /// Preflight and its sub-switches are on by default; the operator opts out.
+    fn default_true() -> bool {
+        true
+    }
+    /// Require moderately strong evidence before a learned prediction warms a model.
+    fn default_confidence_threshold() -> f64 {
+        0.6
+    }
+    /// Ignore a transition until it has been seen a few times, to avoid warming on noise.
+    fn default_min_samples() -> u64 {
+        3
+    }
+    /// Keep a capability subscription warm for an hour by default.
+    fn default_subscription_ttl() -> u64 {
+        3600
+    }
 }
 
 /// Configuration for a single provider.
@@ -270,16 +288,16 @@ pub struct ProviderConfig {
     /// API key (supports `${ENV_VAR}` syntax)
     pub api_key: Option<String>,
     /// Routing priority (lower = preferred; 1 = local, 10 = cloud)
-    #[serde(default = "default_priority")]
+    #[serde(default = "ProviderConfig::default_priority")]
     pub priority: u8,
     /// Cost tier string
-    #[serde(default = "default_cost_tier")]
+    #[serde(default = "ProviderConfig::default_cost_tier")]
     pub cost_tier: String,
     /// Explicit model definitions
     #[serde(default)]
     pub models: Vec<ModelDef>,
     /// Whether this provider is enabled
-    #[serde(default = "default_enabled")]
+    #[serde(default = "ProviderConfig::default_enabled")]
     pub enabled: bool,
     /// Program to execute for a `local_tts` process-adapter backend.
     ///
@@ -320,10 +338,10 @@ impl Default for ProviderConfig {
             kind: String::new(),
             base_url: String::new(),
             api_key: None,
-            priority: default_priority(),
-            cost_tier: default_cost_tier(),
+            priority: Self::default_priority(),
+            cost_tier: Self::default_cost_tier(),
             models: Vec::new(),
-            enabled: default_enabled(),
+            enabled: Self::default_enabled(),
             command: None,
             args: Vec::new(),
             output_format: None,
@@ -335,16 +353,19 @@ impl Default for ProviderConfig {
     }
 }
 
-fn default_priority() -> u8 {
-    5
-}
-
-fn default_cost_tier() -> String {
-    "medium".into()
-}
-
-fn default_enabled() -> bool {
-    true
+impl ProviderConfig {
+    /// A middling routing priority, so an unprioritized provider sits between the
+    /// conventional local (1) and cloud (10) bands.
+    fn default_priority() -> u8 {
+        5
+    }
+    fn default_cost_tier() -> String {
+        "medium".into()
+    }
+    /// Providers are enabled unless explicitly disabled.
+    fn default_enabled() -> bool {
+        true
+    }
 }
 
 /// A model definition within a provider config.
@@ -422,7 +443,7 @@ impl EngineConfig {
         // Resolve env vars in api_key fields
         for provider in &mut config.providers {
             if let Some(ref key) = provider.api_key {
-                provider.api_key = Some(resolve_env_var(key)?);
+                provider.api_key = Some(ProviderConfig::resolve_env_var(key)?);
             }
         }
 
@@ -696,19 +717,21 @@ impl EngineConfig {
     }
 }
 
-/// Resolve `${ENV_VAR}` patterns in a string.
-fn resolve_env_var(s: &str) -> Result<String, EngineError> {
-    if let Some(rest) = s.strip_prefix("${")
-        && let Some(var_name) = rest.strip_suffix('}')
-    {
-        return std::env::var(var_name).map_err(|_| {
-            EngineError::Config(format!("environment variable '{var_name}' is not set"))
-        });
-    }
-    Ok(s.to_string())
-}
-
 impl ProviderConfig {
+    /// Resolve a `${ENV_VAR}` reference to the environment variable's value,
+    /// passing any other string through unchanged. Lets a config keep secrets
+    /// (e.g. `api_key = "${OPENAI_API_KEY}"`) out of the file itself.
+    fn resolve_env_var(s: &str) -> Result<String, EngineError> {
+        if let Some(rest) = s.strip_prefix("${")
+            && let Some(var_name) = rest.strip_suffix('}')
+        {
+            return std::env::var(var_name).map_err(|_| {
+                EngineError::Config(format!("environment variable '{var_name}' is not set"))
+            });
+        }
+        Ok(s.to_string())
+    }
+
     /// Parse the configured provider kind.
     pub fn provider_kind(&self) -> Result<ProviderKind, EngineError> {
         match self.kind.as_str() {
@@ -732,7 +755,10 @@ mod tests {
 
     #[test]
     fn resolve_env_var_plain() {
-        assert_eq!(resolve_env_var("plain-key").unwrap(), "plain-key");
+        assert_eq!(
+            ProviderConfig::resolve_env_var("plain-key").unwrap(),
+            "plain-key"
+        );
     }
 
     #[test]
@@ -740,7 +766,7 @@ mod tests {
         // SAFETY: this test runs single-threaded and restores the env var.
         unsafe { std::env::set_var("TEST_MOFA_KEY", "resolved-value") };
         assert_eq!(
-            resolve_env_var("${TEST_MOFA_KEY}").unwrap(),
+            ProviderConfig::resolve_env_var("${TEST_MOFA_KEY}").unwrap(),
             "resolved-value"
         );
         unsafe { std::env::remove_var("TEST_MOFA_KEY") };
@@ -749,7 +775,7 @@ mod tests {
     #[test]
     fn unresolved_env_var_errors() {
         unsafe { std::env::remove_var("MISSING_MOFA_KEY") };
-        assert!(resolve_env_var("${MISSING_MOFA_KEY}").is_err());
+        assert!(ProviderConfig::resolve_env_var("${MISSING_MOFA_KEY}").is_err());
     }
 
     #[test]

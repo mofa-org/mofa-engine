@@ -30,8 +30,8 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use mofa_kernel::{
     BackendFeature, BackendHealth, Capability, CostTier, EngineError, InferenceRequest,
-    InferenceResponse, LifecycleResult, ModelAvailability, ModelCard, ModelResidency, Provider,
-    ProviderKind, canonical_model_id, model_id_name,
+    InferenceResponse, LifecycleResult, ModelAvailability, ModelCard, ModelId, ModelResidency,
+    Provider, ProviderKind,
 };
 use tokio::process::Command;
 
@@ -150,7 +150,7 @@ impl LocalImageGenProvider {
             .get("negative_prompt")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let (width, height) = image_dimensions(&request.params);
+        let (width, height) = Self::image_dimensions(&request.params);
 
         let output_path = self.output_dir.join(format!(
             "mofa_img_{}.{}",
@@ -212,37 +212,40 @@ impl LocalImageGenProvider {
     }
 }
 
-/// Parse the requested image dimensions from a request's `params`, accepting a
-/// combined `size` (`"WxH"`) or explicit `width`/`height`, and falling back to a
-/// square [`DEFAULT_EDGE`]. Pure so the parsing is unit-testable.
-fn image_dimensions(params: &serde_json::Value) -> (u32, u32) {
-    if let Some((w, h)) = params
-        .get("size")
-        .and_then(|v| v.as_str())
-        .and_then(parse_size)
-    {
-        return (w, h);
+/// Pure image-size parsing, grouped as private associated functions.
+impl LocalImageGenProvider {
+    /// Requested image dimensions from a request's `params`, accepting a combined
+    /// `size` (`"WxH"`) or explicit `width`/`height`, and falling back to a square
+    /// [`DEFAULT_EDGE`].
+    fn image_dimensions(params: &serde_json::Value) -> (u32, u32) {
+        if let Some((w, h)) = params
+            .get("size")
+            .and_then(|v| v.as_str())
+            .and_then(Self::parse_size)
+        {
+            return (w, h);
+        }
+        let as_edge = |key: &str| {
+            params
+                .get(key)
+                .and_then(serde_json::Value::as_u64)
+                .filter(|v| *v > 0)
+                .map(|v| v as u32)
+        };
+        (
+            as_edge("width").unwrap_or(DEFAULT_EDGE),
+            as_edge("height").unwrap_or(DEFAULT_EDGE),
+        )
     }
-    let as_edge = |key: &str| {
-        params
-            .get(key)
-            .and_then(serde_json::Value::as_u64)
-            .filter(|v| *v > 0)
-            .map(|v| v as u32)
-    };
-    (
-        as_edge("width").unwrap_or(DEFAULT_EDGE),
-        as_edge("height").unwrap_or(DEFAULT_EDGE),
-    )
-}
 
-/// Parse a `"WIDTHxHEIGHT"` size string into positive dimensions (accepts `x` or
-/// `X` as the separator).
-fn parse_size(size: &str) -> Option<(u32, u32)> {
-    let (w, h) = size.split_once(['x', 'X'])?;
-    let w: u32 = w.trim().parse().ok()?;
-    let h: u32 = h.trim().parse().ok()?;
-    (w > 0 && h > 0).then_some((w, h))
+    /// Parse a `"WIDTHxHEIGHT"` size string into positive dimensions (accepts `x`
+    /// or `X` as the separator).
+    fn parse_size(size: &str) -> Option<(u32, u32)> {
+        let (w, h) = size.split_once(['x', 'X'])?;
+        let w: u32 = w.trim().parse().ok()?;
+        let h: u32 = h.trim().parse().ok()?;
+        (w > 0 && h > 0).then_some((w, h))
+    }
 }
 
 #[async_trait]
@@ -272,7 +275,7 @@ impl Provider for LocalImageGenProvider {
                 let cap = Capability::from_str_loose(&m.capability)?;
                 let mut card =
                     ModelCard::new(self.name.clone(), m.name.clone(), cap, CostTier::Free);
-                card.id = canonical_model_id(&self.name, &m.name);
+                card.id = ModelId::canonical(&self.name, &m.name);
                 card.availability = ModelAvailability::Configured;
                 card.residency = ModelResidency::Unloaded;
                 card.memory_estimate_bytes = m.memory_mb.unwrap_or(0) * 1024 * 1024;
@@ -299,7 +302,7 @@ impl Provider for LocalImageGenProvider {
                 detail: format!("image_gen command '{}' not found", self.command),
             });
         }
-        let model_name = model_id_name(model_id);
+        let model_name = ModelId::name(model_id);
         let estimate = self
             .models
             .iter()
@@ -307,7 +310,7 @@ impl Provider for LocalImageGenProvider {
             .and_then(|m| m.memory_mb)
             .map(|mb| mb * 1024 * 1024);
         Ok(LifecycleResult {
-            model_id: canonical_model_id(&self.name, model_name),
+            model_id: ModelId::canonical(&self.name, model_name),
             residency: ModelResidency::Loaded,
             memory_bytes: estimate,
             changed: true,
@@ -316,7 +319,7 @@ impl Provider for LocalImageGenProvider {
 
     async fn unload(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
         Ok(LifecycleResult {
-            model_id: canonical_model_id(&self.name, model_id_name(model_id)),
+            model_id: ModelId::canonical(&self.name, ModelId::name(model_id)),
             residency: ModelResidency::Unloaded,
             memory_bytes: Some(0),
             changed: true,
@@ -328,7 +331,7 @@ impl Provider for LocalImageGenProvider {
         model_id: &str,
         request: &InferenceRequest,
     ) -> Result<InferenceResponse, EngineError> {
-        let model_name = model_id_name(model_id);
+        let model_name = ModelId::name(model_id);
         let capability = request.capability.unwrap_or(Capability::ImageGen);
 
         if capability != Capability::ImageGen {
@@ -387,22 +390,30 @@ mod tests {
 
     #[test]
     fn parse_size_and_dimensions() {
-        assert_eq!(parse_size("1024x768"), Some((1024, 768)));
-        assert_eq!(parse_size("512X512"), Some((512, 512)));
-        assert_eq!(parse_size("bad"), None);
-        assert_eq!(parse_size("0x100"), None);
+        assert_eq!(
+            LocalImageGenProvider::parse_size("1024x768"),
+            Some((1024, 768))
+        );
+        assert_eq!(
+            LocalImageGenProvider::parse_size("512X512"),
+            Some((512, 512))
+        );
+        assert_eq!(LocalImageGenProvider::parse_size("bad"), None);
+        assert_eq!(LocalImageGenProvider::parse_size("0x100"), None);
 
         // size wins; else width/height; else the square default.
         assert_eq!(
-            image_dimensions(&serde_json::json!({ "size": "640x480" })),
+            LocalImageGenProvider::image_dimensions(&serde_json::json!({ "size": "640x480" })),
             (640, 480)
         );
         assert_eq!(
-            image_dimensions(&serde_json::json!({ "width": 256, "height": 128 })),
+            LocalImageGenProvider::image_dimensions(
+                &serde_json::json!({ "width": 256, "height": 128 })
+            ),
             (256, 128)
         );
         assert_eq!(
-            image_dimensions(&serde_json::Value::Null),
+            LocalImageGenProvider::image_dimensions(&serde_json::Value::Null),
             (DEFAULT_EDGE, DEFAULT_EDGE)
         );
     }

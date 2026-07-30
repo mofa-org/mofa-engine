@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use mofa_kernel::{
     BackendHealth, BackendStatus, Capability, CostTier, EngineError, EngineEvent, EngineStatus,
-    FailedAttempt, FallbackPolicy, InferenceRequest, InferenceResponse, ModelCard, ModelResidency,
-    Provider, ProviderHealth, ProviderKind, StreamChunk, StreamDelta, model_id_name,
+    FailedAttempt, FallbackPolicy, InferenceRequest, InferenceResponse, ModelCard, ModelId,
+    ModelResidency, Provider, ProviderHealth, ProviderKind, StreamChunk, StreamDelta,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore, broadcast, mpsc};
@@ -128,49 +128,54 @@ pub struct Engine {
     started_at: Instant,
 }
 
-/// Remaining time until `deadline`, saturating at zero.
-fn remaining(deadline: Instant) -> Duration {
-    deadline.saturating_duration_since(Instant::now())
-}
+/// Pure routing/cost helpers, grouped as private associated functions rather than
+/// free functions so they share the `Engine` namespace with the logic that uses them.
+impl Engine {
+    /// Completion tokens assumed when a request does not cap them via
+    /// `params.max_tokens` — a deliberately generous default so the pre-flight
+    /// budget estimate errs toward *over*-counting rather than blowing the ceiling.
+    const DEFAULT_COMPLETION_TOKEN_ESTIMATE: u32 = 1024;
 
-/// USD cost from per-1k-token prices. `None` when both prices are zero (free /
-/// local models), so no spurious zero cost is attributed.
-fn estimate_cost(
-    price_in_per_1k: f64,
-    price_out_per_1k: f64,
-    prompt_tokens: Option<u32>,
-    completion_tokens: Option<u32>,
-) -> Option<f64> {
-    if price_in_per_1k == 0.0 && price_out_per_1k == 0.0 {
-        return None;
+    /// Remaining time until `deadline`, saturating at zero.
+    fn remaining(deadline: Instant) -> Duration {
+        deadline.saturating_duration_since(Instant::now())
     }
-    let prompt = prompt_tokens.unwrap_or(0) as f64;
-    let completion = completion_tokens.unwrap_or(0) as f64;
-    Some(prompt / 1000.0 * price_in_per_1k + completion / 1000.0 * price_out_per_1k)
-}
 
-/// Completion tokens assumed when a request does not cap them via
-/// `params.max_tokens` — a deliberately generous default so the pre-flight
-/// budget estimate errs toward *over*-counting rather than blowing the ceiling.
-const DEFAULT_COMPLETION_TOKEN_ESTIMATE: u32 = 1024;
+    /// USD cost from per-1k-token prices. `None` when both prices are zero (free /
+    /// local models), so no spurious zero cost is attributed.
+    fn estimate_cost(
+        price_in_per_1k: f64,
+        price_out_per_1k: f64,
+        prompt_tokens: Option<u32>,
+        completion_tokens: Option<u32>,
+    ) -> Option<f64> {
+        if price_in_per_1k == 0.0 && price_out_per_1k == 0.0 {
+            return None;
+        }
+        let prompt = prompt_tokens.unwrap_or(0) as f64;
+        let completion = completion_tokens.unwrap_or(0) as f64;
+        Some(prompt / 1000.0 * price_in_per_1k + completion / 1000.0 * price_out_per_1k)
+    }
 
-/// Rough prompt-token estimate for pre-flight budgeting, using the ~4-chars-per
-/// token rule of thumb over the message contents. Approximate by design (the
-/// authoritative token count only exists post-call); a floor of 1 avoids a
-/// zero estimate for an empty prompt.
-fn estimate_prompt_tokens(req: &InferenceRequest) -> u32 {
-    let chars: usize = req.messages.iter().map(|m| m.content.len()).sum();
-    ((chars / 4) as u32).max(1)
-}
+    /// Rough prompt-token estimate for pre-flight budgeting, using the ~4-chars-per
+    /// token rule of thumb over the message contents. Approximate by design (the
+    /// authoritative token count only exists post-call); a floor of 1 avoids a
+    /// zero estimate for an empty prompt.
+    fn estimate_prompt_tokens(req: &InferenceRequest) -> u32 {
+        let chars: usize = req.messages.iter().map(|m| m.content.len()).sum();
+        ((chars / 4) as u32).max(1)
+    }
 
-/// Completion-token estimate for pre-flight budgeting: the request's
-/// `params.max_tokens` cap when present, otherwise [`DEFAULT_COMPLETION_TOKEN_ESTIMATE`].
-fn estimate_completion_tokens(req: &InferenceRequest) -> u32 {
-    req.params
-        .get("max_tokens")
-        .and_then(serde_json::Value::as_u64)
-        .map(|v| v as u32)
-        .unwrap_or(DEFAULT_COMPLETION_TOKEN_ESTIMATE)
+    /// Completion-token estimate for pre-flight budgeting: the request's
+    /// `params.max_tokens` cap when present, otherwise
+    /// [`Self::DEFAULT_COMPLETION_TOKEN_ESTIMATE`].
+    fn estimate_completion_tokens(req: &InferenceRequest) -> u32 {
+        req.params
+            .get("max_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .map(|v| v as u32)
+            .unwrap_or(Self::DEFAULT_COMPLETION_TOKEN_ESTIMATE)
+    }
 }
 
 impl Engine {
@@ -548,7 +553,7 @@ impl Engine {
         completion_tokens: Option<u32>,
     ) -> Option<f64> {
         let (price_in, price_out) = self.pricing.get(provider).copied()?;
-        estimate_cost(price_in, price_out, prompt_tokens, completion_tokens)
+        Engine::estimate_cost(price_in, price_out, prompt_tokens, completion_tokens)
     }
 
     /// Conservative pre-flight cost estimate (USD) for serving `req` on
@@ -563,8 +568,8 @@ impl Engine {
     fn estimate_request_cost(&self, provider: &str, req: &InferenceRequest) -> f64 {
         self.compute_cost(
             provider,
-            Some(estimate_prompt_tokens(req)),
-            Some(estimate_completion_tokens(req)),
+            Some(Engine::estimate_prompt_tokens(req)),
+            Some(Engine::estimate_completion_tokens(req)),
         )
         .unwrap_or(0.0)
     }
@@ -614,11 +619,11 @@ impl Engine {
             let model_id = decision.model.id.clone();
             let provider_name = decision.model.provider.clone();
 
-            if remaining(overall_deadline).is_zero() {
+            if Engine::remaining(overall_deadline).is_zero() {
                 let e = EngineError::Timeout("overall request deadline exceeded".into());
                 chain.push(FailedAttempt {
                     provider: provider_name,
-                    model: model_id_name(&model_id).to_string(),
+                    model: ModelId::name(&model_id).to_string(),
                     reason: e.to_string(),
                 });
                 last_err = Some(e);
@@ -637,7 +642,7 @@ impl Engine {
                     );
                     chain.push(FailedAttempt {
                         provider: provider_name.clone(),
-                        model: model_id_name(&model_id).to_string(),
+                        model: ModelId::name(&model_id).to_string(),
                         reason: format!("estimated cost ${est:.4} exceeds budget ${ceiling:.4}"),
                     });
                     last_err = Some(EngineError::NoCapableModel(format!(
@@ -672,7 +677,7 @@ impl Engine {
                     tracing::warn!("candidate '{model_id}' failed (retryable): {e}");
                     chain.push(FailedAttempt {
                         provider: provider_name,
-                        model: model_id_name(&model_id).to_string(),
+                        model: ModelId::name(&model_id).to_string(),
                         reason: e.to_string(),
                     });
                     last_err = Some(e);
@@ -796,7 +801,7 @@ impl Engine {
 
         // Concurrency admission with a bounded queue wait.
         let sem = self.semaphore_for(model_id, max_concurrency);
-        let queue_budget = remaining(overall_deadline).min(self.timeouts.queue());
+        let queue_budget = Engine::remaining(overall_deadline).min(self.timeouts.queue());
         let permit = match tokio::time::timeout(queue_budget, sem.acquire_owned()).await {
             Ok(Ok(p)) => p,
             Ok(Err(_)) => {
@@ -817,7 +822,7 @@ impl Engine {
         // inference, so a hinted/predicted model is hot by the time it is needed.
         self.trigger_preflight(req);
 
-        let inference_budget = remaining(overall_deadline).min(self.timeouts.inference());
+        let inference_budget = Engine::remaining(overall_deadline).min(self.timeouts.inference());
         let start = Instant::now();
         let result = tokio::time::timeout(inference_budget, provider.invoke(model_id, req)).await;
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -928,7 +933,7 @@ impl Engine {
         }
 
         let sem = self.semaphore_for(&model_id, max_concurrency);
-        let queue_budget = remaining(overall_deadline).min(self.timeouts.queue());
+        let queue_budget = Engine::remaining(overall_deadline).min(self.timeouts.queue());
         let permit = match tokio::time::timeout(queue_budget, sem.acquire_owned()).await {
             Ok(Ok(p)) => p,
             Ok(Err(_)) => {
@@ -951,7 +956,7 @@ impl Engine {
         let _ = out
             .send(StreamChunk::Started {
                 request_id: req.request_id.clone(),
-                model_used: model_id_name(&model_id).to_string(),
+                model_used: ModelId::name(&model_id).to_string(),
                 provider: provider_name.clone(),
             })
             .await;
@@ -974,7 +979,7 @@ impl Engine {
             }
         });
 
-        let inference_budget = remaining(overall_deadline).min(self.timeouts.inference());
+        let inference_budget = Engine::remaining(overall_deadline).min(self.timeouts.inference());
         let start = Instant::now();
         let result =
             tokio::time::timeout(inference_budget, provider.stream(&model_id, &req, delta_tx))
@@ -1860,7 +1865,7 @@ mod tests {
     use async_trait::async_trait;
     use mofa_kernel::{
         BackendFeature, Capability, ExecutionState, LifecycleResult, Message, ModelAvailability,
-        canonical_model_id,
+        ModelId,
     };
     use std::sync::atomic::AtomicUsize;
 
@@ -1963,7 +1968,7 @@ mod tests {
                 .iter()
                 .map(|(name, cap, residency, mem, conc)| {
                     let mut card = ModelCard::new(&self.name, name, *cap, CostTier::Low);
-                    card.id = canonical_model_id(&self.name, name);
+                    card.id = ModelId::canonical(&self.name, name);
                     card.availability = ModelAvailability::Discovered;
                     card.residency = *residency;
                     card.memory_estimate_bytes = *mem;
@@ -1997,7 +2002,7 @@ mod tests {
             let mem = self
                 .template
                 .iter()
-                .find(|(n, ..)| canonical_model_id(&self.name, n) == model_id)
+                .find(|(n, ..)| ModelId::canonical(&self.name, n) == model_id)
                 .map(|(.., mem, _)| *mem);
             Ok(LifecycleResult {
                 model_id: model_id.into(),
@@ -2044,7 +2049,7 @@ mod tests {
             Ok(InferenceResponse {
                 text: Some("ok".into()),
                 file: None,
-                model_used: mofa_kernel::model_id_name(model_id).into(),
+                model_used: mofa_kernel::ModelId::name(model_id).into(),
                 provider: self.name.clone(),
                 duration_ms: 1,
                 request_id: request.request_id.clone(),
@@ -2153,12 +2158,12 @@ mod tests {
     #[test]
     fn cost_estimation_from_prices() {
         // $0.01/1k in, $0.03/1k out; 1000 prompt + 500 completion tokens.
-        let cost = estimate_cost(0.01, 0.03, Some(1000), Some(500)).unwrap();
+        let cost = Engine::estimate_cost(0.01, 0.03, Some(1000), Some(500)).unwrap();
         assert!((cost - (0.01 + 0.015)).abs() < 1e-9);
         // Zero prices (free / local model) → no cost attributed.
-        assert!(estimate_cost(0.0, 0.0, Some(1000), Some(500)).is_none());
+        assert!(Engine::estimate_cost(0.0, 0.0, Some(1000), Some(500)).is_none());
         // Missing token counts default to zero.
-        assert_eq!(estimate_cost(0.01, 0.03, None, None), Some(0.0));
+        assert_eq!(Engine::estimate_cost(0.01, 0.03, None, None), Some(0.0));
     }
 
     #[tokio::test]
@@ -2393,16 +2398,16 @@ mod tests {
     fn token_estimates_from_request() {
         // ~4 chars/token over message content; floor of 1 for an empty prompt.
         let mut req = chat_request(None); // content = "hello" (5 chars)
-        assert_eq!(estimate_prompt_tokens(&req), 1);
+        assert_eq!(Engine::estimate_prompt_tokens(&req), 1);
         req.messages[0].content = "x".repeat(400);
-        assert_eq!(estimate_prompt_tokens(&req), 100);
+        assert_eq!(Engine::estimate_prompt_tokens(&req), 100);
         // Completion defaults to the generous estimate, or the params cap.
         assert_eq!(
-            estimate_completion_tokens(&req),
-            DEFAULT_COMPLETION_TOKEN_ESTIMATE
+            Engine::estimate_completion_tokens(&req),
+            Engine::DEFAULT_COMPLETION_TOKEN_ESTIMATE
         );
         req.params = serde_json::json!({ "max_tokens": 64 });
-        assert_eq!(estimate_completion_tokens(&req), 64);
+        assert_eq!(Engine::estimate_completion_tokens(&req), 64);
     }
 
     #[tokio::test]
@@ -3056,7 +3061,7 @@ mod tests {
             Ok(InferenceResponse {
                 text: Some(self.deltas.concat()),
                 file: None,
-                model_used: mofa_kernel::model_id_name(model_id).into(),
+                model_used: mofa_kernel::ModelId::name(model_id).into(),
                 provider: self.name.clone(),
                 duration_ms: 1,
                 request_id: request.request_id.clone(),

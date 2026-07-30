@@ -5,8 +5,8 @@
 use async_trait::async_trait;
 use mofa_kernel::{
     BackendFeature, BackendHealth, Capability, CostTier, EngineError, InferenceRequest,
-    InferenceResponse, LifecycleResult, ModelAvailability, ModelCard, ModelResidency, Provider,
-    ProviderKind, ReasoningEffort, StreamDelta, StreamSink, canonical_model_id, model_id_name,
+    InferenceResponse, LifecycleResult, ModelAvailability, ModelCard, ModelId, ModelResidency,
+    Provider, ProviderKind, ReasoningEffort, StreamDelta, StreamSink,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -159,13 +159,15 @@ struct OllamaStreamChunk {
     prompt_eval_count: Option<u32>,
 }
 
-/// Parse one NDJSON line from an Ollama stream. Blank/whitespace lines and
-/// unparseable fragments yield `None`.
-fn parse_stream_line(line: &[u8]) -> Option<OllamaStreamChunk> {
-    if line.iter().all(u8::is_ascii_whitespace) {
-        return None;
+impl OllamaProvider {
+    /// Parse one NDJSON line from an Ollama stream. Blank/whitespace lines and
+    /// unparseable fragments yield `None`.
+    fn parse_stream_line(line: &[u8]) -> Option<OllamaStreamChunk> {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            return None;
+        }
+        serde_json::from_slice(line).ok()
     }
-    serde_json::from_slice(line).ok()
 }
 
 #[async_trait]
@@ -232,7 +234,7 @@ impl Provider for OllamaProvider {
                     Capability::Chat,
                     CostTier::Free,
                 );
-                card.id = canonical_model_id(&self.name, &model_name);
+                card.id = ModelId::canonical(&self.name, &model_name);
                 card.availability = ModelAvailability::Discovered;
                 card.residency = if loaded.contains(&model_name) {
                     ModelResidency::Loaded
@@ -266,7 +268,7 @@ impl Provider for OllamaProvider {
     }
 
     async fn load(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
-        let model_name = model_id_name(model_id);
+        let model_name = ModelId::name(model_id);
         let body = OllamaChatRequest {
             model: model_name.to_string(),
             messages: vec![OllamaMessage {
@@ -298,7 +300,7 @@ impl Provider for OllamaProvider {
         }
 
         Ok(LifecycleResult {
-            model_id: canonical_model_id(&self.name, model_name),
+            model_id: ModelId::canonical(&self.name, model_name),
             residency: ModelResidency::Loaded,
             memory_bytes: None,
             changed: true,
@@ -306,7 +308,7 @@ impl Provider for OllamaProvider {
     }
 
     async fn unload(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
-        let model_name = model_id_name(model_id);
+        let model_name = ModelId::name(model_id);
         let body = OllamaChatRequest {
             model: model_name.to_string(),
             messages: vec![OllamaMessage {
@@ -339,7 +341,7 @@ impl Provider for OllamaProvider {
         }
 
         Ok(LifecycleResult {
-            model_id: canonical_model_id(&self.name, model_name),
+            model_id: ModelId::canonical(&self.name, model_name),
             residency: ModelResidency::Unloaded,
             memory_bytes: Some(0),
             changed: true,
@@ -351,7 +353,7 @@ impl Provider for OllamaProvider {
         model_id: &str,
         request: &InferenceRequest,
     ) -> Result<InferenceResponse, EngineError> {
-        let model_name = model_id_name(model_id);
+        let model_name = ModelId::name(model_id);
 
         let messages: Vec<OllamaMessage> = request
             .messages
@@ -433,7 +435,7 @@ impl Provider for OllamaProvider {
         request: &InferenceRequest,
         sink: StreamSink,
     ) -> Result<InferenceResponse, EngineError> {
-        let model_name = model_id_name(model_id);
+        let model_name = ModelId::name(model_id);
         let messages: Vec<OllamaMessage> = request
             .messages
             .iter()
@@ -502,7 +504,7 @@ impl Provider for OllamaProvider {
             buf.extend_from_slice(&bytes);
             while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
                 let line: Vec<u8> = buf.drain(..=pos).collect();
-                if let Some(chunk) = parse_stream_line(&line)
+                if let Some(chunk) = Self::parse_stream_line(&line)
                     && let Some(delta) = apply(chunk, &mut full)
                 {
                     let _ = sink.send(StreamDelta::Text(delta)).await;
@@ -510,7 +512,7 @@ impl Provider for OllamaProvider {
             }
         }
         // Any trailing bytes without a final newline.
-        if let Some(chunk) = parse_stream_line(&buf)
+        if let Some(chunk) = Self::parse_stream_line(&buf)
             && let Some(delta) = apply(chunk, &mut full)
         {
             let _ = sink.send(StreamDelta::Text(delta)).await;
@@ -597,8 +599,8 @@ mod tests {
 
     #[test]
     fn model_id_parse_accepts_old_and_new_format() {
-        assert_eq!(model_id_name("ollama/llama3:8b"), "llama3:8b");
-        assert_eq!(model_id_name("ollama::llama3:8b"), "llama3:8b");
+        assert_eq!(ModelId::name("ollama/llama3:8b"), "llama3:8b");
+        assert_eq!(ModelId::name("ollama::llama3:8b"), "llama3:8b");
     }
 
     #[test]
@@ -619,7 +621,7 @@ mod tests {
         let mut prompt = None;
         let mut completion = None;
         for line in lines {
-            if let Some(chunk) = parse_stream_line(line) {
+            if let Some(chunk) = OllamaProvider::parse_stream_line(line) {
                 if chunk.done {
                     prompt = chunk.prompt_eval_count;
                     completion = chunk.eval_count;
@@ -642,8 +644,8 @@ mod tests {
 
     #[test]
     fn parse_stream_line_ignores_blank_and_garbage() {
-        assert!(parse_stream_line(b"").is_none());
-        assert!(parse_stream_line(b"   \n").is_none());
-        assert!(parse_stream_line(b"not json").is_none());
+        assert!(OllamaProvider::parse_stream_line(b"").is_none());
+        assert!(OllamaProvider::parse_stream_line(b"   \n").is_none());
+        assert!(OllamaProvider::parse_stream_line(b"not json").is_none());
     }
 }

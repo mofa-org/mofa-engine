@@ -81,11 +81,6 @@ impl EngineMetrics {
         .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Total requests observed.
-    pub fn requests_total(&self) -> u64 {
-        self.requests_total.load(Ordering::Relaxed)
-    }
-
     /// Record per-provider token usage and cost for one successful request.
     ///
     /// `is_local` tags the series with the dual-track `locality` label so the
@@ -253,7 +248,7 @@ impl EngineMetrics {
         for (provider, up) in &gauges.provider_up {
             out.push_str(&format!(
                 "mofa_provider_up{{provider=\"{}\"}} {}\n",
-                escape_label_value(provider),
+                Self::escape_label_value(provider),
                 u8::from(*up)
             ));
         }
@@ -265,7 +260,7 @@ impl EngineMetrics {
              # TYPE mofa_tokens_total counter\n",
         );
         for entry in self.per_provider.iter() {
-            let provider = escape_label_value(entry.key());
+            let provider = Self::escape_label_value(entry.key());
             let locality = entry.locality.get().copied().unwrap_or("unknown");
             out.push_str(&format!(
                 "mofa_tokens_total{{provider=\"{provider}\",locality=\"{locality}\",direction=\"prompt\"}} {}\n",
@@ -285,7 +280,7 @@ impl EngineMetrics {
             let locality = entry.locality.get().copied().unwrap_or("unknown");
             out.push_str(&format!(
                 "mofa_cost_usd_total{{provider=\"{}\",locality=\"{locality}\"}} {usd}\n",
-                escape_label_value(entry.key())
+                Self::escape_label_value(entry.key())
             ));
         }
 
@@ -293,14 +288,16 @@ impl EngineMetrics {
     }
 }
 
-/// Escape a Prometheus label value per the exposition format: backslash,
-/// double-quote, and newline must be escaped so a provider name cannot produce
-/// malformed output.
-fn escape_label_value(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
+impl EngineMetrics {
+    /// Escape a Prometheus label value per the exposition format: backslash,
+    /// double-quote, and newline must be escaped so a provider name cannot produce
+    /// malformed output.
+    fn escape_label_value(value: &str) -> String {
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+    }
 }
 
 /// Point-in-time gauge values sampled from the engine at scrape time.

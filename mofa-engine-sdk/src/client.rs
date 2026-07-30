@@ -154,16 +154,18 @@ impl EmbeddedEngine {
     /// stable code, so a binding can raise a typed exception.
     pub fn invoke_json(&self, request_json: &str) -> Result<String, String> {
         let request: InferenceRequest = serde_json::from_str(request_json)
-            .map_err(|e| err_json(EngineError::InvalidRequest(e.to_string())))?;
+            .map_err(|e| Self::err_json(EngineError::InvalidRequest(e.to_string())))?;
         self.invoke(request)
             .map(|resp| serde_json::to_string(&resp).unwrap_or_default())
-            .map_err(err_json)
+            .map_err(Self::err_json)
     }
 }
 
-/// Serialize an engine error to a JSON `ErrorInfo` string.
-fn err_json(e: EngineError) -> String {
-    serde_json::to_string(&e.info()).unwrap_or_else(|_| e.to_string())
+impl EmbeddedEngine {
+    /// Serialize an engine error to a JSON `ErrorInfo` string.
+    fn err_json(e: EngineError) -> String {
+        serde_json::to_string(&e.info()).unwrap_or_else(|_| e.to_string())
+    }
 }
 
 /// A typed client for the engine's versioned HTTP API (daemon mode).

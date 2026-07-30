@@ -43,19 +43,6 @@ pub struct RouteDecision<'a> {
 pub struct Router;
 
 impl Router {
-    /// Score and rank models, returning the best match and reason.
-    ///
-    /// Equivalent to the first entry of [`route_ranked`] with no memory budget.
-    pub fn route<'a>(
-        models: &'a [ModelCard],
-        request: &InferenceRequest,
-        providers: &[RoutingProvider],
-    ) -> Option<RouteDecision<'a>> {
-        Self::route_ranked(models, request, providers, None)
-            .into_iter()
-            .next()
-    }
-
     /// Apply hard constraints, then score and rank every valid candidate,
     /// best first. The engine uses the same ordered plan for both primary
     /// selection and failover so the two never diverge.
@@ -155,15 +142,6 @@ impl Router {
                 .then_with(|| a.model.id.cmp(&b.model.id))
         });
         decisions
-    }
-
-    /// Compatibility helper returning just the selected model.
-    pub fn select_model<'a>(
-        models: &'a [ModelCard],
-        request: &InferenceRequest,
-        providers: &[RoutingProvider],
-    ) -> Option<&'a ModelCard> {
-        Self::route(models, request, providers).map(|d| d.model)
     }
 
     /// Tie-break rank: resident models (loaded locally or cloud-backed) rank
@@ -410,9 +388,12 @@ mod tests {
             ),
         ];
         let providers = vec![provider("ollama", ProviderKind::Ollama, 1)];
-        let selected = Router::route(&models, &request(Capability::Chat, None), &providers)
-            .unwrap()
-            .model;
+        let selected =
+            Router::route_ranked(&models, &request(Capability::Chat, None), &providers, None)
+                .into_iter()
+                .next()
+                .unwrap()
+                .model;
         assert_eq!(selected.name, "b");
     }
 
@@ -438,9 +419,12 @@ mod tests {
             provider("openai", ProviderKind::OpenAiCompatible, 10),
             provider("ollama", ProviderKind::Ollama, 1),
         ];
-        let selected = Router::route(&models, &request(Capability::Chat, None), &providers)
-            .unwrap()
-            .model;
+        let selected =
+            Router::route_ranked(&models, &request(Capability::Chat, None), &providers, None)
+                .into_iter()
+                .next()
+                .unwrap()
+                .model;
         assert_eq!(selected.name, "local");
     }
 
@@ -463,9 +447,12 @@ mod tests {
             ),
         ];
         let providers = vec![provider("p", ProviderKind::OpenAiCompatible, 5)];
-        let selected = Router::route(&models, &request(Capability::Tts, None), &providers)
-            .unwrap()
-            .model;
+        let selected =
+            Router::route_ranked(&models, &request(Capability::Tts, None), &providers, None)
+                .into_iter()
+                .next()
+                .unwrap()
+                .model;
         assert_eq!(selected.name, "tts");
     }
 
@@ -488,9 +475,16 @@ mod tests {
             ),
         ];
         let providers = vec![provider("p", ProviderKind::OpenAiCompatible, 5)];
-        let selected = Router::route(&models, &request(Capability::Chat, Some("b")), &providers)
-            .unwrap()
-            .model;
+        let selected = Router::route_ranked(
+            &models,
+            &request(Capability::Chat, Some("b")),
+            &providers,
+            None,
+        )
+        .into_iter()
+        .next()
+        .unwrap()
+        .model;
         assert_eq!(selected.name, "b");
     }
 
@@ -589,7 +583,12 @@ mod tests {
         )];
         let mut providers = vec![provider("p", ProviderKind::OpenAiCompatible, 5)];
         providers[0].health = BackendHealth::Unavailable;
-        assert!(Router::route(&models, &request(Capability::Chat, None), &providers).is_none());
+        assert!(
+            Router::route_ranked(&models, &request(Capability::Chat, None), &providers, None)
+                .into_iter()
+                .next()
+                .is_none()
+        );
     }
 
     #[test]

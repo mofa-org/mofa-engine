@@ -45,11 +45,11 @@ fn main() {
         hint_next: Some("chat".into()),
         ..Default::default()
     };
-    let transcript = match run(&engine, asr, "ASR") {
+    let transcript = match MeetingBrief::run(&engine, asr, "ASR") {
         Some(r) => r.text.unwrap_or_default(),
         None => return,
     };
-    println!("transcript: {}\n", preview(&transcript));
+    println!("transcript: {}\n", MeetingBrief::preview(&transcript));
 
     // 2. Chat — extract structured minutes; warm TTS meanwhile.
     let chat = InferenceRequest {
@@ -73,11 +73,11 @@ fn main() {
         hint_next: Some("tts".into()),
         ..Default::default()
     };
-    let minutes = match run(&engine, chat, "Chat (minutes)") {
+    let minutes = match MeetingBrief::run(&engine, chat, "Chat (minutes)") {
         Some(r) => r.text.unwrap_or_default(),
         None => return,
     };
-    println!("minutes:\n{}\n", preview(&minutes));
+    println!("minutes:\n{}\n", MeetingBrief::preview(&minutes));
 
     // 3. TTS — minutes → a short audio brief.
     let tts = InferenceRequest {
@@ -92,38 +92,48 @@ fn main() {
         params: serde_json::json!({ "voice": "zh-female-1" }),
         ..Default::default()
     };
-    if let Some(r) = run(&engine, tts, "TTS (brief)") {
+    if let Some(r) = MeetingBrief::run(&engine, tts, "TTS (brief)") {
         println!("audio brief: {}", r.file.as_deref().unwrap_or("(no file)"));
     }
 }
 
-/// Invoke one stage, printing routing/cost on success or the structured error
-/// (including any failover chain) on failure. Returns `None` to stop the pipeline.
-fn run(engine: &EmbeddedEngine, req: InferenceRequest, stage: &str) -> Option<InferenceResponse> {
-    match engine.invoke(req) {
-        Ok(resp) => {
-            println!(
-                "[{stage}] served by {} in {}ms",
-                resp.provider, resp.duration_ms
-            );
-            Some(resp)
-        }
-        Err(e) => {
-            let info = e.info();
-            eprintln!("[{stage}] error [{:?}]: {}", info.code, info.message);
-            for a in &info.failed_chain {
-                eprintln!("    tried {}/{}: {}", a.provider, a.model, a.reason);
+/// Namespace for this demo's helpers.
+struct MeetingBrief;
+
+impl MeetingBrief {
+    /// Invoke one stage, printing routing/cost on success or the structured error
+    /// (including any failover chain) on failure. Returns `None` to stop the pipeline.
+    fn run(
+        engine: &EmbeddedEngine,
+        req: InferenceRequest,
+        stage: &str,
+    ) -> Option<InferenceResponse> {
+        match engine.invoke(req) {
+            Ok(resp) => {
+                println!(
+                    "[{stage}] served by {} in {}ms",
+                    resp.provider, resp.duration_ms
+                );
+                Some(resp)
             }
-            None
+            Err(e) => {
+                let info = e.info();
+                eprintln!("[{stage}] error [{:?}]: {}", info.code, info.message);
+                for a in &info.failed_chain {
+                    eprintln!("    tried {}/{}: {}", a.provider, a.model, a.reason);
+                }
+                None
+            }
         }
     }
-}
 
-fn preview(s: &str) -> String {
-    let s = s.trim();
-    if s.chars().count() > 200 {
-        format!("{}…", s.chars().take(200).collect::<String>())
-    } else {
-        s.to_string()
+    /// Truncate long text for a readable preview.
+    fn preview(s: &str) -> String {
+        let s = s.trim();
+        if s.chars().count() > 200 {
+            format!("{}…", s.chars().take(200).collect::<String>())
+        } else {
+            s.to_string()
+        }
     }
 }

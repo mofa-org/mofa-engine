@@ -241,7 +241,7 @@ impl QualityGate {
         if !output.status.success() {
             return None;
         }
-        parse_ffprobe_json(&String::from_utf8_lossy(&output.stdout))
+        QualityGate::parse_ffprobe_json(&String::from_utf8_lossy(&output.stdout))
     }
 
     /// Sample `sample_frames` tiny grayscale frames across the video and reduce
@@ -266,78 +266,82 @@ impl QualityGate {
         if !output.status.success() {
             return None;
         }
-        slideshow_risk_from_frames(&output.stdout, FRAME_PIXELS)
+        QualityGate::slideshow_risk_from_frames(&output.stdout, FRAME_PIXELS)
     }
 }
 
-/// Parse the `ffprobe -of json` payload into a [`ProbeInfo`]. Extracted as a pure
-/// function so the field-plucking is unit-testable without invoking `ffprobe`.
-fn parse_ffprobe_json(json: &str) -> Option<ProbeInfo> {
-    let root: serde_json::Value = serde_json::from_str(json).ok()?;
+/// Pure parsing/scoring helpers, grouped as private associated functions so the
+/// signal extraction shares the `QualityGate` namespace and stays unit-testable
+/// without invoking `ffprobe`/`ffmpeg`.
+impl QualityGate {
+    /// Parse the `ffprobe -of json` payload into a [`ProbeInfo`].
+    fn parse_ffprobe_json(json: &str) -> Option<ProbeInfo> {
+        let root: serde_json::Value = serde_json::from_str(json).ok()?;
 
-    let duration_secs = root
-        .get("format")
-        .and_then(|f| f.get("duration"))
-        .and_then(|d| d.as_str())
-        .and_then(|s| s.trim().parse::<f64>().ok())
-        .filter(|d| d.is_finite() && *d > 0.0);
+        let duration_secs = root
+            .get("format")
+            .and_then(|f| f.get("duration"))
+            .and_then(|d| d.as_str())
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .filter(|d| d.is_finite() && *d > 0.0);
 
-    let has_video = root
-        .get("streams")
-        .and_then(|s| s.as_array())
-        .is_some_and(|streams| {
-            streams.iter().any(|st| {
-                st.get("codec_type").and_then(|c| c.as_str()) == Some("video")
-                    && st
-                        .get("width")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0)
-                        > 0
-                    && st
-                        .get("height")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0)
-                        > 0
-            })
-        });
+        let has_video = root
+            .get("streams")
+            .and_then(|s| s.as_array())
+            .is_some_and(|streams| {
+                streams.iter().any(|st| {
+                    st.get("codec_type").and_then(|c| c.as_str()) == Some("video")
+                        && st
+                            .get("width")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0)
+                            > 0
+                        && st
+                            .get("height")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0)
+                            > 0
+                })
+            });
 
-    Some(ProbeInfo {
-        duration_secs,
-        has_video,
-    })
-}
-
-/// Reduce a raw grayscale frame stream (frames of `frame_pixels` bytes, back to
-/// back) to a slideshow-risk score in `0..=1`.
-///
-/// The *motion* between two consecutive frames is the mean absolute per-pixel
-/// difference, normalized to `0..1`. Averaged over all consecutive pairs and
-/// compared against [`MOTION_FULL_SCALE`], it yields `risk = 1 - motion_ratio`:
-/// identical frames (a still slideshow) score risk `1.0`; frames that change by
-/// [`MOTION_FULL_SCALE`] or more score risk `0.0`. Returns `None` when fewer than
-/// two whole frames are present (motion is undefined).
-fn slideshow_risk_from_frames(raw: &[u8], frame_pixels: usize) -> Option<f64> {
-    if frame_pixels == 0 {
-        return None;
-    }
-    let frames: Vec<&[u8]> = raw.chunks_exact(frame_pixels).collect();
-    if frames.len() < 2 {
-        return None;
+        Some(ProbeInfo {
+            duration_secs,
+            has_video,
+        })
     }
 
-    let mut total_motion = 0.0;
-    for pair in frames.windows(2) {
-        let diff: u64 = pair[0]
-            .iter()
-            .zip(pair[1].iter())
-            .map(|(a, b)| a.abs_diff(*b) as u64)
-            .sum();
-        // Mean absolute difference for this pair, normalized to 0..1.
-        total_motion += diff as f64 / (frame_pixels as f64 * 255.0);
+    /// Reduce a raw grayscale frame stream (frames of `frame_pixels` bytes, back to
+    /// back) to a slideshow-risk score in `0..=1`.
+    ///
+    /// The *motion* between two consecutive frames is the mean absolute per-pixel
+    /// difference, normalized to `0..1`. Averaged over all consecutive pairs and
+    /// compared against [`MOTION_FULL_SCALE`], it yields `risk = 1 - motion_ratio`:
+    /// identical frames (a still slideshow) score risk `1.0`; frames that change by
+    /// [`MOTION_FULL_SCALE`] or more score risk `0.0`. Returns `None` when fewer than
+    /// two whole frames are present (motion is undefined).
+    fn slideshow_risk_from_frames(raw: &[u8], frame_pixels: usize) -> Option<f64> {
+        if frame_pixels == 0 {
+            return None;
+        }
+        let frames: Vec<&[u8]> = raw.chunks_exact(frame_pixels).collect();
+        if frames.len() < 2 {
+            return None;
+        }
+
+        let mut total_motion = 0.0;
+        for pair in frames.windows(2) {
+            let diff: u64 = pair[0]
+                .iter()
+                .zip(pair[1].iter())
+                .map(|(a, b)| a.abs_diff(*b) as u64)
+                .sum();
+            // Mean absolute difference for this pair, normalized to 0..1.
+            total_motion += diff as f64 / (frame_pixels as f64 * 255.0);
+        }
+        let motion = total_motion / (frames.len() - 1) as f64;
+        let motion_ratio = (motion / MOTION_FULL_SCALE).clamp(0.0, 1.0);
+        Some(1.0 - motion_ratio)
     }
-    let motion = total_motion / (frames.len() - 1) as f64;
-    let motion_ratio = (motion / MOTION_FULL_SCALE).clamp(0.0, 1.0);
-    Some(1.0 - motion_ratio)
 }
 
 #[cfg(test)]
@@ -353,7 +357,7 @@ mod tests {
             ],
             "format": {"duration": "12.34"}
         }"#;
-        let info = parse_ffprobe_json(json).unwrap();
+        let info = QualityGate::parse_ffprobe_json(json).unwrap();
         assert_eq!(info.duration_secs, Some(12.34));
         assert!(info.has_video);
     }
@@ -366,7 +370,7 @@ mod tests {
             "streams": [{"codec_type": "video", "width": 0, "height": 0}],
             "format": {"duration": "N/A"}
         }"#;
-        let info = parse_ffprobe_json(json).unwrap();
+        let info = QualityGate::parse_ffprobe_json(json).unwrap();
         assert_eq!(info.duration_secs, None);
         assert!(!info.has_video);
     }
@@ -378,7 +382,10 @@ mod tests {
         frame[0] = 200; // some internal structure, still identical across frames
         let mut raw = frame.clone();
         raw.extend_from_slice(&frame);
-        assert_eq!(slideshow_risk_from_frames(&raw, FRAME_PIXELS), Some(1.0));
+        assert_eq!(
+            QualityGate::slideshow_risk_from_frames(&raw, FRAME_PIXELS),
+            Some(1.0)
+        );
     }
 
     #[test]
@@ -386,14 +393,23 @@ mod tests {
         // Black frame then white frame: maximal motion → zero risk.
         let mut raw = vec![0u8; FRAME_PIXELS];
         raw.extend(std::iter::repeat_n(255u8, FRAME_PIXELS));
-        assert_eq!(slideshow_risk_from_frames(&raw, FRAME_PIXELS), Some(0.0));
+        assert_eq!(
+            QualityGate::slideshow_risk_from_frames(&raw, FRAME_PIXELS),
+            Some(0.0)
+        );
     }
 
     #[test]
     fn slideshow_risk_needs_two_frames() {
-        assert_eq!(slideshow_risk_from_frames(&[1, 2, 3], 64), None);
-        assert_eq!(slideshow_risk_from_frames(&[], 64), None);
-        assert_eq!(slideshow_risk_from_frames(&[0u8; 128], 0), None);
+        assert_eq!(
+            QualityGate::slideshow_risk_from_frames(&[1, 2, 3], 64),
+            None
+        );
+        assert_eq!(QualityGate::slideshow_risk_from_frames(&[], 64), None);
+        assert_eq!(
+            QualityGate::slideshow_risk_from_frames(&[0u8; 128], 0),
+            None
+        );
     }
 
     #[test]
@@ -405,7 +421,7 @@ mod tests {
         moved[0] = 130; // one pixel changes by 30/255 over 64 pixels → tiny motion
         let mut raw = base.clone();
         raw.extend_from_slice(&moved);
-        let risk = slideshow_risk_from_frames(&raw, FRAME_PIXELS).unwrap();
+        let risk = QualityGate::slideshow_risk_from_frames(&raw, FRAME_PIXELS).unwrap();
         assert!(risk > 0.9 && risk < 1.0, "risk was {risk}");
     }
 

@@ -300,7 +300,7 @@ impl ModelCard {
         let execution = ExecutionState::default();
         let status = ModelStatus::from_state(availability, residency, &execution);
         Self {
-            id: canonical_model_id(&provider, &name),
+            id: ModelId::canonical(&provider, &name),
             name,
             provider,
             capability,
@@ -327,27 +327,38 @@ impl ModelCard {
     }
 }
 
-/// Build a canonical model identifier.
-pub fn canonical_model_id(provider: &str, model: &str) -> String {
-    format!("{provider}/{model}")
-}
+/// Namespace for canonical model-identifier operations.
+///
+/// Model identifiers have the canonical form `provider/model` (a legacy
+/// `provider::model` form is still accepted when parsing). Construction and
+/// parsing live here as associated functions on a zero-sized type so that all id
+/// handling has a single, discoverable home rather than scattered free functions.
+pub struct ModelId;
 
-/// Extract the provider segment from a canonical model identifier.
-/// Accepts both the canonical `provider/model` and legacy `provider::model` forms.
-pub fn model_id_provider(model_id: &str) -> Option<&str> {
-    model_id
-        .split_once('/')
-        .map(|(provider, _)| provider)
-        .or_else(|| model_id.split_once("::").map(|(provider, _)| provider))
-}
+impl ModelId {
+    /// Build a canonical `provider/model` identifier.
+    pub fn canonical(provider: &str, model: &str) -> String {
+        format!("{provider}/{model}")
+    }
 
-/// Extract the model-name segment from a canonical model identifier.
-pub fn model_id_name(model_id: &str) -> &str {
-    model_id
-        .split_once('/')
-        .map(|(_, model)| model)
-        .or_else(|| model_id.split_once("::").map(|(_, model)| model))
-        .unwrap_or(model_id)
+    /// Extract the provider segment, accepting the canonical `provider/model` and
+    /// the legacy `provider::model` forms.
+    pub fn provider(model_id: &str) -> Option<&str> {
+        model_id
+            .split_once('/')
+            .map(|(provider, _)| provider)
+            .or_else(|| model_id.split_once("::").map(|(provider, _)| provider))
+    }
+
+    /// Extract the model-name segment, falling back to the whole id when it
+    /// carries no provider prefix.
+    pub fn name(model_id: &str) -> &str {
+        model_id
+            .split_once('/')
+            .map(|(_, model)| model)
+            .or_else(|| model_id.split_once("::").map(|(_, model)| model))
+            .unwrap_or(model_id)
+    }
 }
 
 /// A single message in a conversation.
@@ -499,7 +510,7 @@ pub struct InferenceRequest {
     /// Hint about what capability will be needed next.
     pub hint_next: Option<String>,
     /// Unique request identifier.
-    #[serde(default = "generate_request_id")]
+    #[serde(default = "InferenceRequest::generate_request_id")]
     pub request_id: String,
 }
 
@@ -519,13 +530,17 @@ impl Default for InferenceRequest {
             input_file: None,
             params: serde_json::Value::Null,
             hint_next: None,
-            request_id: generate_request_id(),
+            request_id: Self::generate_request_id(),
         }
     }
 }
 
-fn generate_request_id() -> String {
-    Uuid::new_v4().to_string()
+impl InferenceRequest {
+    /// Generate a fresh unique request identifier. Also the serde default for
+    /// `request_id`, so a deserialized request without one still gets a unique id.
+    fn generate_request_id() -> String {
+        Uuid::new_v4().to_string()
+    }
 }
 
 /// Response from an inference call.
@@ -831,9 +846,9 @@ mod tests {
 
     #[test]
     fn canonical_id_uses_slash() {
-        assert_eq!(canonical_model_id("ollama", "qwen"), "ollama/qwen");
-        assert_eq!(model_id_name("ollama/qwen"), "qwen");
-        assert_eq!(model_id_name("ollama::qwen"), "qwen");
+        assert_eq!(ModelId::canonical("ollama", "qwen"), "ollama/qwen");
+        assert_eq!(ModelId::name("ollama/qwen"), "qwen");
+        assert_eq!(ModelId::name("ollama::qwen"), "qwen");
     }
 
     #[test]

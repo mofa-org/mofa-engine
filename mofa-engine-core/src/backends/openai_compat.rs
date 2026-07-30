@@ -5,8 +5,8 @@
 use async_trait::async_trait;
 use mofa_kernel::{
     BackendFeature, BackendHealth, Capability, CostTier, EngineError, InferenceRequest,
-    InferenceResponse, LifecycleResult, ModelAvailability, ModelCard, ModelResidency, Provider,
-    ProviderKind, ReasoningEffort, StreamDelta, StreamSink, canonical_model_id, model_id_name,
+    InferenceResponse, LifecycleResult, ModelAvailability, ModelCard, ModelId, ModelResidency,
+    Provider, ProviderKind, ReasoningEffort, StreamDelta, StreamSink,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -33,7 +33,9 @@ pub struct OpenAiCompatProvider {
 }
 
 impl OpenAiCompatProvider {
-    /// Create a new OpenAI-compatible provider.
+    /// Create a new OpenAI-compatible provider with default (temp-dir) artifact
+    /// output. Test-support: the engine factory uses [`Self::with_output_dir`].
+    #[cfg(test)]
     pub fn new(
         name: impl Into<String>,
         base_url: impl Into<String>,
@@ -157,27 +159,29 @@ enum SseEvent {
     Done,
 }
 
-/// Parse one SSE event block (the bytes preceding a blank-line delimiter).
-///
-/// Concatenates any `data:` field lines, ignoring comments/`event:` lines and
-/// tolerating `\r\n`. Blank blocks and unparseable payloads yield `None`.
-fn parse_sse_event(block: &[u8]) -> Option<SseEvent> {
-    let text = std::str::from_utf8(block).ok()?;
-    let mut data = String::new();
-    for line in text.lines() {
-        if let Some(rest) = line.trim_start().strip_prefix("data:") {
-            data.push_str(rest.trim());
+impl OpenAiCompatProvider {
+    /// Parse one SSE event block (the bytes preceding a blank-line delimiter).
+    ///
+    /// Concatenates any `data:` field lines, ignoring comments/`event:` lines and
+    /// tolerating `\r\n`. Blank blocks and unparseable payloads yield `None`.
+    fn parse_sse_event(block: &[u8]) -> Option<SseEvent> {
+        let text = std::str::from_utf8(block).ok()?;
+        let mut data = String::new();
+        for line in text.lines() {
+            if let Some(rest) = line.trim_start().strip_prefix("data:") {
+                data.push_str(rest.trim());
+            }
         }
+        if data.is_empty() {
+            return None;
+        }
+        if data == "[DONE]" {
+            return Some(SseEvent::Done);
+        }
+        serde_json::from_str::<ChatCompletionChunk>(&data)
+            .ok()
+            .map(SseEvent::Chunk)
     }
-    if data.is_empty() {
-        return None;
-    }
-    if data == "[DONE]" {
-        return Some(SseEvent::Done);
-    }
-    serde_json::from_str::<ChatCompletionChunk>(&data)
-        .ok()
-        .map(SseEvent::Chunk)
 }
 
 #[derive(Debug, Serialize)]
@@ -210,7 +214,7 @@ impl Provider for OpenAiCompatProvider {
                 let cap = Capability::from_str_loose(&m.capability)?;
                 let mut card =
                     ModelCard::new(self.name.clone(), m.name.clone(), cap, self.cost_tier);
-                card.id = canonical_model_id(&self.name, &m.name);
+                card.id = ModelId::canonical(&self.name, &m.name);
                 card.availability = ModelAvailability::Configured;
                 card.residency = ModelResidency::Remote;
                 card.context_window = m.context_window.unwrap_or(4096);
@@ -262,7 +266,7 @@ impl Provider for OpenAiCompatProvider {
 
     async fn load(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
         Ok(LifecycleResult {
-            model_id: canonical_model_id(&self.name, model_id_name(model_id)),
+            model_id: ModelId::canonical(&self.name, ModelId::name(model_id)),
             residency: ModelResidency::Remote,
             memory_bytes: Some(0),
             changed: false,
@@ -271,7 +275,7 @@ impl Provider for OpenAiCompatProvider {
 
     async fn unload(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
         Ok(LifecycleResult {
-            model_id: canonical_model_id(&self.name, model_id_name(model_id)),
+            model_id: ModelId::canonical(&self.name, ModelId::name(model_id)),
             residency: ModelResidency::Remote,
             memory_bytes: Some(0),
             changed: false,
@@ -283,7 +287,7 @@ impl Provider for OpenAiCompatProvider {
         model_id: &str,
         request: &InferenceRequest,
     ) -> Result<InferenceResponse, EngineError> {
-        let model_name = model_id_name(model_id);
+        let model_name = ModelId::name(model_id);
         let capability = request.capability.unwrap_or(Capability::Chat);
         let start = std::time::Instant::now();
 
@@ -331,7 +335,7 @@ impl Provider for OpenAiCompatProvider {
             return Ok(response);
         }
 
-        let model_name = model_id_name(model_id);
+        let model_name = ModelId::name(model_id);
         let messages: Vec<ChatMessage> = request
             .messages
             .iter()
@@ -415,7 +419,7 @@ impl Provider for OpenAiCompatProvider {
             buf.extend_from_slice(&bytes);
             while let Some(idx) = buf.windows(2).position(|w| w == b"\n\n") {
                 let block: Vec<u8> = buf.drain(..idx + 2).collect();
-                if let Some(event) = parse_sse_event(&block)
+                if let Some(event) = Self::parse_sse_event(&block)
                     && let Some(delta) = apply(event, &mut full)
                 {
                     let _ = sink.send(StreamDelta::Text(delta)).await;
@@ -423,7 +427,7 @@ impl Provider for OpenAiCompatProvider {
             }
         }
         // Any trailing event without a final blank line.
-        if let Some(event) = parse_sse_event(&buf)
+        if let Some(event) = Self::parse_sse_event(&buf)
             && let Some(delta) = apply(event, &mut full)
         {
             let _ = sink.send(StreamDelta::Text(delta)).await;
@@ -797,7 +801,7 @@ mod tests {
         let mut completion = None;
         let mut total = None;
         for block in blocks {
-            match parse_sse_event(block) {
+            match OpenAiCompatProvider::parse_sse_event(block) {
                 Some(SseEvent::Chunk(chunk)) => {
                     if let Some(u) = chunk.usage {
                         prompt = u.prompt_tokens;
@@ -829,11 +833,11 @@ mod tests {
     #[test]
     fn parse_sse_event_handles_done_blank_and_garbage() {
         assert!(matches!(
-            parse_sse_event(b"data: [DONE]"),
+            OpenAiCompatProvider::parse_sse_event(b"data: [DONE]"),
             Some(SseEvent::Done)
         ));
-        assert!(parse_sse_event(b"").is_none());
-        assert!(parse_sse_event(b": keep-alive comment").is_none());
-        assert!(parse_sse_event(b"data: not json").is_none());
+        assert!(OpenAiCompatProvider::parse_sse_event(b"").is_none());
+        assert!(OpenAiCompatProvider::parse_sse_event(b": keep-alive comment").is_none());
+        assert!(OpenAiCompatProvider::parse_sse_event(b"data: not json").is_none());
     }
 }

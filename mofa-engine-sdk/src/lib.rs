@@ -11,8 +11,10 @@
 //! exposes.
 
 pub mod client;
-pub mod dashboard;
 pub mod server;
 
+// Internal: the embedded dashboard HTML, served by `server`.
+pub(crate) mod dashboard;
+
 pub use client::{ClientError, DaemonClient, EmbeddedEngine};
-pub use server::start_server;
+pub use server::Server;

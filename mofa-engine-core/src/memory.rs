@@ -105,6 +105,8 @@ impl MemoryManager {
     }
 
     /// Whether `needed_bytes` currently fits within the budget without eviction.
+    /// Test-support: production paths reserve atomically via [`Self::try_reserve`].
+    #[cfg(test)]
     pub fn can_fit(&self, needed_bytes: u64) -> bool {
         self.available_bytes() >= needed_bytes
     }
@@ -137,10 +139,9 @@ impl MemoryManager {
         true
     }
 
-    /// Unconditionally record a reservation, ignoring the budget.
-    ///
-    /// Intended for tests and for accounting state the backend reports as already
-    /// resident. Prefer [`try_reserve`](Self::try_reserve) for admission.
+    /// Unconditionally record a reservation, ignoring the budget. Test-support:
+    /// production paths reserve atomically via [`Self::try_reserve`].
+    #[cfg(test)]
     pub fn allocate(&self, model_id: &str, bytes: u64) {
         let mut allocs = self.lock();
         match allocs.get_mut(model_id) {

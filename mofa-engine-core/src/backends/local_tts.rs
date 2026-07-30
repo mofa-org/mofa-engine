@@ -29,8 +29,8 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use mofa_kernel::{
     BackendFeature, BackendHealth, Capability, CostTier, EngineError, InferenceRequest,
-    InferenceResponse, LifecycleResult, ModelAvailability, ModelCard, ModelResidency, Provider,
-    ProviderKind, canonical_model_id, model_id_name,
+    InferenceResponse, LifecycleResult, ModelAvailability, ModelCard, ModelId, ModelResidency,
+    Provider, ProviderKind,
 };
 use tokio::process::Command;
 
@@ -237,7 +237,7 @@ impl Provider for LocalTtsProvider {
                 let cap = Capability::from_str_loose(&m.capability)?;
                 let mut card =
                     ModelCard::new(self.name.clone(), m.name.clone(), cap, CostTier::Free);
-                card.id = canonical_model_id(&self.name, &m.name);
+                card.id = ModelId::canonical(&self.name, &m.name);
                 card.availability = ModelAvailability::Configured;
                 card.residency = ModelResidency::Unloaded;
                 card.memory_estimate_bytes = m.memory_mb.unwrap_or(0) * 1024 * 1024;
@@ -264,7 +264,7 @@ impl Provider for LocalTtsProvider {
                 detail: format!("TTS command '{}' not found", self.command),
             });
         }
-        let model_name = model_id_name(model_id);
+        let model_name = ModelId::name(model_id);
         let estimate = self
             .models
             .iter()
@@ -272,7 +272,7 @@ impl Provider for LocalTtsProvider {
             .and_then(|m| m.memory_mb)
             .map(|mb| mb * 1024 * 1024);
         Ok(LifecycleResult {
-            model_id: canonical_model_id(&self.name, model_name),
+            model_id: ModelId::canonical(&self.name, model_name),
             residency: ModelResidency::Loaded,
             memory_bytes: estimate,
             changed: true,
@@ -281,7 +281,7 @@ impl Provider for LocalTtsProvider {
 
     async fn unload(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
         Ok(LifecycleResult {
-            model_id: canonical_model_id(&self.name, model_id_name(model_id)),
+            model_id: ModelId::canonical(&self.name, ModelId::name(model_id)),
             residency: ModelResidency::Unloaded,
             memory_bytes: Some(0),
             changed: true,
@@ -293,7 +293,7 @@ impl Provider for LocalTtsProvider {
         model_id: &str,
         request: &InferenceRequest,
     ) -> Result<InferenceResponse, EngineError> {
-        let model_name = model_id_name(model_id);
+        let model_name = ModelId::name(model_id);
         let capability = request.capability.unwrap_or(Capability::Tts);
 
         if capability != Capability::Tts {

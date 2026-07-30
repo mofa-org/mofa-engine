@@ -6,7 +6,7 @@
 
 use clap::{Parser, Subcommand};
 use mofa_engine_core::{Engine, EngineConfig};
-use mofa_engine_sdk::{DaemonClient, start_server};
+use mofa_engine_sdk::{DaemonClient, Server};
 use mofa_kernel::{Capability, InferenceRequest, Message};
 use std::path::PathBuf;
 use tracing_subscriber::{EnvFilter, prelude::*};
@@ -38,20 +38,6 @@ struct DaemonArgs {
     token: Option<String>,
 }
 
-/// Build a daemon client from the shared args, taking the bearer token from
-/// `--token` or, failing that, `$MOFA_API_TOKEN`.
-fn daemon_client(args: DaemonArgs) -> DaemonClient {
-    let token = args
-        .token
-        .or_else(|| std::env::var("MOFA_API_TOKEN").ok())
-        .filter(|t| !t.is_empty());
-    let client = DaemonClient::new(args.url);
-    match token {
-        Some(t) => client.with_token(t),
-        None => client,
-    }
-}
-
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Run the HTTP server (default).
@@ -80,112 +66,133 @@ enum Command {
     },
 }
 
-/// Initialise tracing. Set `MOFA_LOG_FORMAT=json` for structured JSON logs
-/// (suitable for aggregation); otherwise human-readable text. Levels honour
-/// `RUST_LOG`.
-fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let json = std::env::var("MOFA_LOG_FORMAT")
-        .map(|v| v.eq_ignore_ascii_case("json"))
-        .unwrap_or(false);
-
-    let registry = tracing_subscriber::registry().with(filter);
-    if json {
-        registry
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .json()
-                    .with_current_span(true)
-                    .with_span_list(false),
-            )
-            .init();
-    } else {
-        registry
-            .with(tracing_subscriber::fmt::layer().with_target(false))
-            .init();
-    }
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    init_tracing();
-    let cli = Cli::parse();
+    Cli::init_tracing();
+    Cli::parse().run().await
+}
 
-    match cli.command {
-        None | Some(Command::Serve) => serve(cli.config, cli.port).await,
-        Some(Command::ValidateConfig) => validate_config(cli.config),
-        Some(Command::Capabilities(d)) => print_json(daemon_client(d).capabilities().await),
-        Some(Command::Status(d)) => print_json(daemon_client(d).status().await),
-        Some(Command::Refresh(d)) => print_json(daemon_client(d).refresh().await),
-        Some(Command::Invoke {
-            daemon,
-            capability,
-            model,
-            text,
-        }) => {
-            let request = InferenceRequest {
-                capability: capability.as_deref().and_then(Capability::from_str_loose),
+impl Cli {
+    /// Dispatch the parsed command to its handler. Serve/validate run in-process;
+    /// the remaining subcommands act on a running daemon over the `/v1` API.
+    async fn run(self) -> anyhow::Result<()> {
+        let Cli {
+            config,
+            port,
+            command,
+        } = self;
+        match command {
+            None | Some(Command::Serve) => Self::serve(config, port).await,
+            Some(Command::ValidateConfig) => Self::validate_config(config),
+            Some(Command::Capabilities(d)) => {
+                Self::print_json(Self::daemon_client(d).capabilities().await)
+            }
+            Some(Command::Status(d)) => Self::print_json(Self::daemon_client(d).status().await),
+            Some(Command::Refresh(d)) => Self::print_json(Self::daemon_client(d).refresh().await),
+            Some(Command::Invoke {
+                daemon,
+                capability,
                 model,
-                app_id: None,
-                session_id: None,
-                fallback_policy: Default::default(),
-                messages: vec![Message {
-                    role: "user".into(),
-                    content: text,
+                text,
+            }) => {
+                let request = InferenceRequest {
+                    capability: capability.as_deref().and_then(Capability::from_str_loose),
+                    model,
+                    messages: vec![Message {
+                        role: "user".into(),
+                        content: text,
+                        ..Default::default()
+                    }],
+                    request_id: String::new(),
                     ..Default::default()
-                }],
-                input_file: None,
-                params: serde_json::Value::Null,
-                hint_next: None,
-                request_id: String::new(),
-                ..Default::default()
-            };
-            print_json(daemon_client(daemon).invoke(&request).await)
+                };
+                Self::print_json(Self::daemon_client(daemon).invoke(&request).await)
+            }
         }
     }
-}
 
-/// Run the daemon.
-async fn serve(config_path: Option<PathBuf>, port: Option<u16>) -> anyhow::Result<()> {
-    let mut config = EngineConfig::load_checked(config_path.as_deref())?;
-    if let Some(port) = port {
-        config.listen.port = port;
-    }
-    let host = config.listen.host.clone();
-    let port = config.listen.port;
+    /// Initialise tracing. Set `MOFA_LOG_FORMAT=json` for structured JSON logs
+    /// (suitable for aggregation); otherwise human-readable text. Levels honour
+    /// `RUST_LOG`.
+    fn init_tracing() {
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+        let json = std::env::var("MOFA_LOG_FORMAT")
+            .map(|v| v.eq_ignore_ascii_case("json"))
+            .unwrap_or(false);
 
-    tracing::info!("MoFA Engine v{} starting", env!("CARGO_PKG_VERSION"));
-    let engine = Engine::try_new(config).await?;
-    start_server(engine, &host, port)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))
-}
-
-/// Validate configuration without starting the engine.
-fn validate_config(config_path: Option<PathBuf>) -> anyhow::Result<()> {
-    match EngineConfig::load_checked(config_path.as_deref()) {
-        Ok(cfg) => {
-            println!(
-                "configuration is valid: {} provider(s), listen {}:{}",
-                cfg.providers.len(),
-                cfg.listen.host,
-                cfg.listen.port
-            );
-            Ok(())
+        let registry = tracing_subscriber::registry().with(filter);
+        if json {
+            registry
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .json()
+                        .with_current_span(true)
+                        .with_span_list(false),
+                )
+                .init();
+        } else {
+            registry
+                .with(tracing_subscriber::fmt::layer().with_target(false))
+                .init();
         }
-        Err(e) => Err(anyhow::anyhow!("invalid configuration: {e}")),
     }
-}
 
-/// Pretty-print a client result as JSON, or fail with the error.
-fn print_json<T: serde::Serialize, E: std::fmt::Display>(
-    result: Result<T, E>,
-) -> anyhow::Result<()> {
-    match result {
-        Ok(value) => {
-            println!("{}", serde_json::to_string_pretty(&value)?);
-            Ok(())
+    /// Build a daemon client from the shared args, taking the bearer token from
+    /// `--token` or, failing that, `$MOFA_API_TOKEN`.
+    fn daemon_client(args: DaemonArgs) -> DaemonClient {
+        let token = args
+            .token
+            .or_else(|| std::env::var("MOFA_API_TOKEN").ok())
+            .filter(|t| !t.is_empty());
+        let client = DaemonClient::new(args.url);
+        match token {
+            Some(t) => client.with_token(t),
+            None => client,
         }
-        Err(e) => Err(anyhow::anyhow!("{e}")),
+    }
+
+    /// Run the daemon in-process.
+    async fn serve(config_path: Option<PathBuf>, port: Option<u16>) -> anyhow::Result<()> {
+        let mut config = EngineConfig::load_checked(config_path.as_deref())?;
+        if let Some(port) = port {
+            config.listen.port = port;
+        }
+        let host = config.listen.host.clone();
+        let port = config.listen.port;
+
+        tracing::info!("MoFA Engine v{} starting", env!("CARGO_PKG_VERSION"));
+        let engine = Engine::try_new(config).await?;
+        Server::start(engine, &host, port)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    /// Validate configuration without starting the engine.
+    fn validate_config(config_path: Option<PathBuf>) -> anyhow::Result<()> {
+        match EngineConfig::load_checked(config_path.as_deref()) {
+            Ok(cfg) => {
+                println!(
+                    "configuration is valid: {} provider(s), listen {}:{}",
+                    cfg.providers.len(),
+                    cfg.listen.host,
+                    cfg.listen.port
+                );
+                Ok(())
+            }
+            Err(e) => Err(anyhow::anyhow!("invalid configuration: {e}")),
+        }
+    }
+
+    /// Pretty-print a client result as JSON, or fail with the error.
+    fn print_json<T: serde::Serialize, E: std::fmt::Display>(
+        result: Result<T, E>,
+    ) -> anyhow::Result<()> {
+        match result {
+            Ok(value) => {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                Ok(())
+            }
+            Err(e) => Err(anyhow::anyhow!("{e}")),
+        }
     }
 }

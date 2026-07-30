@@ -8,7 +8,7 @@
 //!
 //! A configured model `name` is the liter-llm model id (e.g. `openai/gpt-4o`,
 //! `deepseek/deepseek-chat`). MoFA's canonical id becomes `<provider>/<name>`, and
-//! [`model_id_name`] recovers the `provider/model` string liter-llm expects.
+//! [`ModelId::name`] recovers the `provider/model` string liter-llm expects.
 
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -19,9 +19,8 @@ use liter_llm::{
 };
 use mofa_kernel::{
     BackendFeature, BackendHealth, Capability, CostTier, EngineError, InferenceRequest,
-    InferenceResponse, LifecycleResult, ModelAvailability, ModelCard, ModelResidency, Provider,
-    ProviderKind, Reasoning, ReasoningEffort, StreamDelta, StreamSink, canonical_model_id,
-    model_id_name,
+    InferenceResponse, LifecycleResult, ModelAvailability, ModelCard, ModelId, ModelResidency,
+    Provider, ProviderKind, Reasoning, ReasoningEffort, StreamDelta, StreamSink,
 };
 use std::time::Instant;
 use tokio_stream::StreamExt as _;
@@ -113,7 +112,7 @@ impl LiterLLMProvider {
         request
             .messages
             .iter()
-            .map(|m| text_message(&m.role, m.content.clone()))
+            .map(|m| Self::text_message(&m.role, m.content.clone()))
             .collect()
     }
 
@@ -132,7 +131,7 @@ impl LiterLLMProvider {
             model: model_name.to_string(),
             messages,
             max_tokens: request.params.get("max_tokens").and_then(|v| v.as_u64()),
-            reasoning_effort: to_liter_effort(request.reasoning),
+            reasoning_effort: Self::to_liter_effort(request.reasoning),
             ..Default::default()
         })
     }
@@ -152,7 +151,7 @@ impl LiterLLMProvider {
             .map_err(|e| self.provider_error(e))?;
 
         let text = resp.choices.first().and_then(|c| c.message.text());
-        let (prompt_tokens, completion_tokens, tokens_used) = split_usage(resp.usage);
+        let (prompt_tokens, completion_tokens, tokens_used) = Self::split_usage(resp.usage);
 
         Ok(InferenceResponse {
             text,
@@ -272,7 +271,7 @@ impl LiterLLMProvider {
         let mut messages = Vec::with_capacity(request.messages.len());
         for m in &request.messages {
             if m.images.is_empty() {
-                messages.push(text_message(&m.role, m.content.clone()));
+                messages.push(Self::text_message(&m.role, m.content.clone()));
                 continue;
             }
             // A multimodal turn: text first, then each image as a detail-tagged part.
@@ -282,7 +281,7 @@ impl LiterLLMProvider {
             }
             for image in &m.images {
                 parts.push(ContentPart::image_with_detail(
-                    image_to_url(image).await?,
+                    Self::image_to_url(image).await?,
                     detail.clone(),
                 ));
             }
@@ -296,7 +295,7 @@ impl LiterLLMProvider {
             model: model_name.to_string(),
             messages,
             max_tokens: request.params.get("max_tokens").and_then(|v| v.as_u64()),
-            reasoning_effort: to_liter_effort(request.reasoning),
+            reasoning_effort: Self::to_liter_effort(request.reasoning),
             ..Default::default()
         };
 
@@ -307,7 +306,7 @@ impl LiterLLMProvider {
             .map_err(|e| self.provider_error(e))?;
 
         let text = resp.choices.first().and_then(|c| c.message.text());
-        let (prompt_tokens, completion_tokens, tokens_used) = split_usage(resp.usage);
+        let (prompt_tokens, completion_tokens, tokens_used) = Self::split_usage(resp.usage);
 
         Ok(InferenceResponse {
             text,
@@ -326,71 +325,78 @@ impl LiterLLMProvider {
     }
 }
 
-/// Map a MoFA reasoning request to liter-llm's effort enum.
-fn to_liter_effort(reasoning: Option<Reasoning>) -> Option<liter_llm::ReasoningEffort> {
-    reasoning.map(|r| match r.effort {
-        ReasoningEffort::Low => liter_llm::ReasoningEffort::Low,
-        ReasoningEffort::Medium => liter_llm::ReasoningEffort::Medium,
-        ReasoningEffort::High => liter_llm::ReasoningEffort::High,
-    })
-}
-
-/// Build a plain-text liter-llm message for the given role.
-fn text_message(role: &str, content: String) -> LiterMessage {
-    match role {
-        "system" | "developer" => LiterMessage::System(SystemMessage {
-            content: UserContent::Text(content),
-            ..Default::default()
-        }),
-        "assistant" => LiterMessage::Assistant(AssistantMessage {
-            content: Some(AssistantContent::Text(content)),
-            ..Default::default()
-        }),
-        _ => LiterMessage::User(UserMessage {
-            content: UserContent::Text(content),
-            ..Default::default()
-        }),
+/// Pure/IO conversions between MoFA and liter-llm types, grouped as private
+/// associated functions rather than free functions.
+impl LiterLLMProvider {
+    /// Map a MoFA reasoning request to liter-llm's effort enum.
+    fn to_liter_effort(reasoning: Option<Reasoning>) -> Option<liter_llm::ReasoningEffort> {
+        reasoning.map(|r| match r.effort {
+            ReasoningEffort::Low => liter_llm::ReasoningEffort::Low,
+            ReasoningEffort::Medium => liter_llm::ReasoningEffort::Medium,
+            ReasoningEffort::High => liter_llm::ReasoningEffort::High,
+        })
     }
-}
 
-/// Resolve an image reference to a URL liter-llm accepts. HTTP(S) and `data:`
-/// URLs pass through; a local file path is read and encoded as a `data:` URL.
-async fn image_to_url(image: &str) -> Result<String, EngineError> {
-    if image.starts_with("http://") || image.starts_with("https://") || image.starts_with("data:") {
-        return Ok(image.to_string());
+    /// Build a plain-text liter-llm message for the given role.
+    fn text_message(role: &str, content: String) -> LiterMessage {
+        match role {
+            "system" | "developer" => LiterMessage::System(SystemMessage {
+                content: UserContent::Text(content),
+                ..Default::default()
+            }),
+            "assistant" => LiterMessage::Assistant(AssistantMessage {
+                content: Some(AssistantContent::Text(content)),
+                ..Default::default()
+            }),
+            _ => LiterMessage::User(UserMessage {
+                content: UserContent::Text(content),
+                ..Default::default()
+            }),
+        }
     }
-    let bytes = tokio::fs::read(image)
-        .await
-        .map_err(|e| EngineError::InvalidRequest(format!("cannot read image '{image}': {e}")))?;
-    let mime = match std::path::Path::new(image)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("png") => "image/png",
-        Some("webp") => "image/webp",
-        Some("gif") => "image/gif",
-        _ => "image/jpeg",
-    };
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Ok(format!("data:{mime};base64,{b64}"))
-}
 
-/// Split a liter-llm `Usage` into `(prompt, completion, total)` as `Option<u32>`,
-/// falling back to `prompt + completion` when the vendor omits a total.
-fn split_usage(usage: Option<liter_llm::Usage>) -> (Option<u32>, Option<u32>, Option<u32>) {
-    match usage {
-        None => (None, None, None),
-        Some(u) => {
-            let prompt = u.prompt_tokens as u32;
-            let completion = u.completion_tokens as u32;
-            let total = if u.total_tokens > 0 {
-                u.total_tokens as u32
-            } else {
-                prompt + completion
-            };
-            (Some(prompt), Some(completion), Some(total))
+    /// Resolve an image reference to a URL liter-llm accepts. HTTP(S) and `data:`
+    /// URLs pass through; a local file path is read and encoded as a `data:` URL.
+    async fn image_to_url(image: &str) -> Result<String, EngineError> {
+        if image.starts_with("http://")
+            || image.starts_with("https://")
+            || image.starts_with("data:")
+        {
+            return Ok(image.to_string());
+        }
+        let bytes = tokio::fs::read(image).await.map_err(|e| {
+            EngineError::InvalidRequest(format!("cannot read image '{image}': {e}"))
+        })?;
+        let mime = match std::path::Path::new(image)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("png") => "image/png",
+            Some("webp") => "image/webp",
+            Some("gif") => "image/gif",
+            _ => "image/jpeg",
+        };
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        Ok(format!("data:{mime};base64,{b64}"))
+    }
+
+    /// Split a liter-llm `Usage` into `(prompt, completion, total)` as `Option<u32>`,
+    /// falling back to `prompt + completion` when the vendor omits a total.
+    fn split_usage(usage: Option<liter_llm::Usage>) -> (Option<u32>, Option<u32>, Option<u32>) {
+        match usage {
+            None => (None, None, None),
+            Some(u) => {
+                let prompt = u.prompt_tokens as u32;
+                let completion = u.completion_tokens as u32;
+                let total = if u.total_tokens > 0 {
+                    u.total_tokens as u32
+                } else {
+                    prompt + completion
+                };
+                (Some(prompt), Some(completion), Some(total))
+            }
         }
     }
 }
@@ -417,7 +423,7 @@ impl Provider for LiterLLMProvider {
                 let cap = Capability::from_str_loose(&m.capability)?;
                 let mut card =
                     ModelCard::new(self.name.clone(), m.name.clone(), cap, self.cost_tier);
-                card.id = canonical_model_id(&self.name, &m.name);
+                card.id = ModelId::canonical(&self.name, &m.name);
                 card.availability = ModelAvailability::Configured;
                 card.residency = ModelResidency::Remote;
                 card.context_window = m.context_window.unwrap_or(4096);
@@ -449,7 +455,7 @@ impl Provider for LiterLLMProvider {
 
     async fn load(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
         Ok(LifecycleResult {
-            model_id: canonical_model_id(&self.name, model_id_name(model_id)),
+            model_id: ModelId::canonical(&self.name, ModelId::name(model_id)),
             residency: ModelResidency::Remote,
             memory_bytes: Some(0),
             changed: false,
@@ -458,7 +464,7 @@ impl Provider for LiterLLMProvider {
 
     async fn unload(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
         Ok(LifecycleResult {
-            model_id: canonical_model_id(&self.name, model_id_name(model_id)),
+            model_id: ModelId::canonical(&self.name, ModelId::name(model_id)),
             residency: ModelResidency::Remote,
             memory_bytes: Some(0),
             changed: false,
@@ -470,7 +476,7 @@ impl Provider for LiterLLMProvider {
         model_id: &str,
         request: &InferenceRequest,
     ) -> Result<InferenceResponse, EngineError> {
-        let model_name = model_id_name(model_id);
+        let model_name = ModelId::name(model_id);
         let capability = request.capability.unwrap_or(Capability::Chat);
         let start = Instant::now();
 
@@ -515,7 +521,7 @@ impl Provider for LiterLLMProvider {
             return Ok(response);
         }
 
-        let model_name = model_id_name(model_id);
+        let model_name = ModelId::name(model_id);
         let req = self.build_chat_request(model_name, request)?;
 
         let start = Instant::now();
@@ -550,7 +556,7 @@ impl Provider for LiterLLMProvider {
             }
         }
 
-        let (prompt_tokens, completion_tokens, tokens_used) = split_usage(usage);
+        let (prompt_tokens, completion_tokens, tokens_used) = Self::split_usage(usage);
         Ok(InferenceResponse {
             text: Some(full),
             file: None,
@@ -614,10 +620,10 @@ mod tests {
         .unwrap();
         let cards = p.discover().await.unwrap();
         assert_eq!(cards.len(), 2);
-        // Canonical id is `<provider>/<name>`, and model_id_name recovers the
+        // Canonical id is `<provider>/<name>`, and ModelId::name recovers the
         // `provider/model` string liter-llm routes on.
         assert_eq!(cards[0].id, "liter/openai/gpt-4o");
-        assert_eq!(model_id_name(&cards[0].id), "openai/gpt-4o");
+        assert_eq!(ModelId::name(&cards[0].id), "openai/gpt-4o");
         assert_eq!(cards[0].capability, Capability::Chat);
         assert_eq!(cards[1].capability, Capability::ImageGen);
         assert_eq!(cards[0].residency, ModelResidency::Remote);
@@ -647,14 +653,14 @@ mod tests {
 
     #[test]
     fn usage_split_falls_back_to_sum() {
-        let (p, c, t) = split_usage(Some(liter_llm::Usage {
+        let (p, c, t) = LiterLLMProvider::split_usage(Some(liter_llm::Usage {
             prompt_tokens: 5,
             completion_tokens: 3,
             total_tokens: 0,
             ..Default::default()
         }));
         assert_eq!((p, c, t), (Some(5), Some(3), Some(8)));
-        assert_eq!(split_usage(None), (None, None, None));
+        assert_eq!(LiterLLMProvider::split_usage(None), (None, None, None));
     }
 
     #[test]
@@ -667,28 +673,32 @@ mod tests {
             })
         };
         assert!(matches!(
-            to_liter_effort(mk(ReasoningEffort::Low)),
+            LiterLLMProvider::to_liter_effort(mk(ReasoningEffort::Low)),
             Some(L::Low)
         ));
         assert!(matches!(
-            to_liter_effort(mk(ReasoningEffort::Medium)),
+            LiterLLMProvider::to_liter_effort(mk(ReasoningEffort::Medium)),
             Some(L::Medium)
         ));
         assert!(matches!(
-            to_liter_effort(mk(ReasoningEffort::High)),
+            LiterLLMProvider::to_liter_effort(mk(ReasoningEffort::High)),
             Some(L::High)
         ));
-        assert!(to_liter_effort(None).is_none());
+        assert!(LiterLLMProvider::to_liter_effort(None).is_none());
     }
 
     #[tokio::test]
     async fn image_url_and_data_url_pass_through() {
         assert_eq!(
-            image_to_url("https://example.com/a.png").await.unwrap(),
+            LiterLLMProvider::image_to_url("https://example.com/a.png")
+                .await
+                .unwrap(),
             "https://example.com/a.png"
         );
         assert_eq!(
-            image_to_url("data:image/png;base64,AAAA").await.unwrap(),
+            LiterLLMProvider::image_to_url("data:image/png;base64,AAAA")
+                .await
+                .unwrap(),
             "data:image/png;base64,AAAA"
         );
     }
@@ -698,7 +708,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pic.png");
         tokio::fs::write(&path, b"\x89PNG\r\n").await.unwrap();
-        let url = image_to_url(path.to_str().unwrap()).await.unwrap();
+        let url = LiterLLMProvider::image_to_url(path.to_str().unwrap())
+            .await
+            .unwrap();
         assert!(url.starts_with("data:image/png;base64,"));
     }
 

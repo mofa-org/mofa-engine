@@ -30,11 +30,6 @@ impl ArtifactSweeper {
         }
     }
 
-    /// The directory this sweeper scans.
-    pub fn dir(&self) -> &PathBuf {
-        &self.dir
-    }
-
     /// The retention window; artifacts at least this old are removed.
     pub fn retention(&self) -> Duration {
         self.retention
