@@ -137,9 +137,9 @@ export function CommandPalette() {
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: -20 }}
               transition={{ duration: 0.2, ease: 'easeOut' }}
-              className="w-full max-w-xl bg-background-secondary border border-black/10 rounded-xl shadow-xl overflow-hidden pointer-events-auto flex flex-col max-h-[60vh]"
+              className="w-full max-w-xl bg-background-secondary border border-border-strong rounded-xl shadow-xl overflow-hidden pointer-events-auto flex flex-col max-h-[60vh]"
             >
-              <div className="flex items-center px-4 border-b border-black/10 shrink-0">
+              <div className="flex items-center px-4 border-b border-border-strong shrink-0">
                 <Search className="w-5 h-5 text-text-dim shrink-0" />
                 <input
                   ref={inputRef}
@@ -150,7 +150,7 @@ export function CommandPalette() {
                   className="flex-1 bg-transparent border-none outline-none px-4 py-4 text-[15px] text-text-primary placeholder:text-text-dim"
                   aria-label="Command palette input"
                 />
-                <span className="text-[10px] font-mono text-text-dim px-2 py-1 rounded bg-black/5 shrink-0">ESC</span>
+                <span className="text-[10px] font-mono text-text-dim px-2 py-1 rounded bg-background-hover shrink-0">ESC</span>
               </div>
               
               <div className="flex-1 overflow-y-auto py-2">
@@ -168,7 +168,7 @@ export function CommandPalette() {
                       }}
                       onMouseEnter={() => setSelectedIndex(i)}
                       className={`flex items-center justify-between px-4 py-3 cursor-pointer ${
-                        i === selectedIndex ? 'bg-black/5' : 'hover:bg-black/5'
+                        i === selectedIndex ? 'bg-background-hover' : 'hover:bg-background-hover'
                       }`}
                       role="button"
                       tabIndex={-1}

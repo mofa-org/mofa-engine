@@ -23,3 +23,22 @@ api_key = "local"
 [[providers.models]]
 name = "kokoro"
 capability = "tts"
+
+[[providers]]
+name = "fireworks"
+kind = "openai_compatible"
+base_url = "https://api.fireworks.ai/inference/v1"
+api_key = "fw_3AJjszJWSADeUdomJm7UWu"
+
+[[providers.models]]
+name = "accounts/fireworks/models/deepseek-v4-flash"
+capability = "chat"
+
+[[providers.models]]
+name = "accounts/fireworks/models/gpt-oss-120b"
+capability = "chat"
+
+[[providers.models]]
+name = "accounts/fireworks/models/llama-v3p1-8b-instruct"
+capability = "chat"
+

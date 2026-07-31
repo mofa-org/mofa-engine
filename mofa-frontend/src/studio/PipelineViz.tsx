@@ -6,7 +6,7 @@ import { PipelinePhase } from './usePipeline';
 
 export function PipelineViz({ phase }: { phase: PipelinePhase }) {
   const isTranslating = phase.status === 'translating';
-  const isSynthesizing = phase.status === 'synthesizing' || (phase.status === 'error' && (phase as any).failedStep === 'tts');
+  const isSynthesizing = phase.status === 'synthesizing';
   const isChatDone = phase.status === 'translated' || phase.status === 'synthesizing' || phase.status === 'done' || (phase.status === 'error' && (phase as any).failedStep === 'tts');
   
   const chatResult = (phase as any).chat;
@@ -15,7 +15,7 @@ export function PipelineViz({ phase }: { phase: PipelinePhase }) {
   return (
     <div className="w-full max-w-3xl mx-auto mb-8 relative mt-4 shrink-0">
       {/* Track */}
-      <div className="absolute top-7 left-[70px] right-[70px] h-[3px] bg-black/5 rounded-full overflow-hidden z-0">
+      <div className="absolute top-7 left-[70px] right-[70px] h-[3px] bg-background-hover rounded-full overflow-hidden z-0">
         <motion.div 
           className={`absolute inset-y-0 left-0 overflow-hidden ${phase.status === 'error' ? 'bg-accent-red' : phase.status === 'done' ? 'bg-accent-green' : isSynthesizing ? 'bg-accent-purple' : 'bg-accent-blue'}`}
           initial={{ width: '0%' }}
@@ -98,7 +98,7 @@ export function PipelineNode({
   result: any;
   icon: any;
 }) {
-  let borderTextClass = "text-text-dim border-black/10 shadow-sm";
+  let borderTextClass = "text-text-dim border-border-strong shadow-sm";
   let bgTintClass = "bg-transparent";
   
   if (active) {
@@ -117,7 +117,7 @@ export function PipelineNode({
 
   return (
     <div className="flex flex-col items-center gap-4 relative z-10 w-[140px]">
-      <div className={`w-14 h-14 rounded-2xl border bg-white flex items-center justify-center transition-all duration-500 relative ${borderTextClass}`}>
+      <div className={`w-14 h-14 rounded-2xl border bg-background-card flex items-center justify-center transition-all duration-500 relative ${borderTextClass}`}>
         <div className={`absolute inset-0 rounded-2xl transition-colors duration-500 ${bgTintClass}`} />
         
         {/* Ring animation if active */}
@@ -182,7 +182,7 @@ export function PipelineNode({
           {done && result && (
             <>
               <div className="flex items-center justify-center gap-1.5 flex-wrap">
-                <span className="text-[10px] font-mono text-text-dim bg-black/5 px-2 py-0.5 rounded-full whitespace-nowrap">
+                <span className="text-[10px] font-mono text-text-dim bg-background-hover px-2 py-0.5 rounded-full whitespace-nowrap">
                   {result.model ? `${result.model} · ` : ''}{formatMs(result.duration_ms ?? result.durationMs)}
                 </span>
                 {result.fallbackUsed && (

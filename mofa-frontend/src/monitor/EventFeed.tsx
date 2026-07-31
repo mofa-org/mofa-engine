@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { engine } from '../engine';
 import { EngineEvent } from '../engine/types';
-import { Activity, CheckCircle2, Cpu, Loader, Box, RotateCw } from 'lucide-react';
+import { Activity, CheckCircle2, Cpu, Loader, Box, RotateCw, Network, ShieldAlert } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 export function EventFeed() {
   const [events, setEvents] = useState<(EngineEvent & { _id: string })[]>([]);
+  const [traceIdFilter, setTraceIdFilter] = useState('');
 
   useEffect(() => {
     let counter = 0;
@@ -22,11 +23,24 @@ export function EventFeed() {
     return () => unsubscribe();
   }, []);
 
+  const filteredEvents = traceIdFilter 
+    ? events.filter(e => e.data.trace_id?.includes(traceIdFilter) || e.data.request_id?.includes(traceIdFilter))
+    : events;
+
   return (
     <div className="flex-1 overflow-hidden flex flex-col relative min-h-0">
-      <div className="flex-1 overflow-y-auto overflow-x-hidden flex flex-col gap-2 pr-2 pb-2">
+      <div className="p-2 shrink-0 border-b border-border-subtle">
+        <input 
+          type="text" 
+          placeholder="Filter by trace ID..." 
+          className="w-full text-xs px-2 py-1 rounded bg-background-hover border-none focus:ring-1 focus:ring-accent-blue outline-none text-text-primary"
+          value={traceIdFilter}
+          onChange={(e) => setTraceIdFilter(e.target.value)}
+        />
+      </div>
+      <div className="flex-1 overflow-y-auto overflow-x-hidden flex flex-col gap-2 p-2">
         <AnimatePresence initial={false}>
-          {events.map((evt) => (
+          {filteredEvents.map((evt) => (
             <EventCard key={evt._id} evt={evt} />
           ))}
         </AnimatePresence>
@@ -34,7 +48,7 @@ export function EventFeed() {
           <div className="text-text-dim italic text-[11px] w-full text-center mt-4">Waiting for engine events...</div>
         )}
       </div>
-      <div className="absolute top-0 inset-x-0 h-4 bg-gradient-to-b from-background-secondary to-transparent pointer-events-none" />
+      <div className="absolute top-[45px] inset-x-0 h-4 bg-gradient-to-b from-background-secondary to-transparent pointer-events-none" />
       <div className="absolute bottom-0 inset-x-0 h-4 bg-gradient-to-t from-background-secondary to-transparent pointer-events-none" />
     </div>
   );
@@ -49,7 +63,7 @@ function EventCard({ evt }: { evt: EngineEvent }) {
       initial={{ opacity: 0, y: -10 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.2 }}
-      className={`border border-black/5 rounded-[var(--radius-small)] p-2.5 text-xs bg-white shadow-sm flex items-start gap-3 shrink-0 border-l-[3px] border-l-${color}`}
+      className={`border border-border-subtle rounded-[var(--radius-small)] p-2.5 text-xs bg-background-card shadow-sm flex items-start gap-3 shrink-0 border-l-[3px] border-l-${color}`}
     >
       <div className={`mt-0.5 text-${color}`}>
         {icon}
@@ -71,6 +85,20 @@ function EventCard({ evt }: { evt: EngineEvent }) {
 
 function formatEvent(evt: EngineEvent) {
   switch (evt.type) {
+    case 'RoutingDecision':
+      return {
+        icon: <Network className="w-3.5 h-3.5" />,
+        color: evt.data.is_fallback ? 'accent-yellow' : 'accent-purple',
+        title: evt.data.is_fallback ? 'Routing (Fallback)' : 'Routing Decision',
+        desc: `${evt.data.selected_backend}/${evt.data.selected_model} (${evt.data.reason || 'capability_match'})`
+      };
+    case 'FailoverTriggered':
+      return {
+        icon: <ShieldAlert className="w-3.5 h-3.5" />,
+        color: 'accent-red',
+        title: 'Failover Triggered',
+        desc: `Failed ${evt.data.failed_backend} → ${evt.data.fallback_backend}`
+      };
     case 'RequestStarted':
       return {
         icon: <Activity className="w-3.5 h-3.5" />,
@@ -83,7 +111,7 @@ function formatEvent(evt: EngineEvent) {
         icon: <CheckCircle2 className="w-3.5 h-3.5" />,
         color: evt.data.success ? 'accent-green' : 'accent-red',
         title: evt.data.success ? 'Request Completed' : 'Request Failed',
-        desc: `${evt.data.request_id?.slice(0, 8)}… ${evt.data.duration_ms}ms`
+        desc: `${evt.data.trace_id?.slice(0, 8) || evt.data.request_id?.slice(0, 8)}… ${evt.data.duration_ms}ms`
       };
     case 'ModelStatusChanged':
       return {

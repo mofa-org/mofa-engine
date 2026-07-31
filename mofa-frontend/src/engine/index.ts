@@ -7,7 +7,9 @@ export interface IEngineClient {
   getStatus(): Promise<EngineResult<EngineStatus>>;
   getCapabilities(): Promise<EngineResult<ModelCard[]>>;
   invoke(req: InferenceRequest): Promise<EngineResult<InferenceResponse>>;
+  streamInvoke(req: InferenceRequest, onChunk: (text: string) => void): Promise<EngineResult<InferenceResponse>>;
   refreshDiscovery(): Promise<EngineResult<EngineStatus>>;
+  getMetrics(): Promise<EngineResult<string>>;
   subscribeEvents(handler: (e: EngineEvent) => void): () => void;
   getAudioUrl(filename: string): string;
   fetchAudio(filename: string): Promise<Blob>;

@@ -64,16 +64,8 @@ export function AudioPlayer({ filename, children }: AudioPlayerProps) {
       setDuration(ws.getDuration());
     });
 
-    ws.on('audioprocess', () => {
-      setCurrentTime(ws.getCurrentTime());
-    });
-
-    ws.on('interaction', () => {
-      setCurrentTime(ws.getCurrentTime());
-    });
-
-    ws.on('timeupdate', () => {
-      setCurrentTime(ws.getCurrentTime());
+    ws.on('timeupdate', (t) => {
+      setCurrentTime(t);
     });
 
     ws.on('play', () => setIsPlaying(true));
@@ -141,7 +133,7 @@ export function AudioPlayer({ filename, children }: AudioPlayerProps) {
 
   return (
     <Card 
-      className="p-6 border-black/10 bg-white shadow-sm outline-none focus-visible:ring-1 focus-visible:ring-accent-cyan"
+      className="p-6 border-border-strong bg-background-card shadow-sm outline-none focus-visible:ring-1 focus-visible:ring-accent-cyan"
       tabIndex={0}
       onKeyDown={handleKeyDown}
       aria-label="Audio player"
@@ -149,7 +141,7 @@ export function AudioPlayer({ filename, children }: AudioPlayerProps) {
       <div className="relative mb-6">
         {!isReady && (
           <div className="absolute inset-0 flex items-center h-[80px]">
-            <Skeleton className="w-full h-1/2 bg-black/5" />
+            <Skeleton className="w-full h-1/2 bg-background-hover" />
           </div>
         )}
         <div ref={containerRef} className={`w-full ${!isReady ? 'opacity-0' : 'opacity-100 transition-opacity duration-500'}`} />
@@ -174,11 +166,21 @@ export function AudioPlayer({ filename, children }: AudioPlayerProps) {
         </div>
 
         <div className="flex items-center gap-2 text-text-dim">
-          <Button variant="ghost" onClick={toggleMute} className="h-8 w-8 p-0 hover:text-black" disabled={!isReady}>
+          <Button variant="ghost" onClick={toggleMute} className="h-8 w-8 p-0 hover:text-text-primary" disabled={!isReady}>
             {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+          </Button>
+          <Button variant="ghost" onClick={handleDownload} className="h-8 w-8 p-0 hover:text-text-primary" title="Download Audio">
+            <Download className={`w-4 h-4 ${downloaded ? 'text-accent-green' : ''}`} />
           </Button>
         </div>
       </div>
+      
+      {/* Backup native HTML5 audio controls */}
+      <audio 
+        controls 
+        src={engine.getAudioUrl(filename)} 
+        className="w-full mt-4 h-8 opacity-80 filter invert grayscale hover:grayscale-0 transition-all rounded-md" 
+      />
     </Card>
   );
 }

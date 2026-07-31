@@ -1,94 +1,62 @@
-import React, { useEffect, useState } from 'react';
-import { engine } from '../engine';
-import { EngineStatus } from '../engine/types';
+import React from 'react';
 import { Card } from '../shared/Card';
-import { Activity, Clock, Cpu, HardDrive } from 'lucide-react';
+import { AnimatedNumber } from '../shared/AnimatedNumber';
 
-export function MetricsStrip() {
-  const [status, setStatus] = useState<EngineStatus | null>(null);
-  const [requestCount, setRequestCount] = useState(0);
-  const [avgLatency, setAvgLatency] = useState(0);
+interface MetricsStripProps {
+  status: { memory_used_bytes: number; memory_budget_bytes: number; loaded_models?: number; total_models?: number } | null;
+  totalRequestCount: number;
+  p50: number;
+  p95: number;
+  p99: number;
+  usdSavedByLocal: string;
+}
 
-  useEffect(() => {
-    // Initial fetch
-    engine.getStatus().then(res => {
-      if (res.success) setStatus(res.data);
-    });
-
-    const handleEvent = (evt: any) => {
-      if (evt.type === 'RequestStarted') {
-        setRequestCount(prev => prev + 1);
-      } else if (evt.type === 'RequestCompleted') {
-        if (evt.data && evt.data.duration_ms) {
-          setAvgLatency(prev => {
-            if (prev === 0) return evt.data.duration_ms;
-            return prev * 0.8 + evt.data.duration_ms * 0.2;
-          });
-        }
-      } else if (
-        evt.type === 'ModelStatusChanged' ||
-        evt.type === 'ModelResidencyChanged' ||
-        evt.type === 'MemoryChanged'
-      ) {
-        engine.getStatus().then(res => {
-          if (res.success) setStatus(res.data);
-        });
-      }
-    };
-
-    const unsubscribe = engine.subscribeEvents(handleEvent);
-    return () => unsubscribe();
-  }, []);
-
-  const memoryPercent = status 
-    ? ((status.memory_used_bytes / status.memory_budget_bytes) * 100).toFixed(1) 
+export function MetricsStrip({ status, totalRequestCount, p50, p95, p99, usdSavedByLocal }: MetricsStripProps) {
+  const memoryPercent = status && status.memory_budget_bytes > 0
+    ? Number(((status.memory_used_bytes / status.memory_budget_bytes) * 100).toFixed(1))
     : 0;
 
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-      <Card className="p-4 flex items-center gap-4">
-        <div className="w-10 h-10 rounded-full bg-accent-blue/10 flex items-center justify-center">
-          <Activity className="w-5 h-5 text-accent-blue" />
-        </div>
-        <div>
-          <div className="text-[11px] font-medium text-text-secondary uppercase tracking-wider mb-1">Total Requests</div>
-          <div className="text-[20px] font-semibold text-text-primary leading-none">{requestCount}</div>
+    <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
+      <Card className="p-4 flex flex-col justify-between">
+        <div className="text-[11px] font-medium text-text-dim uppercase tracking-wider mb-1">Total Requests</div>
+        <div className="text-[24px] font-medium text-text-primary tracking-tight">
+          <AnimatedNumber value={totalRequestCount} />
         </div>
       </Card>
       
-      <Card className="p-4 flex items-center gap-4">
-        <div className="w-10 h-10 rounded-full bg-accent-purple/10 flex items-center justify-center">
-          <Clock className="w-5 h-5 text-accent-purple" />
-        </div>
-        <div>
-          <div className="text-[11px] font-medium text-text-secondary uppercase tracking-wider mb-1">Avg Latency</div>
-          <div className="text-[20px] font-semibold text-text-primary leading-none">
-            {avgLatency > 0 ? `${(avgLatency / 1000).toFixed(2)}s` : '--'}
+      <Card className="p-4 flex flex-col justify-between">
+        <div className="text-[11px] font-medium text-text-dim uppercase tracking-wider mb-1">Latency Percentiles</div>
+        {p50 > 0 ? (
+          <div className="flex items-center gap-2 font-mono text-[11px]">
+            <span className="text-accent-green">P50: {(p50 / 1000).toFixed(2)}s</span>
+            <span className="text-accent-yellow">P95: {(p95 / 1000).toFixed(2)}s</span>
+            <span className="text-accent-red">P99: {(p99 / 1000).toFixed(2)}s</span>
           </div>
+        ) : (
+          <div className="text-[24px] font-medium text-text-primary tracking-tight">--</div>
+        )}
+      </Card>
+      
+      <Card className="p-4 flex flex-col justify-between">
+        <div className="text-[11px] font-medium text-text-dim uppercase tracking-wider mb-1">Models Loaded</div>
+        <div className="text-[24px] font-medium text-text-primary tracking-tight">
+          {status?.loaded_models ?? '--'} <span className="text-[14px] font-normal text-text-dim">/ {status?.total_models ?? '--'}</span>
         </div>
       </Card>
       
-      <Card className="p-4 flex items-center gap-4">
-        <div className="w-10 h-10 rounded-full bg-accent-green/10 flex items-center justify-center">
-          <Cpu className="w-5 h-5 text-accent-green" />
-        </div>
-        <div>
-          <div className="text-[11px] font-medium text-text-secondary uppercase tracking-wider mb-1">Models Loaded</div>
-          <div className="text-[20px] font-semibold text-text-primary leading-none">
-            {status?.loaded_models ?? '--'} <span className="text-sm font-normal text-text-dim">/ {status?.total_models ?? '--'}</span>
-          </div>
+      <Card className="p-4 flex flex-col justify-between">
+        <div className="text-[11px] font-medium text-text-dim uppercase tracking-wider mb-1">Memory Usage</div>
+        <div className="text-[24px] font-medium text-text-primary tracking-tight">
+          <AnimatedNumber value={memoryPercent} format={(v) => v.toFixed(1)} />
+          <span className="text-[14px] font-normal text-text-dim">%</span>
         </div>
       </Card>
-      
-      <Card className="p-4 flex items-center gap-4">
-        <div className="w-10 h-10 rounded-full bg-accent-yellow/10 flex items-center justify-center">
-          <HardDrive className="w-5 h-5 text-accent-yellow" />
-        </div>
-        <div>
-          <div className="text-[11px] font-medium text-text-secondary uppercase tracking-wider mb-1">Memory Usage</div>
-          <div className="text-[20px] font-semibold text-text-primary leading-none">
-            {memoryPercent}%
-          </div>
+
+      <Card className="p-4 flex flex-col justify-between border-accent-green/20 bg-accent-green/5">
+        <div className="text-[11px] font-medium text-accent-green uppercase tracking-wider mb-1">Local Savings</div>
+        <div className="text-[24px] font-medium text-accent-green tracking-tight">
+          ${usdSavedByLocal}
         </div>
       </Card>
     </div>

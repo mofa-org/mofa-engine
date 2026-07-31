@@ -4,11 +4,13 @@ import { Card } from '../shared/Card';
 import { Button } from '../shared/Button';
 import { MetricsStrip } from './MetricsStrip';
 import { DualTrackView } from './DualTrackView';
-import { Activity, LayoutDashboard, Cpu, Network, ExternalLink, Layers } from 'lucide-react';
+import { useEngineMetrics } from './useEngineMetrics';
+import { engine } from '../engine';
+import { Activity, LayoutDashboard, Cpu, Network, ExternalLink, Layers, DollarSign } from 'lucide-react';
 
 const GRAFANA_URL = import.meta.env.VITE_GRAFANA_URL || 'http://localhost:3000';
 
-type TabId = 'dual-track' | 'overview' | 'memory' | 'routing';
+type TabId = 'dual-track' | 'overview' | 'memory' | 'routing' | 'cost';
 
 interface TabConfig {
   id: TabId;
@@ -30,33 +32,41 @@ const TABS: TabConfig[] = [
     id: 'overview',
     label: 'Engine Overview',
     icon: <LayoutDashboard className="w-4 h-4" />,
-    dashboardPath: '/d/engine-overview/mofa-engine-overview',
+    dashboardPath: '/d/engine-overview',
     description: 'Request rate, error rate, P95 latency, TTFT, and tokens/sec.'
   },
   {
     id: 'memory',
     label: 'Memory & Lifecycle',
     icon: <Cpu className="w-4 h-4" />,
-    dashboardPath: '/d/engine-memory/mofa-memory-and-lifecycle',
+    dashboardPath: '/d/engine-memory',
     description: 'Memory vs budget, model loads/unloads, eviction rate, and cold-load heatmap.'
   },
   {
     id: 'routing',
     label: 'Preflight & Routing',
     icon: <Network className="w-4 h-4" />,
-    dashboardPath: '/d/engine-routing/mofa-preflight-and-routing',
+    dashboardPath: '/d/engine-routing',
     description: 'Fallback routing, circuit breakers, and capability matching.'
+  },
+  {
+    id: 'cost',
+    label: 'Financial Cost & Billing',
+    icon: <DollarSign className="w-4 h-4" />,
+    dashboardPath: '/d/engine-cost',
+    description: 'Real-time USD spend accumulation, free-tier savings rate %, token velocity, and billing rate per minute.'
   }
 ];
 
 export function ObservabilityView() {
+  const metrics = useEngineMetrics();
   const [activeTab, setActiveTab] = useState<TabId>('dual-track');
   const [grafanaAvailable, setGrafanaAvailable] = useState<boolean | null>(null);
+  const [engineMeta, setEngineMeta] = useState<{ version: string; uptime: number; providers: number } | null>(null);
 
   useEffect(() => {
     let mounted = true;
     
-    // Lightweight check for Grafana availability using a known public static asset
     const checkGrafana = () => {
       const img = new Image();
       img.onload = () => {
@@ -65,16 +75,45 @@ export function ObservabilityView() {
       img.onerror = () => {
         if (mounted) setGrafanaAvailable(false);
       };
-      // Prevent caching
       img.src = `${GRAFANA_URL}/public/img/grafana_icon.svg?t=${Date.now()}`;
     };
 
+    const fetchEngineMeta = () => {
+      Promise.all([engine.getHealth(), engine.getStatus()]).then(([healthRes, statusRes]) => {
+        if (mounted && healthRes.success) {
+          setEngineMeta({
+            version: healthRes.data.version || '0.1.0',
+            uptime: healthRes.data.uptime_secs || 0,
+            providers: statusRes.success ? statusRes.data.providers : 3
+          });
+        }
+      });
+    };
+
     checkGrafana();
+    fetchEngineMeta();
 
     return () => { mounted = false; };
   }, []);
 
+  // Power user Keyboard Shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (['input', 'textarea'].includes((e.target as HTMLElement)?.tagName?.toLowerCase())) return;
+      if (e.key === '1') setActiveTab('dual-track');
+      else if (e.key === '2') setActiveTab('overview');
+      else if (e.key === '3') setActiveTab('memory');
+      else if (e.key === '4') setActiveTab('routing');
+      else if (e.key === '5') setActiveTab('cost');
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
   const activeConfig = TABS.find(t => t.id === activeTab)!;
+
+  const uptimeMins = engineMeta ? Math.floor(engineMeta.uptime / 60) : 0;
 
   return (
     <motion.div 
@@ -92,7 +131,7 @@ export function ObservabilityView() {
               Engine Observability
             </h1>
             <p className="text-[14px] text-text-dim mt-1 font-mono">
-              Powered by Prometheus + Grafana & Local Telemetry Engine
+              MoFA Engine v{engineMeta?.version || '0.1.0'} · Uptime {uptimeMins}m · {engineMeta?.providers || 3} active providers
             </p>
           </div>
           {grafanaAvailable && (
@@ -106,10 +145,17 @@ export function ObservabilityView() {
           )}
         </div>
 
-        <MetricsStrip />
+        <MetricsStrip
+          status={metrics.status}
+          totalRequestCount={metrics.totalRequestCount}
+          p50={metrics.p50}
+          p95={metrics.p95}
+          p99={metrics.p99}
+          usdSavedByLocal={metrics.usdSavedByLocal}
+        />
 
         {/* Tab Navigation */}
-        <div className="flex items-center gap-2 mb-6 border-b border-black/5 pb-px">
+        <div className="flex items-center gap-2 mb-6 border-b border-border-subtle pb-px flex-wrap">
           {TABS.map(tab => (
             <button
               key={tab.id}
@@ -117,7 +163,7 @@ export function ObservabilityView() {
               className={`flex items-center gap-2 px-4 py-2 text-[13px] font-medium transition-colors border-b-2 ${
                 activeTab === tab.id 
                   ? 'border-accent-blue text-accent-blue' 
-                  : 'border-transparent text-text-secondary hover:text-text-primary hover:border-black/10'
+                  : 'border-transparent text-text-secondary hover:text-text-primary hover:border-border-strong'
               }`}
             >
               {tab.icon}
@@ -134,12 +180,12 @@ export function ObservabilityView() {
               <div className="text-text-dim animate-pulse text-sm">Checking observability stack...</div>
             </div>
           ) : grafanaAvailable ? (
-            <Card className="w-full h-full overflow-hidden p-0 border-black/10">
-              <div className="bg-background-secondary border-b border-black/5 px-4 py-3 flex items-center justify-between">
+            <Card className="w-full h-full overflow-hidden p-0 border-border-strong">
+              <div className="bg-background-secondary border-b border-border-subtle px-4 py-3 flex items-center justify-between">
                 <div className="text-[13px] font-medium text-text-primary">{activeConfig.label}</div>
                 <div className="text-[11px] text-text-dim">{activeConfig.description}</div>
               </div>
-              <div className="w-full h-[calc(100%-45px)] min-h-[600px] bg-black/5">
+              <div className="w-full h-[calc(100%-45px)] min-h-[600px] bg-background-hover">
                 <iframe
                   src={`${GRAFANA_URL}${activeConfig.dashboardPath}?kiosk&from=now-5m&to=now&refresh=5s`}
                   className="w-full h-full border-none min-h-[600px]"
@@ -148,8 +194,8 @@ export function ObservabilityView() {
               </div>
             </Card>
           ) : (
-            <Card className="w-full h-full flex flex-col items-center justify-center text-center p-8 border-dashed border-black/10 bg-background-secondary/50">
-              <div className="w-16 h-16 rounded-2xl bg-black/5 flex items-center justify-center mb-6">
+            <Card className="w-full h-full flex flex-col items-center justify-center text-center p-8 border-dashed border-border-strong bg-background-secondary/50">
+              <div className="w-16 h-16 rounded-2xl bg-background-hover flex items-center justify-center mb-6">
                 <Activity className="w-8 h-8 text-text-dim" />
               </div>
               <h3 className="text-lg font-medium text-text-primary mb-2">Grafana Not Reachable</h3>
@@ -157,7 +203,7 @@ export function ObservabilityView() {
                 Grafana dashboards appear here when the observability stack is running. 
                 Currently, it is either not started or running on a different port.
               </p>
-              <div className="p-4 bg-background-primary rounded-lg border border-black/5 text-left w-full max-w-md shadow-sm">
+              <div className="p-4 bg-background-card rounded-lg border border-border-subtle text-left w-full max-w-md shadow-sm">
                 <div className="text-[12px] font-medium text-text-secondary uppercase tracking-wider mb-2">Expected configuration</div>
                 <div className="font-mono text-[11px] text-text-primary space-y-1">
                   <div><span className="text-text-dim">VITE_GRAFANA_URL=</span>{GRAFANA_URL}</div>

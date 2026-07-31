@@ -69,7 +69,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
             className="w-full max-w-md max-h-[90vh] flex flex-col"
           >
             <Card className="flex flex-col overflow-hidden shadow-xl">
-              <div className="flex items-center justify-between p-4 border-b border-black/10 shrink-0 bg-background-secondary/50">
+              <div className="flex items-center justify-between p-4 border-b border-border-strong shrink-0 bg-background-secondary/50">
                 <h2 className="text-lg font-medium text-text-primary">Settings</h2>
                 <button onClick={onClose} className="p-1 text-text-secondary hover:text-text-primary transition-colors">
                   <X size={20} />
@@ -85,7 +85,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                         type="text"
                         value={urlInput}
                         onChange={(e) => setUrlInput(e.target.value)}
-                        className="flex-1 bg-background-secondary border border-black/10 rounded-[var(--radius-small)] px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
+                        className="flex-1 bg-background-secondary border border-border-strong rounded-[var(--radius-small)] px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-blue"
                         placeholder="http://127.0.0.1:8420"
                       />
                     </div>
@@ -101,12 +101,12 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                     </div>
                   </div>
 
-                  <div className="space-y-2 pt-4 border-t border-black/10">
+                  <div className="space-y-2 pt-4 border-t border-border-strong">
                     <label className="text-sm font-medium text-text-primary">Default Voice</label>
                     <select
                       value={settings.defaultVoice}
                       onChange={(e) => updateSettings({ defaultVoice: e.target.value })}
-                      className="w-full bg-background-secondary border border-black/10 rounded-[var(--radius-small)] px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-purple appearance-none"
+                      className="w-full bg-background-secondary border border-border-strong rounded-[var(--radius-small)] px-3 py-2 text-sm text-text-primary focus:outline-none focus:border-accent-purple appearance-none"
                     >
                       {['Xiaoxiao', 'Yunxi', 'Xiaoni', 'Nova', 'Alloy', 'Echo'].map((v) => (
                         <option key={v} value={v} className="bg-background-secondary">{v}</option>
@@ -114,33 +114,33 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                     </select>
                   </div>
 
-                  <div className="pt-4 border-t border-black/10 flex items-center justify-between">
+                  <div className="pt-4 border-t border-border-strong flex items-center justify-between">
                     <div>
                       <h3 className="text-sm font-medium text-text-primary">Sound Effects</h3>
                       <p className="text-[11px] text-text-dim">Play a chime when generation completes</p>
                     </div>
                     <button
                       onClick={() => updateSettings({ soundEnabled: !settings.soundEnabled })}
-                      className={`p-2 rounded-full transition-colors ${settings.soundEnabled ? 'bg-accent-cyan/10 text-accent-cyan' : 'bg-black/5 text-text-dim hover:text-text-secondary'}`}
+                      className={`p-2 rounded-full transition-colors ${settings.soundEnabled ? 'bg-accent-cyan/10 text-accent-cyan' : 'bg-background-hover text-text-dim hover:text-text-secondary'}`}
                     >
                       {settings.soundEnabled ? <Volume2 className="w-5 h-5" /> : <VolumeX className="w-5 h-5" />}
                     </button>
                   </div>
 
-                  <div className="pt-4 border-t border-black/10 flex items-center justify-between">
+                  <div className="pt-4 border-t border-border-strong flex items-center justify-between">
                     <div>
                       <h3 className="text-sm font-medium text-text-primary">Reduced Motion</h3>
                       <p className="text-[11px] text-text-dim">Minimize animations and transitions</p>
                     </div>
                     <button
                       onClick={() => updateSettings({ reducedMotion: !settings.reducedMotion })}
-                      className={`p-2 rounded-full transition-colors ${settings.reducedMotion ? 'bg-accent-blue/10 text-accent-blue' : 'bg-black/5 text-text-dim hover:text-text-secondary'}`}
+                      className={`p-2 rounded-full transition-colors ${settings.reducedMotion ? 'bg-accent-blue/10 text-accent-blue' : 'bg-background-hover text-text-dim hover:text-text-secondary'}`}
                     >
                       {settings.reducedMotion ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
                     </button>
                   </div>
 
-                  <div className="pt-4 border-t border-black/10 flex items-center justify-between">
+                  <div className="pt-4 border-t border-border-strong flex items-center justify-between">
                     <div>
                       <h3 className="text-sm font-medium text-accent-red">Danger Zone</h3>
                       <p className="text-[11px] text-text-dim">Clear local drafts and podcast history</p>
@@ -152,7 +152,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                   </div>
                 </div>
 
-                <div className="space-y-2 pt-4 border-t border-black/10">
+                <div className="space-y-2 pt-4 border-t border-border-strong">
                   <h3 className="text-sm font-medium text-text-primary">About MoFA FM</h3>
                   <div className="text-xs text-text-secondary space-y-1">
                     <p>Engine Version: {version || 'Offline'}</p>
@@ -166,7 +166,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                 </div>
               </div>
 
-              <div className="p-4 border-t border-black/10 flex justify-end gap-2 bg-black/5 shrink-0">
+              <div className="p-4 border-t border-border-strong flex justify-end gap-2 bg-background-hover shrink-0">
                 <Button variant="primary" onClick={handleSave} className="w-full">Done</Button>
               </div>
             </Card>

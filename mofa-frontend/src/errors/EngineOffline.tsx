@@ -23,7 +23,7 @@ export function EngineOffline() {
       transition={{ duration: 0.3, ease: [0.25, 0.1, 0.25, 1] }}
       className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-background-primary/80 backdrop-blur-md"
     >
-      <Card className="max-w-md w-full p-8 text-center flex flex-col items-center bg-black/40 border-white/10 shadow-[0_0_40px_rgba(0,0,0,0.5)]">
+      <Card className="max-w-md w-full p-8 text-center flex flex-col items-center bg-background-secondary border-border-strong shadow-[0_0_40px_rgba(0,0,0,0.5)]">
         <div className="w-16 h-16 rounded-full bg-accent-red/10 flex items-center justify-center mb-6 shadow-[0_0_20px_rgba(239,68,68,0.2)]">
           <ZapOff className="w-8 h-8 text-accent-red" />
         </div>
@@ -33,7 +33,7 @@ export function EngineOffline() {
           The engine at <span className="font-mono text-accent-cyan">{url}</span> is offline.
         </p>
         
-        <div className="w-full bg-black/40 border border-white/5 rounded-md p-4 flex flex-col items-start group mb-8">
+        <div className="w-full bg-background-secondary border border-border-subtle rounded-md p-4 flex flex-col items-start group mb-8">
           <div className="text-[11px] font-semibold uppercase tracking-widest text-text-dim mb-2">Start the engine</div>
           <div className="flex justify-between items-center w-full">
             <code className="text-sm font-mono text-white select-all">

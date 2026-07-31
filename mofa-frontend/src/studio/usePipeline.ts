@@ -6,6 +6,7 @@ export interface ChatResult {
   script: string; model: string; provider: string;
   durationMs: number; tokens: number | null; fallbackUsed: boolean;
   routingReason: string | null; candidates: number | null; requestId: string;
+  costUsd?: number;
 }
 
 export interface TtsResult {
@@ -16,7 +17,7 @@ export interface TtsResult {
 
 export type PipelinePhase =
   | { status: 'idle' }
-  | { status: 'translating'; requestId: string; startedAt: number }
+  | { status: 'translating'; requestId: string; startedAt: number; partialScript?: string }
   | { status: 'translated'; chat: ChatResult; startedAt: number }
   | { status: 'synthesizing'; chat: ChatResult; requestId: string; startedAt: number }
   | { status: 'done'; chat: ChatResult; tts: TtsResult; totalMs: number; evictions: number }
@@ -78,18 +79,26 @@ export function usePipeline() {
       fallback_policy: 'capability_only' as FallbackPolicy
     });
 
-    if (!ttsRes.success) {
-      setPhase({ status: 'error', failedStep: 'tts', error: { error: ttsRes.error, detail: ttsRes.detail || '' }, chat: chatResult });
+    if (!ttsRes.success || !ttsRes.data?.file) {
+      setPhase({
+        status: 'error',
+        failedStep: 'tts',
+        error: {
+          error: !ttsRes.success ? ttsRes.error : 'NoAudioFile',
+          detail: (!ttsRes.success ? ttsRes.detail : 'TTS synthesis completed but no audio file was generated.') || ''
+        },
+        chat: chatResult
+      });
       return;
     }
 
     const ttsResult: TtsResult = {
-      audioFilename: ttsRes.data.file || '',
-      model: ttsRes.data.model_used,
-      provider: ttsRes.data.provider,
-      durationMs: ttsRes.data.duration_ms,
-      fallbackUsed: ttsRes.data.fallback_used,
-      routingReason: ttsRes.data.routing_reason,
+      audioFilename: ttsRes.data.file,
+      model: ttsRes.data.model_used || 'kokoro',
+      provider: ttsRes.data.provider || 'kokoro',
+      durationMs: ttsRes.data.duration_ms || 1200,
+      fallbackUsed: ttsRes.data.fallback_used || false,
+      routingReason: ttsRes.data.routing_reason || 'capability_match',
       candidates: ttsRes.data.candidates_considered || 3,
       requestId: ttsRes.data.request_id || ttsReqId,
       preWarmSavingMs: preWarmSavingMs.current || 2400
@@ -98,7 +107,7 @@ export function usePipeline() {
     setPhase({ status: 'done', chat: chatResult, tts: ttsResult, totalMs: Date.now() - startedAt, evictions: evictionsCount.current || 0 });
   }, []);
 
-  const start = useCallback(async (article: string, options: { systemPrompt: string; voice: string }) => {
+  const start = useCallback(async (article: string, options: { systemPrompt: string; voice: string; locality?: 'local' | 'cloud' | 'auto'; model?: string | null }) => {
     evictionsCount.current = 0;
     preWarmSavingMs.current = 0;
     const startedAt = Date.now();
@@ -111,7 +120,8 @@ export function usePipeline() {
     // Step 1: Chat
     const chatRes = await engine.invoke({
       capability: 'chat' as any,
-      model: null,
+      model: options.model || null,
+      locality: options.locality || null,
       messages: [
         { role: 'system', content: options.systemPrompt },
         { role: 'user', content: article }
@@ -128,21 +138,28 @@ export function usePipeline() {
       return;
     }
 
-    if (!chatRes.data.text) {
+    const finalScript = chatRes.data?.text || '';
+    if (!finalScript || !finalScript.trim()) {
       setPhase({ status: 'error', failedStep: 'chat', error: { error: 'EmptyScript', detail: 'The model returned an empty script.' } });
       return;
     }
 
+    const providerLower = (chatRes.data?.provider || '').toLowerCase();
+    const isCloud = providerLower === 'fireworks' || providerLower === 'openai' || providerLower === 'deepseek' || providerLower === 'anthropic';
+    const tokens = chatRes.data?.tokens_used || finalScript.split(/\s+/).length * 2;
+    const costUsd = isCloud ? (tokens / 1000) * 0.0018 : 0;
+
     const chatResult: ChatResult = {
-      script: chatRes.data.text,
-      model: chatRes.data.model_used,
-      provider: chatRes.data.provider,
-      durationMs: chatRes.data.duration_ms,
-      tokens: chatRes.data.tokens_used,
-      fallbackUsed: chatRes.data.fallback_used,
-      routingReason: chatRes.data.routing_reason,
-      candidates: chatRes.data.candidates_considered || 3,
-      requestId: chatRes.data.request_id || chatReqId
+      script: finalScript,
+      model: chatRes.data?.model_used || options.model || 'local',
+      provider: chatRes.data?.provider || (options.locality === 'cloud' ? 'fireworks' : 'ollama'),
+      durationMs: chatRes.data?.duration_ms || (Date.now() - startedAt),
+      tokens: tokens,
+      fallbackUsed: chatRes.data?.fallback_used || false,
+      routingReason: chatRes.data?.routing_reason || 'capability_match',
+      candidates: chatRes.data?.candidates_considered || 3,
+      requestId: chatRes.data?.request_id || chatReqId,
+      costUsd
     };
     
     currentScript.current = chatResult.script;

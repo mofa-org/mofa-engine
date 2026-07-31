@@ -71,10 +71,10 @@ export function ResultView({ phase, onReset }: ResultViewProps) {
         </div>
 
       <div className="mb-6 min-h-[80px]">
-        <Suspense fallback={<div className="w-full h-[80px] bg-black/5 rounded-[var(--radius-card)] animate-pulse" />}>
+        <Suspense fallback={<div className="w-full h-[80px] bg-background-hover rounded-[var(--radius-card)] animate-pulse" />}>
           <AudioPlayer filename={tts.audioFilename}>
             <div className="flex justify-center -mt-6 relative z-10 mb-4">
-              <div className="px-4 py-2 bg-background-secondary/80 backdrop-blur-md border border-black/5 rounded-full flex items-center gap-3 text-[11px] font-medium text-text-secondary shadow-sm">
+              <div className="px-4 py-2 bg-background-secondary/80 backdrop-blur-md border border-border-subtle rounded-full flex items-center gap-3 text-[11px] font-medium text-text-secondary shadow-sm">
                 <span className="text-text-primary uppercase tracking-widest font-semibold mr-1">Engine Scoreboard:</span>
                 <span className="flex items-center gap-1"><Shuffle className="w-3.5 h-3.5 text-accent-blue" /> 2 routing decisions</span>
                 <span className="text-black/20">·</span>
@@ -96,8 +96,8 @@ export function ResultView({ phase, onReset }: ResultViewProps) {
       {/* Intelligence Showcase */}
       <div className="mb-6">
         <div className="text-[13px] font-medium text-text-secondary mb-3 pl-1 uppercase tracking-wider">How it was made</div>
-        <Card className="p-0 border-black/10 overflow-hidden text-[13px] font-mono shadow-sm">
-          <div className="p-4 flex items-center justify-between border-b border-black/5 bg-black/5">
+        <Card className="p-0 border-border-strong overflow-hidden text-[13px] font-mono shadow-sm">
+          <div className="p-4 flex items-center justify-between border-b border-border-subtle bg-background-hover">
             <div className="flex items-center gap-3">
               <span className="w-5 h-5 rounded-full bg-background-primary flex items-center justify-center text-[10px] text-text-dim">1</span>
               <span className="text-text-primary">Translate</span>
@@ -111,7 +111,7 @@ export function ResultView({ phase, onReset }: ResultViewProps) {
             </div>
           </div>
           
-          <div className="p-4 flex items-center justify-between border-b border-black/5 bg-black/[0.02]">
+          <div className="p-4 flex items-center justify-between border-b border-border-subtle bg-background-hover">
             <div className="flex items-center gap-3">
               <span className="w-5 h-5 rounded-full bg-background-primary flex items-center justify-center text-[10px] text-text-dim">2</span>
               <span className="text-text-primary">Synthesize</span>
@@ -136,7 +136,7 @@ export function ResultView({ phase, onReset }: ResultViewProps) {
             </div>
           )}
           
-          <div className="p-3 bg-black/5 flex items-center gap-2 text-text-secondary"> 
+          <div className="p-3 bg-background-hover flex items-center gap-2 text-text-secondary"> 
              <Shuffle className="w-4 h-4" />
              {['ollama', 'kokoro'].includes(chat.provider) && ['ollama', 'kokoro'].includes(tts.provider) ? (
                <span>Routed locally · no cloud · $0.00 cost</span>

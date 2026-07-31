@@ -62,7 +62,7 @@ export function InlineError({ descriptor, onAction }: InlineErrorProps) {
             </p>
             
             {descriptor.snippet && (
-              <div className="mb-4 bg-black/40 border border-white/5 rounded-md p-3 flex justify-between items-center group">
+              <div className="mb-4 bg-background-secondary border border-border-subtle rounded-md p-3 flex justify-between items-center group">
                 <code className="text-[13px] font-mono text-accent-cyan/80 select-all">
                   {descriptor.snippet}
                 </code>
@@ -79,7 +79,7 @@ export function InlineError({ descriptor, onAction }: InlineErrorProps) {
               <Button 
                 variant="secondary" 
                 onClick={() => onAction(descriptor.actionCode)}
-                className="bg-white/5 hover:bg-white/10 border-white/10"
+                className="bg-white/5 hover:bg-white/10 border-border-strong"
               >
                 {descriptor.actionLabel}
               </Button>

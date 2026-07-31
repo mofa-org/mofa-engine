@@ -3,7 +3,7 @@ import { cn } from '../lib/utils';
 import { Capability } from '../engine/types';
 
 interface BadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
-  variant?: 'blue' | 'purple' | 'cyan' | 'yellow' | 'green' | 'default';
+  variant?: 'blue' | 'purple' | 'cyan' | 'yellow' | 'green' | 'red' | 'default';
   capability?: Capability;
 }
 
@@ -31,7 +31,8 @@ export function Badge({ className, variant = 'default', capability, children, ..
         finalVariant === 'cyan' && 'bg-accent-cyan/10 text-accent-cyan border-accent-cyan/20',
         finalVariant === 'yellow' && 'bg-accent-yellow/10 text-accent-yellow border-accent-yellow/20',
         finalVariant === 'green' && 'bg-accent-green/10 text-accent-green border-accent-green/20',
-        finalVariant === 'default' && 'bg-background-secondary text-text-secondary border-white/10',
+        finalVariant === 'red' && 'bg-accent-red/10 text-accent-red border-accent-red/20',
+        finalVariant === 'default' && 'bg-background-secondary text-text-secondary border-border-strong',
         className
       )}
       {...props}

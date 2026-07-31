@@ -2,21 +2,27 @@
 @import "tailwindcss";
 
 @theme {
-  --color-background-primary: #ffffff;
-  --color-background-secondary: #f4f4f5;
+  --color-background-primary: #0a0a0a;
+  --color-background-secondary: #141414;
+  --color-background-card: #111111;
+  --color-background-hover: #1f1f1f;
   
-  --color-text-primary: #09090b;
-  --color-text-secondary: #52525b;
-  --color-text-dim: #a1a1aa;
+  --color-text-primary: #ffffff;
+  --color-text-secondary: #a1a1aa;
+  --color-text-dim: #71717a;
   
-  --color-accent-blue: #2563eb;
-  --color-accent-cyan: #0891b2;
-  --color-accent-green: #059669;
-  --color-accent-yellow: #d97706;
-  --color-accent-red: #dc2626;
-  --color-accent-purple: #7c3aed;
+  --color-brand: #eab308;
+  --color-border-subtle: #27272a;
+  --color-border-strong: #3f3f46;
 
-  --radius-card: 10px;
+  --color-accent-blue: #3b82f6;
+  --color-accent-cyan: #06b6d4;
+  --color-accent-green: #10b981;
+  --color-accent-yellow: #f59e0b;
+  --color-accent-red: #ef4444;
+  --color-accent-purple: #8b5cf6;
+
+  --radius-card: 8px;
   --radius-small: 6px;
 
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
@@ -24,13 +30,45 @@
 }
 
 @layer base {
+  :root {
+    color-scheme: dark;
+  }
+
   body {
     @apply bg-background-primary text-text-primary font-sans antialiased;
     margin: 0;
   }
   
   *:focus-visible {
-    @apply outline-none ring-2 ring-accent-cyan ring-offset-2 ring-offset-background-primary;
+    @apply outline-none ring-2 ring-brand ring-offset-2 ring-offset-background-primary;
+  }
+
+  /* Custom Webkit Scrollbar */
+  ::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+  }
+  
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-border-strong);
+    border: 3px solid transparent;
+    background-clip: content-box;
+    border-radius: 9999px;
+  }
+  
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-text-dim);
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+
+  /* Firefox Scrollbar */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-border-strong) transparent;
   }
 }
-

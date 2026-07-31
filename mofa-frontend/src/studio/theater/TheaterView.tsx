@@ -22,7 +22,7 @@ export function TheaterView({ phase, onRetryTts, onReset }: TheaterViewProps) {
   const elapsed = useElapsed(startedAt, phase.status !== 'error' && phase.status !== 'done');
   
   const isTranslating = phase.status === 'translating';
-  const isSynthesizing = phase.status === 'synthesizing' || (phase.status === 'error' && phase.failedStep === 'tts');
+  const isSynthesizing = phase.status === 'synthesizing';
   const isChatDone = phase.status === 'translated' || phase.status === 'synthesizing' || phase.status === 'done' || (phase.status === 'error' && phase.failedStep === 'tts');
   
   const chatResult = (phase as any).chat;
@@ -68,8 +68,8 @@ export function TheaterView({ phase, onRetryTts, onReset }: TheaterViewProps) {
       {/* Zone C: Panels */}
       <div className="flex gap-6 flex-1 min-h-0">
         {/* Left: Events */}
-        <Card className="w-[300px] flex flex-col min-h-0 bg-background-secondary border-black/5 shadow-sm p-0 overflow-hidden shrink-0">
-          <div className="p-3 border-b border-black/5 flex items-center gap-2 bg-background-primary/50 shrink-0">
+        <Card className="w-[300px] flex flex-col min-h-0 bg-background-secondary border-border-subtle shadow-sm p-0 overflow-hidden shrink-0">
+          <div className="p-3 border-b border-border-subtle flex items-center gap-2 bg-background-primary/50 shrink-0">
             <TerminalSquare className="w-4 h-4 text-accent-cyan" />
             <h3 className="text-[11px] font-semibold uppercase tracking-widest text-text-dim">Engine Events</h3>
           </div>
@@ -79,19 +79,28 @@ export function TheaterView({ phase, onRetryTts, onReset }: TheaterViewProps) {
         </Card>
 
         {/* Right: Script */}
-        <Card className="flex-1 flex flex-col min-h-0 bg-white border-black/5 shadow-sm p-0 overflow-hidden">
-           <div className="p-4 border-b border-black/5 flex items-center justify-between bg-background-secondary/50 shrink-0">
+        <Card className="flex-1 flex flex-col min-h-0 bg-background-card border-border-subtle shadow-sm p-0 overflow-hidden">
+           <div className="p-4 border-b border-border-subtle flex items-center justify-between bg-background-secondary/50 shrink-0">
              <h3 className="text-[13px] font-medium text-text-primary tracking-wide">
                {isChatDone ? 'SCRIPT READY ✓' : 'TRANSLATING...'}
              </h3>
            </div>
            <div className="flex-1 p-6 overflow-y-auto">
              {!isChatDone ? (
-               <div className="space-y-4 max-w-2xl mx-auto">
-                 {[...Array(6)].map((_, i) => (
-                   <div key={i} className={`h-4 bg-black/5 rounded animate-pulse w-${['3/4', 'full', '5/6', 'full', '2/3', '1/2'][i]}`} />
-                 ))}
-               </div>
+               (phase as any).partialScript ? (
+                 <motion.div 
+                   initial={{ opacity: 0 }} animate={{ opacity: 1 }} 
+                   className="text-[15px] leading-loose text-text-primary/90 font-sans max-w-2xl mx-auto"
+                 >
+                   {(phase as any).partialScript}
+                 </motion.div>
+               ) : (
+                 <div className="space-y-4 max-w-2xl mx-auto">
+                   {[...Array(6)].map((_, i) => (
+                     <div key={i} className={`h-4 bg-background-hover rounded animate-pulse w-${['3/4', 'full', '5/6', 'full', '2/3', '1/2'][i]}`} />
+                   ))}
+                 </div>
+               )
              ) : (
                <motion.div 
                  initial={{ opacity: 0 }} animate={{ opacity: 1 }} 

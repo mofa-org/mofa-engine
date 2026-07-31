@@ -44,7 +44,7 @@ export function PreflightIndicator() {
   }, []);
 
   return (
-    <div className="p-3 bg-black/[0.02] border border-black/5 rounded-md flex items-center justify-center min-h-[44px]">
+    <div className="p-3 bg-background-hover border border-border-subtle rounded-md flex items-center justify-center min-h-[44px]">
       {status.type === 'idle' ? (
         <div className="flex items-center gap-2 text-text-dim text-[11px] uppercase tracking-wider font-medium">
           <CheckCircle2 className="w-3.5 h-3.5" />

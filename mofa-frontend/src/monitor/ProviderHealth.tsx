@@ -18,7 +18,7 @@ export function ProviderHealth() {
         const isHalfOpen = state === 'halfopen' || state === 'half_open';
         
         return (
-          <div key={p.name} className="px-2.5 py-1.5 border-b border-black/[0.03] last:border-0 flex items-center justify-between hover:bg-black/[0.02] transition-colors rounded-sm">
+          <div key={p.name} className="px-2.5 py-1.5 border-b border-border-subtle last:border-0 flex items-center justify-between hover:bg-background-hover transition-colors rounded-sm">
             <div className="flex items-center gap-2">
               {isClosed ? (
                 <ShieldCheck className="w-3.5 h-3.5 text-accent-green" />

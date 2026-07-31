@@ -38,7 +38,7 @@ export function HistoryDrawer({ onSelectResult }: HistoryDrawerProps) {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             onClick={() => setIsOpen(false)}
-            className="fixed inset-0 bg-black/40 backdrop-blur-sm z-40"
+            className="fixed inset-0 bg-background-secondary backdrop-blur-sm z-40"
           />
           <motion.div
             role="dialog"
@@ -48,16 +48,16 @@ export function HistoryDrawer({ onSelectResult }: HistoryDrawerProps) {
             animate={{ x: 0 }}
             exit={{ x: '-100%' }}
             transition={{ duration: 0.3, ease: [0.25, 0.1, 0.25, 1] }}
-            className="fixed left-0 top-0 bottom-0 w-[360px] bg-background-secondary/90 backdrop-blur-xl border-r border-black/10 z-50 flex flex-col shadow-2xl"
+            className="fixed left-0 top-0 bottom-0 w-[360px] bg-background-secondary/90 backdrop-blur-xl border-r border-border-strong z-50 flex flex-col shadow-2xl"
           >
-            <div className="h-16 border-b border-black/5 flex items-center justify-between px-6 shrink-0 bg-background-primary/50">
+            <div className="h-16 border-b border-border-subtle flex items-center justify-between px-6 shrink-0 bg-background-primary/50">
               <div className="flex items-center gap-2 text-text-primary">
                 <History className="w-5 h-5 text-accent-purple" />
                 <h2 className="font-medium text-[15px]">History</h2>
               </div>
               <button 
                 onClick={() => setIsOpen(false)}
-                className="p-2 -mr-2 text-text-secondary hover:text-black rounded-full hover:bg-black/5 transition-colors"
+                className="p-2 -mr-2 text-text-secondary hover:text-black rounded-full hover:bg-background-hover transition-colors"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -83,7 +83,7 @@ export function HistoryDrawer({ onSelectResult }: HistoryDrawerProps) {
                       <div 
                         key={idx}
                         onClick={() => handleSelect(item)}
-                        className="p-4 bg-white border border-black/5 shadow-sm rounded-md cursor-pointer hover:bg-black/5 hover:border-black/10 transition-all group"
+                        className="p-4 bg-background-card border border-border-subtle shadow-sm rounded-md cursor-pointer hover:bg-background-hover hover:border-border-strong transition-all group"
                       >
                         <div className="flex justify-between items-start mb-2">
                           <div className="text-[13px] font-medium text-text-primary line-clamp-1">
@@ -96,7 +96,7 @@ export function HistoryDrawer({ onSelectResult }: HistoryDrawerProps) {
                           <Badge capability="Chat" className="scale-90 origin-left">{item.chat.model}</Badge>
                           <Badge capability="Tts" className="scale-90 origin-left">{item.tts.model}</Badge>
                         </div>
-                        <div className="text-[10px] font-mono text-text-dim mt-2 pt-2 border-t border-black/5 flex justify-between">
+                        <div className="text-[10px] font-mono text-text-dim mt-2 pt-2 border-t border-border-subtle flex justify-between">
                           <span>{formatMs(item.totalMs)}</span>
                           <span>{item.chat.tokens} tokens</span>
                         </div>

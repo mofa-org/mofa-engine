@@ -58,12 +58,14 @@ export interface ModelCard {
 export interface InferenceRequest {
   capability: Capability;
   model: string | null;
+  locality?: 'local' | 'cloud' | 'auto' | null;
   messages: Array<{ role: string; content: string }>;
   hint_next?: string;
   params: Record<string, unknown>;
   app_id: string;
   session_id: string | null;
   fallback_policy: FallbackPolicy;
+  trace_id?: string;
 }
 
 export interface InferenceResponse {
@@ -74,6 +76,8 @@ export interface InferenceResponse {
   duration_ms: number;
   request_id: string;
   tokens_used: number;
+  tokens_cache_hit?: number;
+  tokens_cache_miss?: number;
   fallback_used: boolean;
   routing_reason: string;
   candidates_considered?: number;
@@ -88,7 +92,7 @@ export type EngineResult<T> =
   | { success: true; data: T }
   | { success: false; type: 'network' | 'http'; error: string; detail?: string };
 
-export type EngineEventType = 'RequestStarted' | 'RequestCompleted' | 'ModelStatusChanged' | 'ModelResidencyChanged' | 'MemoryChanged' | 'ProviderHealthChanged' | 'DiscoveryCompleted';
+export type EngineEventType = 'RequestStarted' | 'RequestCompleted' | 'ModelStatusChanged' | 'ModelResidencyChanged' | 'MemoryChanged' | 'ProviderHealthChanged' | 'DiscoveryCompleted' | 'RoutingDecision' | 'FailoverTriggered';
 
 export interface EngineEvent {
   type: EngineEventType;

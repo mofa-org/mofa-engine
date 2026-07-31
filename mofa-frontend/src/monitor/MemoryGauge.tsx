@@ -62,7 +62,7 @@ export function MemoryGauge() {
           {percentage.toFixed(1)}%
         </div>
       </div>
-      <div className="h-2 w-full bg-black/5 rounded-full overflow-hidden">
+      <div className="h-2 w-full bg-background-hover rounded-full overflow-hidden">
         <div 
           className={`h-full ${colorClass} transition-all duration-1000 ease-out`}
           style={{ width: `${percentage}%` }}
