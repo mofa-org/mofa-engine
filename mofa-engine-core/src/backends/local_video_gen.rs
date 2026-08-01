@@ -1,29 +1,34 @@
-//! Local image-generation process-adapter backend.
+//! Local video-generation process-adapter backend.
 //!
-//! Runs a configured local command — a Stable Diffusion CLI (e.g. `sd`/sd.cpp,
-//! `mflux`, or a wrapper script) — to render an image from a text prompt,
-//! returning the produced file as a managed artifact. This is the flagship S4
-//! enabler for **fully offline** operation: with a local SD backend, an explainer
-//! video's scene images can be generated on-device (`prefer=local`, cost ≈ $0)
-//! rather than falling back to a cloud image API.
+//! Runs a configured local command — a text-to-video CLI (e.g. an AnimateDiff /
+//! Stable-Video-Diffusion wrapper, or a `Wan`/`mochi`-style generator) — to
+//! render a short clip from a text prompt, returning the produced file as a
+//! managed artifact. This completes the S4 Creative Generation track: with a
+//! local backend an explainer clip can be generated on-device (`prefer=local`,
+//! cost ≈ $0); liter-llm exposes no video endpoint, so unlike image generation
+//! there is no cloud fallback and this local adapter is the whole path.
 //!
 //! Device- and runtime-specific concerns stay behind this `Provider` boundary,
-//! so the engine treats a local image-gen model like any other backend: it is
-//! discovered, memory-managed, warmed, idle-unloaded, and can fail over to a
-//! cloud image backend (via liter-llm) when the local one is unavailable.
+//! so the engine treats a local video-gen model like any other backend: it is
+//! discovered, memory-managed, warmed, and idle-unloaded. Because generation is
+//! typically slow, an operator should size the `inference_secs` timeout
+//! accordingly; the child is spawned with `kill_on_drop(true)` so a timeout that
+//! drops the future terminates the render rather than leaking it.
 //!
 //! ## Command contract
 //!
-//! The command is spawned once per image (a cold, stateless process). Argument
+//! The command is spawned once per clip (a cold, stateless process). Argument
 //! templates may contain:
 //!   - `{prompt}` — the text prompt (required),
-//!   - `{output}` — path the command must write the image to (required),
+//!   - `{output}` — path the command must write the video to (required),
 //!   - `{negative_prompt}` — from `params.negative_prompt` (default empty),
-//!   - `{width}` / `{height}` — parsed from `params.size` (e.g. `"1024x1024"`,
-//!     the default), or `params.width` / `params.height`.
+//!   - `{width}` / `{height}` — from `params.size` (`"WxH"`) or
+//!     `params.width` / `params.height` (default 512×512),
+//!   - `{seconds}` — target duration from `params.seconds` (default 4),
+//!   - `{fps}` — target frame rate from `params.fps` (default 16).
 //!
-//! Child processes are spawned with `kill_on_drop(true)`, so an inference timeout
-//! that drops the future terminates the render rather than leaking it.
+//! The produced clip should be verified with the [`quality_gate`](crate::quality_gate)
+//! before it is presented as a finished S4 artifact ("no gate, no output").
 
 use std::path::{Path, PathBuf};
 
@@ -37,19 +42,23 @@ use tokio::process::Command;
 
 use crate::config::ModelDef;
 
-/// Default output image dimensions when a request does not specify a size.
-const DEFAULT_EDGE: u32 = 1024;
+/// Default output dimensions when a request does not specify a size.
+const DEFAULT_EDGE: u32 = 512;
+/// Default clip length in seconds.
+const DEFAULT_SECONDS: u32 = 4;
+/// Default frame rate.
+const DEFAULT_FPS: u32 = 16;
 
-/// A process-adapter provider that shells out to a local image-generation command.
-pub(crate) struct LocalImageGenProvider {
+/// A process-adapter provider that shells out to a local video-generation command.
+pub(crate) struct LocalVideoGenProvider {
     /// Display name.
     name: String,
-    /// Program to execute per image.
+    /// Program to execute per clip.
     command: String,
     /// Argument template with `{prompt}`, `{output}`, `{negative_prompt}`,
-    /// `{width}`, and `{height}` placeholders.
+    /// `{width}`, `{height}`, `{seconds}`, and `{fps}` placeholders.
     args: Vec<String>,
-    /// Output image extension/container (e.g. `png`, `jpg`).
+    /// Output video extension/container (e.g. `mp4`, `webm`).
     output_format: String,
     /// Directory for generated artifacts.
     output_dir: PathBuf,
@@ -57,8 +66,8 @@ pub(crate) struct LocalImageGenProvider {
     models: Vec<ModelDef>,
 }
 
-impl LocalImageGenProvider {
-    /// Create a new local image-generation process adapter.
+impl LocalVideoGenProvider {
+    /// Create a new local video-generation process adapter.
     pub(crate) fn new(
         name: impl Into<String>,
         command: impl Into<String>,
@@ -73,7 +82,7 @@ impl LocalImageGenProvider {
             args,
             output_format: output_format
                 .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "png".into()),
+                .unwrap_or_else(|| "mp4".into()),
             output_dir: output_dir
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from)
@@ -102,9 +111,9 @@ impl LocalImageGenProvider {
         })
     }
 
-    /// Resolve the argument template for one render, substituting the prompt,
-    /// output path, negative prompt, and dimensions. Pure over the configured
+    /// Resolve the argument template for one render. Pure over the configured
     /// template, so placeholder wiring is unit-testable without spawning.
+    #[allow(clippy::too_many_arguments)]
     fn resolve_args(
         &self,
         prompt: &str,
@@ -112,6 +121,8 @@ impl LocalImageGenProvider {
         negative_prompt: &str,
         width: u32,
         height: u32,
+        seconds: u32,
+        fps: u32,
     ) -> Vec<String> {
         self.args
             .iter()
@@ -121,6 +132,8 @@ impl LocalImageGenProvider {
                     .replace("{negative_prompt}", negative_prompt)
                     .replace("{width}", &width.to_string())
                     .replace("{height}", &height.to_string())
+                    .replace("{seconds}", &seconds.to_string())
+                    .replace("{fps}", &fps.to_string())
             })
             .collect()
     }
@@ -143,23 +156,33 @@ impl LocalImageGenProvider {
                     .map(String::from)
             })
             .filter(|t| !t.trim().is_empty())
-            .ok_or_else(|| EngineError::InvalidRequest("image_gen requires a prompt".into()))?;
+            .ok_or_else(|| EngineError::InvalidRequest("video_gen requires a prompt".into()))?;
 
         let negative_prompt = request
             .params
             .get("negative_prompt")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let (width, height) = Self::image_dimensions(&request.params);
+        let (width, height) = Self::dimensions(&request.params);
+        let seconds = Self::positive_u32(&request.params, "seconds").unwrap_or(DEFAULT_SECONDS);
+        let fps = Self::positive_u32(&request.params, "fps").unwrap_or(DEFAULT_FPS);
 
         let output_path = self.output_dir.join(format!(
-            "mofa_img_{}.{}",
+            "mofa_video_{}.{}",
             uuid::Uuid::new_v4(),
             self.output_format
         ));
         let output_str = output_path.to_string_lossy().to_string();
 
-        let resolved_args = self.resolve_args(&prompt, &output_str, negative_prompt, width, height);
+        let resolved_args = self.resolve_args(
+            &prompt,
+            &output_str,
+            negative_prompt,
+            width,
+            height,
+            seconds,
+            fps,
+        );
 
         let result = Command::new(&self.command)
             .args(&resolved_args)
@@ -178,21 +201,21 @@ impl LocalImageGenProvider {
             return Err(EngineError::ProviderError {
                 provider: self.name.clone(),
                 detail: format!(
-                    "image_gen command exited with {}: {}",
+                    "video_gen command exited with {}: {}",
                     output.status,
                     stderr.trim()
                 ),
             });
         }
 
-        // A successful exit must have produced a non-empty image file.
+        // A successful exit must have produced a non-empty video file.
         match tokio::fs::metadata(&output_path).await {
             Ok(meta) if meta.len() > 0 => {}
             _ => {
                 let _ = tokio::fs::remove_file(&output_path).await;
                 return Err(EngineError::ProviderError {
                     provider: self.name.clone(),
-                    detail: "image_gen command produced no image output".into(),
+                    detail: "video_gen command produced no video output".into(),
                 });
             }
         }
@@ -212,12 +235,11 @@ impl LocalImageGenProvider {
     }
 }
 
-/// Pure image-size parsing, grouped as private associated functions.
-impl LocalImageGenProvider {
-    /// Requested image dimensions from a request's `params`, accepting a combined
-    /// `size` (`"WxH"`) or explicit `width`/`height`, and falling back to a square
-    /// [`DEFAULT_EDGE`].
-    fn image_dimensions(params: &serde_json::Value) -> (u32, u32) {
+/// Pure parameter parsing, grouped as private associated functions.
+impl LocalVideoGenProvider {
+    /// Requested dimensions from `params`, accepting a combined `size` (`"WxH"`)
+    /// or explicit `width`/`height`, falling back to a square [`DEFAULT_EDGE`].
+    fn dimensions(params: &serde_json::Value) -> (u32, u32) {
         if let Some((w, h)) = params
             .get("size")
             .and_then(|v| v.as_str())
@@ -225,16 +247,9 @@ impl LocalImageGenProvider {
         {
             return (w, h);
         }
-        let as_edge = |key: &str| {
-            params
-                .get(key)
-                .and_then(serde_json::Value::as_u64)
-                .filter(|v| *v > 0)
-                .map(|v| v as u32)
-        };
         (
-            as_edge("width").unwrap_or(DEFAULT_EDGE),
-            as_edge("height").unwrap_or(DEFAULT_EDGE),
+            Self::positive_u32(params, "width").unwrap_or(DEFAULT_EDGE),
+            Self::positive_u32(params, "height").unwrap_or(DEFAULT_EDGE),
         )
     }
 
@@ -246,16 +261,25 @@ impl LocalImageGenProvider {
         let h: u32 = h.trim().parse().ok()?;
         (w > 0 && h > 0).then_some((w, h))
     }
+
+    /// Read a strictly-positive `u32` from a params key, or `None`.
+    fn positive_u32(params: &serde_json::Value, key: &str) -> Option<u32> {
+        params
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .filter(|v| *v > 0)
+            .map(|v| v as u32)
+    }
 }
 
 #[async_trait]
-impl Provider for LocalImageGenProvider {
+impl Provider for LocalVideoGenProvider {
     fn name(&self) -> &str {
         &self.name
     }
 
     fn kind(&self) -> ProviderKind {
-        ProviderKind::LocalImageGen
+        ProviderKind::LocalVideoGen
     }
 
     fn features(&self) -> Vec<BackendFeature> {
@@ -299,7 +323,7 @@ impl Provider for LocalImageGenProvider {
         if self.resolve_program().is_none() {
             return Err(EngineError::ProviderError {
                 provider: self.name.clone(),
-                detail: format!("image_gen command '{}' not found", self.command),
+                detail: format!("video_gen command '{}' not found", self.command),
             });
         }
         let model_name = ModelId::name(model_id);
@@ -332,17 +356,17 @@ impl Provider for LocalImageGenProvider {
         request: &InferenceRequest,
     ) -> Result<InferenceResponse, EngineError> {
         let model_name = ModelId::name(model_id);
-        let capability = request.capability.unwrap_or(Capability::ImageGen);
+        let capability = request.capability.unwrap_or(Capability::VideoGen);
 
-        if capability != Capability::ImageGen {
+        if capability != Capability::VideoGen {
             return Err(EngineError::UnsupportedOperation(format!(
-                "provider '{}' only supports image_gen, not {capability}",
+                "provider '{}' only supports video_gen, not {capability}",
                 self.name
             )));
         }
-        if !self.model_supports(model_name, Capability::ImageGen) {
+        if !self.model_supports(model_name, Capability::VideoGen) {
             return Err(EngineError::UnsupportedOperation(format!(
-                "provider '{}' model '{model_name}' does not support image_gen",
+                "provider '{}' model '{model_name}' does not support video_gen",
                 self.name
             )));
         }
@@ -357,19 +381,19 @@ mod tests {
     use super::*;
     use mofa_kernel::Message;
 
-    fn img_models() -> Vec<ModelDef> {
+    fn video_models() -> Vec<ModelDef> {
         vec![ModelDef {
             name: "fixture".into(),
-            capability: "image_gen".into(),
+            capability: "video_gen".into(),
             context_window: None,
-            memory_mb: Some(2048),
+            memory_mb: Some(4096),
             ..Default::default()
         }]
     }
 
-    fn img_request(prompt: &str) -> InferenceRequest {
+    fn video_request(prompt: &str) -> InferenceRequest {
         InferenceRequest {
-            capability: Some(Capability::ImageGen),
+            capability: Some(Capability::VideoGen),
             messages: vec![Message {
                 role: "user".into(),
                 content: prompt.into(),
@@ -382,117 +406,117 @@ mod tests {
 
     #[test]
     fn metadata_and_defaults() {
-        let p = LocalImageGenProvider::new("local-sd", "sh", vec![], None, None, img_models());
-        assert_eq!(p.kind(), ProviderKind::LocalImageGen);
+        let p = LocalVideoGenProvider::new("local-video", "sh", vec![], None, None, video_models());
+        assert_eq!(p.kind(), ProviderKind::LocalVideoGen);
         assert!(p.kind().is_local());
-        assert_eq!(p.output_format, "png");
+        assert_eq!(p.output_format, "mp4");
     }
 
     #[test]
-    fn parse_size_and_dimensions() {
+    fn dimensions_and_positive_params() {
         assert_eq!(
-            LocalImageGenProvider::parse_size("1024x768"),
-            Some((1024, 768))
-        );
-        assert_eq!(
-            LocalImageGenProvider::parse_size("512X512"),
-            Some((512, 512))
-        );
-        assert_eq!(LocalImageGenProvider::parse_size("bad"), None);
-        assert_eq!(LocalImageGenProvider::parse_size("0x100"), None);
-
-        // size wins; else width/height; else the square default.
-        assert_eq!(
-            LocalImageGenProvider::image_dimensions(&serde_json::json!({ "size": "640x480" })),
+            LocalVideoGenProvider::dimensions(&serde_json::json!({ "size": "640x480" })),
             (640, 480)
         );
         assert_eq!(
-            LocalImageGenProvider::image_dimensions(
-                &serde_json::json!({ "width": 256, "height": 128 })
-            ),
+            LocalVideoGenProvider::dimensions(&serde_json::json!({ "width": 256, "height": 128 })),
             (256, 128)
         );
         assert_eq!(
-            LocalImageGenProvider::image_dimensions(&serde_json::Value::Null),
+            LocalVideoGenProvider::dimensions(&serde_json::Value::Null),
             (DEFAULT_EDGE, DEFAULT_EDGE)
+        );
+        // Zero is rejected as non-positive and falls back to the default.
+        assert_eq!(
+            LocalVideoGenProvider::positive_u32(&serde_json::json!({ "fps": 0 }), "fps"),
+            None
+        );
+        assert_eq!(
+            LocalVideoGenProvider::positive_u32(&serde_json::json!({ "fps": 24 }), "fps"),
+            Some(24)
         );
     }
 
     #[test]
     fn resolve_args_substitutes_all_placeholders() {
-        let p = LocalImageGenProvider::new(
-            "local-sd",
-            "sd",
+        let p = LocalVideoGenProvider::new(
+            "local-video",
+            "gen",
             vec![
                 "--prompt".into(),
                 "{prompt}".into(),
-                "--neg".into(),
-                "{negative_prompt}".into(),
                 "-W".into(),
                 "{width}".into(),
                 "-H".into(),
                 "{height}".into(),
+                "--secs".into(),
+                "{seconds}".into(),
+                "--fps".into(),
+                "{fps}".into(),
                 "-o".into(),
                 "{output}".into(),
             ],
             None,
             None,
-            img_models(),
+            video_models(),
         );
-        let args = p.resolve_args("a cat", "/tmp/o.png", "blurry", 1024, 768);
+        let args = p.resolve_args("a rocket", "/tmp/o.mp4", "", 512, 512, 4, 16);
         assert_eq!(
             args,
             vec![
                 "--prompt",
-                "a cat",
-                "--neg",
-                "blurry",
+                "a rocket",
                 "-W",
-                "1024",
+                "512",
                 "-H",
-                "768",
+                "512",
+                "--secs",
+                "4",
+                "--fps",
+                "16",
                 "-o",
-                "/tmp/o.png"
+                "/tmp/o.mp4"
             ]
         );
     }
 
     #[tokio::test]
-    async fn generates_image_artifact_via_fixture_command() {
+    async fn generates_video_artifact_via_fixture_command() {
         let dir = tempfile::tempdir().unwrap();
-        // A deterministic "SD" fixture: write the prompt + size into the output
-        // path, proving prompt/size placeholders reached the command.
-        let p = LocalImageGenProvider::new(
-            "local-sd",
+        // A deterministic "generator" fixture: write the prompt + geometry to the
+        // output path, proving the placeholders reached the command.
+        let p = LocalVideoGenProvider::new(
+            "local-video",
             "sh",
             vec![
                 "-c".into(),
-                "printf 'PNG:%s:%sx%s' \"$1\" \"$2\" \"$3\" > \"$4\"".into(),
+                "printf 'MP4:%s:%sx%s@%s' \"$1\" \"$2\" \"$3\" \"$4\" > \"$5\"".into(),
                 "sh".into(),
                 "{prompt}".into(),
                 "{width}".into(),
                 "{height}".into(),
+                "{fps}".into(),
                 "{output}".into(),
             ],
-            Some("png".into()),
+            Some("mp4".into()),
             Some(dir.path().to_string_lossy().to_string()),
-            img_models(),
+            video_models(),
         );
 
-        let mut req = img_request("a neuron");
-        req.params = serde_json::json!({ "size": "512x512" });
-        let resp = p.invoke("local-sd/fixture", &req).await.unwrap();
-        let file = resp.file.expect("an image artifact path");
-        assert!(file.ends_with(".png"));
+        let mut req = video_request("a neuron firing");
+        req.params = serde_json::json!({ "size": "320x240", "fps": 24 });
+        let resp = p.invoke("local-video/fixture", &req).await.unwrap();
+        let file = resp.file.expect("a video artifact path");
+        assert!(file.ends_with(".mp4"));
         let produced = std::fs::read_to_string(&file).unwrap();
-        assert_eq!(produced, "PNG:a neuron:512x512");
+        assert_eq!(produced, "MP4:a neuron firing:320x240@24");
     }
 
     #[tokio::test]
     async fn empty_prompt_is_invalid_request() {
-        let p = LocalImageGenProvider::new("local-sd", "sh", vec![], None, None, img_models());
+        let p = LocalVideoGenProvider::new("local-video", "sh", vec![], None, None, video_models());
         let err = p
-            .invoke("local-sd/fixture", &img_request("   "))
+            .invoke("local-video/fixture", &video_request("   "))
             .await
             .unwrap_err();
         assert!(matches!(err, EngineError::InvalidRequest(_)));
@@ -501,29 +525,28 @@ mod tests {
     #[tokio::test]
     async fn command_failure_is_a_retryable_provider_error() {
         let dir = tempfile::tempdir().unwrap();
-        let p = LocalImageGenProvider::new(
-            "local-sd",
+        let p = LocalVideoGenProvider::new(
+            "local-video",
             "sh",
-            vec!["-c".into(), "echo boom >&2; exit 5".into()],
+            vec!["-c".into(), "echo boom >&2; exit 7".into()],
             None,
             Some(dir.path().to_string_lossy().to_string()),
-            img_models(),
+            video_models(),
         );
         let err = p
-            .invoke("local-sd/fixture", &img_request("x"))
+            .invoke("local-video/fixture", &video_request("x"))
             .await
             .unwrap_err();
         assert!(matches!(err, EngineError::ProviderError { .. }));
-        // Retryable so the engine can fail over to a cloud image backend.
         assert!(err.retryable());
     }
 
     #[tokio::test]
     async fn rejects_unsupported_capability() {
-        let p = LocalImageGenProvider::new("local-sd", "sh", vec![], None, None, img_models());
-        let mut req = img_request("x");
+        let p = LocalVideoGenProvider::new("local-video", "sh", vec![], None, None, video_models());
+        let mut req = video_request("x");
         req.capability = Some(Capability::Chat);
-        let err = p.invoke("local-sd/fixture", &req).await.unwrap_err();
+        let err = p.invoke("local-video/fixture", &req).await.unwrap_err();
         assert!(matches!(err, EngineError::UnsupportedOperation(_)));
     }
 }

@@ -102,6 +102,78 @@ paths:
             text/event-stream:
               schema:
                 $ref: "#/components/schemas/StreamChunk"
+  /v1/responses:
+    post:
+      summary: One turn of the stateful Responses API (multi-turn deep reasoning)
+      description: >
+        Runs one conversation turn. The engine stores the running message history
+        keyed by the returned `id`; continue the conversation by sending that id
+        as `previous_response_id` on the next turn instead of resending history.
+        The body is a superset of InferenceRequest (all routing knobs apply) plus
+        `previous_response_id`, `instructions` (system prompt for a new
+        conversation), and `input` (a single-user-message shorthand).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResponsesRequest"
+      responses:
+        "200":
+          description: The reply plus the conversation id to continue from.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResponsesResponse"
+        "400":
+          description: No input, or an unknown/expired previous_response_id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorInfo"
+        "404":
+          description: No model satisfies the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorInfo"
+  /v1/responses/{id}:
+    get:
+      summary: Stored message history for a conversation
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The stored messages, in order.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Message"
+        "404":
+          description: Unknown conversation id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorInfo"
+    delete:
+      summary: Forget a stored conversation
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The conversation was removed.
+        "404":
+          description: Unknown conversation id.
   /v1/memory:
     get:
       summary: Current memory accounting (budget, reservations, leases)
@@ -355,6 +427,46 @@ components:
             URLs, or local file paths. Omitted for text-only messages.
           items:
             type: string
+    ResponsesRequest:
+      type: object
+      description: >
+        A superset of InferenceRequest for the stateful Responses API. All
+        InferenceRequest fields apply (flattened at the top level); the fields
+        below are additional.
+      allOf:
+        - $ref: "#/components/schemas/InferenceRequest"
+        - type: object
+          properties:
+            previous_response_id:
+              type: string
+              nullable: true
+              description: >
+                Continue the conversation stored under this prior response id.
+                Omit to start a new conversation; an unknown id is a 400.
+            instructions:
+              type: string
+              nullable: true
+              description: System prompt, applied only when starting a new conversation.
+            input:
+              type: string
+              nullable: true
+              description: Shorthand for a single new user message this turn.
+    ResponsesResponse:
+      type: object
+      description: >
+        A superset of InferenceResponse: the same fields plus the conversation
+        `id` and `message_count`.
+      allOf:
+        - $ref: "#/components/schemas/InferenceResponse"
+        - type: object
+          required: [id, message_count]
+          properties:
+            id:
+              type: string
+              description: Id of this response; pass as previous_response_id to continue.
+            message_count:
+              type: integer
+              description: Total messages now stored in the conversation.
     InferenceResponse:
       type: object
       properties:
@@ -362,6 +474,16 @@ components:
           type: [string, "null"]
         file:
           type: [string, "null"]
+          description: Output file path (TTS, image gen, video gen).
+        embedding:
+          type: [array, "null"]
+          description: >
+            Embedding vectors for the `embedding` capability — one row per input,
+            in input order. Omitted for non-embedding responses.
+          items:
+            type: array
+            items:
+              type: number
         model_used:
           type: string
         provider:

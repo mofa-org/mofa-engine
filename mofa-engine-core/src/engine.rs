@@ -12,17 +12,17 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use mofa_kernel::{
     BackendHealth, BackendStatus, Capability, CostTier, DataClass, EngineError, EngineEvent,
-    EngineStatus, FailedAttempt, FallbackPolicy, InferenceRequest, InferenceResponse, ModelCard,
-    ModelId, ModelResidency, Prefer, Provider, ProviderHealth, ProviderKind, StreamChunk,
-    StreamDelta,
+    EngineStatus, FailedAttempt, FallbackPolicy, InferenceRequest, InferenceResponse, Message,
+    ModelCard, ModelId, ModelResidency, Prefer, Provider, ProviderHealth, ProviderKind,
+    ResponsesRequest, ResponsesResponse, StreamChunk, StreamDelta,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore, broadcast, mpsc};
 use tokio::task::{AbortHandle, JoinHandle};
 
 use crate::backends::{
-    LiterLLMProvider, LocalAsrProvider, LocalImageGenProvider, LocalTtsProvider, OllamaProvider,
-    OpenAiCompatProvider,
+    LiterLLMProvider, LocalAsrProvider, LocalImageGenProvider, LocalTtsProvider,
+    LocalVideoGenProvider, OllamaProvider, OpenAiCompatProvider,
 };
 use crate::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerRegistry, CircuitState};
 use crate::config::{EngineConfig, PreflightConfig, TimeoutConfig};
@@ -37,6 +37,10 @@ const LIFECYCLE_CAPACITY: usize = 256;
 /// Maximum number of in-flight predictions tracked for hit/miss accounting.
 /// Bounds memory against an unbounded stream of unique scope identifiers.
 const MAX_PENDING_PREDICTIONS: usize = 4096;
+/// Maximum number of stored Responses-API conversations. Each continued turn
+/// mints a new id (so a caller can branch from any prior response), so this
+/// bounds total memory by evicting the oldest conversation when full.
+const MAX_CONVERSATIONS: usize = 4096;
 
 #[derive(Clone)]
 struct RegisteredProvider {
@@ -59,6 +63,13 @@ pub struct LifecycleRecord {
     pub event: String,
     /// Optional human-readable detail.
     pub detail: Option<String>,
+}
+
+/// A stored Responses-API conversation: the full running message history and
+/// when it was created (for oldest-first eviction).
+struct StoredConversation {
+    messages: Vec<Message>,
+    created: Instant,
 }
 
 /// A snapshot of the engine's memory accounting.
@@ -96,6 +107,9 @@ pub struct Engine {
     warming: DashMap<String, AbortHandle>,
     /// Per-scope pending prediction awaiting confirmation by the next request.
     pending_predictions: DashMap<String, Capability>,
+    /// Stored Responses-API conversations, keyed by response id. Bounded by
+    /// [`MAX_CONVERSATIONS`] via oldest-first eviction.
+    conversations: DashMap<String, StoredConversation>,
     /// Operation timeouts.
     timeouts: TimeoutConfig,
     /// Preflight configuration.
@@ -282,6 +296,22 @@ impl Engine {
                         pc.models.clone(),
                     ))
                 }
+                ProviderKind::LocalVideoGen => {
+                    let command = pc.command.clone().ok_or_else(|| {
+                        EngineError::Config(format!(
+                            "provider '{}' (local_video_gen) requires a command",
+                            pc.name
+                        ))
+                    })?;
+                    Arc::new(LocalVideoGenProvider::new(
+                        &pc.name,
+                        command,
+                        pc.args.clone(),
+                        pc.output_format.clone(),
+                        pc.output_dir.clone(),
+                        pc.models.clone(),
+                    ))
+                }
                 _ => {
                     return Err(EngineError::Config(format!(
                         "provider '{}' uses unsupported provider kind",
@@ -335,6 +365,7 @@ impl Engine {
             subscriptions: SubscriptionRegistry::new(),
             warming: DashMap::new(),
             pending_predictions: DashMap::new(),
+            conversations: DashMap::new(),
             timeouts: config.timeouts.clone(),
             preflight_config: config.preflight.clone(),
             idle_timeout,
@@ -556,6 +587,138 @@ impl Engine {
             Err(_) => self.metrics.record_request(false, duration_ms, false),
         }
         result
+    }
+
+    // ----- Responses API (stateful multi-turn) --------------------------------
+
+    /// Run one turn of the stateful Responses API (S2 deep multi-turn reasoning).
+    ///
+    /// Seeds the turn with the conversation stored under `previous_response_id`
+    /// (or a fresh history with the optional `instructions` as a system message),
+    /// appends this turn's explicit `messages` and the `input` shorthand, routes
+    /// through the normal [`invoke`](Self::invoke) path (so routing, failover,
+    /// metrics, cost, and the S5 audit all apply), then appends the assistant
+    /// reply and stores the updated history under a **new** id. The caller passes
+    /// that id back as `previous_response_id` to continue the conversation.
+    ///
+    /// Continuing mints a fresh id per turn (so a caller can branch from any prior
+    /// response); the store is bounded by [`MAX_CONVERSATIONS`] via oldest-first
+    /// eviction. TODO: a single very long chain stores one full-history snapshot
+    /// per turn (quadratic in turns); a future revision can share a suffix or cap
+    /// retained turns without changing this contract.
+    pub async fn respond(&self, req: ResponsesRequest) -> Result<ResponsesResponse, EngineError> {
+        let ResponsesRequest {
+            previous_response_id,
+            instructions,
+            input,
+            mut request,
+        } = req;
+
+        // 1. Seed history: continue a stored conversation, or start a fresh one
+        //    (with optional system instructions). An unknown prior id is a hard
+        //    error rather than a silent fresh start, so an expired/evicted chain
+        //    surfaces to the caller.
+        let mut messages: Vec<Message> = match previous_response_id.as_deref() {
+            Some(prev) => self
+                .conversations
+                .get(prev)
+                .map(|c| c.messages.clone())
+                .ok_or_else(|| {
+                    EngineError::InvalidRequest(format!(
+                        "unknown previous_response_id '{prev}' (expired or never existed)"
+                    ))
+                })?,
+            None => match instructions.filter(|s| !s.trim().is_empty()) {
+                Some(system) => vec![Message {
+                    role: "system".into(),
+                    content: system,
+                    ..Default::default()
+                }],
+                None => Vec::new(),
+            },
+        };
+
+        // 2. Append this turn's new messages, then the `input` shorthand as a
+        //    user turn.
+        messages.append(&mut request.messages);
+        if let Some(text) = input.filter(|t| !t.trim().is_empty()) {
+            messages.push(Message {
+                role: "user".into(),
+                content: text,
+                ..Default::default()
+            });
+        }
+        if messages.iter().all(|m| m.content.trim().is_empty()) {
+            return Err(EngineError::InvalidRequest(
+                "responses request has no input (set `input`, `messages`, or continue a conversation)".into(),
+            ));
+        }
+
+        // 3. Route + invoke with the accumulated history. Default to chat when the
+        //    caller does not pin a capability, since Responses is a chat surface.
+        request.messages = messages.clone();
+        if request.capability.is_none() {
+            request.capability = Some(Capability::Chat);
+        }
+        let response = self.invoke(request).await?;
+
+        // 4. Append the assistant reply and persist the updated history under a
+        //    new response id.
+        if let Some(text) = response.text.clone().filter(|t| !t.is_empty()) {
+            messages.push(Message {
+                role: "assistant".into(),
+                content: text,
+                ..Default::default()
+            });
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let message_count = messages.len();
+        self.store_conversation(id.clone(), messages);
+
+        Ok(ResponsesResponse {
+            id,
+            message_count,
+            response,
+        })
+    }
+
+    /// Persist a conversation under `id`, evicting the oldest stored conversation
+    /// first when at [`MAX_CONVERSATIONS`] capacity so memory stays bounded.
+    fn store_conversation(&self, id: String, messages: Vec<Message>) {
+        if self.conversations.len() >= MAX_CONVERSATIONS
+            && !self.conversations.contains_key(&id)
+            && let Some(victim) = self
+                .conversations
+                .iter()
+                .min_by_key(|e| e.created)
+                .map(|e| e.key().clone())
+        {
+            self.conversations.remove(&victim);
+        }
+        self.conversations.insert(
+            id,
+            StoredConversation {
+                messages,
+                created: Instant::now(),
+            },
+        );
+    }
+
+    /// The stored message history for a conversation id, if still retained.
+    pub fn conversation_messages(&self, id: &str) -> Option<Vec<Message>> {
+        self.conversations.get(id).map(|c| c.messages.clone())
+    }
+
+    /// Forget a stored conversation. Returns whether one existed.
+    pub fn delete_conversation(&self, id: &str) -> bool {
+        self.conversations.remove(id).is_some()
+    }
+
+    /// Number of stored conversations. Test-only diagnostic, so it is neither
+    /// public API nor compiled into release builds.
+    #[cfg(test)]
+    fn conversation_count(&self) -> usize {
+        self.conversations.len()
     }
 
     /// Estimated USD cost for a request served by `provider`, from the
@@ -2168,6 +2331,7 @@ mod tests {
             subscriptions: SubscriptionRegistry::new(),
             warming: DashMap::new(),
             pending_predictions: DashMap::new(),
+            conversations: DashMap::new(),
             timeouts: TimeoutConfig::default(),
             preflight_config: PreflightConfig::default(),
             idle_timeout: Duration::from_secs(idle_secs),
@@ -2317,6 +2481,80 @@ mod tests {
         assert_eq!(resp.provider, "cloud");
         assert!(resp.routing_reason.is_some());
         assert!(!resp.fallback_used);
+    }
+
+    #[tokio::test]
+    async fn responses_api_accumulates_multi_turn_history() {
+        use mofa_kernel::{ResponsesRequest, ResponsesResponse};
+
+        let provider = Arc::new(
+            TestProvider::new("cloud", ProviderKind::OpenAiCompatible).with_model(
+                "mock-chat",
+                Capability::Chat,
+                ModelResidency::Remote,
+                0,
+                4,
+            ),
+        );
+        let engine = build_engine(vec![provider], 100, 0);
+        engine.refresh_resources().await;
+
+        // Turn 1: a fresh conversation with system instructions + user input.
+        let first: ResponsesResponse = engine
+            .respond(ResponsesRequest {
+                instructions: Some("be terse".into()),
+                input: Some("hello".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        // system + user + assistant("ok") = 3 messages stored under a fresh id.
+        assert_eq!(first.message_count, 3);
+        assert_eq!(first.response.text.as_deref(), Some("ok"));
+        assert!(!first.id.is_empty());
+        assert_eq!(engine.conversation_count(), 1);
+
+        // Turn 2: continue from the prior response id with a new user input.
+        let second = engine
+            .respond(ResponsesRequest {
+                previous_response_id: Some(first.id.clone()),
+                input: Some("again".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        // Prior 3 + new user + new assistant = 5, and the new turn gets its own id.
+        assert_eq!(second.message_count, 5);
+        assert_ne!(second.id, first.id);
+
+        // The stored history carries the full accumulated dialogue in order.
+        let history = engine.conversation_messages(&second.id).unwrap();
+        assert_eq!(history.len(), 5);
+        assert_eq!(history[0].role, "system");
+        assert_eq!(history[1].content, "hello");
+        assert_eq!(history[3].content, "again");
+
+        // An unknown prior id is a hard (non-retryable) error, not a fresh start.
+        let err = engine
+            .respond(ResponsesRequest {
+                previous_response_id: Some("does-not-exist".into()),
+                input: Some("x".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, EngineError::InvalidRequest(_)));
+        assert!(!err.retryable());
+
+        // A turn with no input at all is rejected.
+        assert!(matches!(
+            engine.respond(ResponsesRequest::default()).await,
+            Err(EngineError::InvalidRequest(_))
+        ));
+
+        // Deleting a conversation forgets it.
+        assert!(engine.delete_conversation(&second.id));
+        assert!(engine.conversation_messages(&second.id).is_none());
     }
 
     #[tokio::test]

@@ -20,8 +20,8 @@ use mofa_engine_core::preflight::PreflightStats;
 use mofa_engine_core::subscription::SubscriptionInfo;
 use mofa_engine_core::{Engine, EngineConfig};
 use mofa_kernel::{
-    Capability, EngineError, EngineStatus, ErrorInfo, InferenceRequest, InferenceResponse,
-    ModelCard,
+    Capability, EngineError, EngineStatus, ErrorInfo, InferenceRequest, InferenceResponse, Message,
+    ModelCard, ResponsesRequest, ResponsesResponse,
 };
 
 /// Errors returned by [`DaemonClient`].
@@ -87,6 +87,13 @@ impl EmbeddedEngine {
     /// Run one inference request to completion.
     pub fn invoke(&self, request: InferenceRequest) -> Result<InferenceResponse, EngineError> {
         self.runtime.block_on(self.engine.invoke(request))
+    }
+
+    /// Run one turn of the stateful Responses API (multi-turn deep reasoning).
+    /// The returned [`ResponsesResponse::id`] is passed as `previous_response_id`
+    /// to continue the conversation on the next turn.
+    pub fn respond(&self, request: ResponsesRequest) -> Result<ResponsesResponse, EngineError> {
+        self.runtime.block_on(self.engine.respond(request))
     }
 
     /// Snapshot the engine status.
@@ -156,6 +163,17 @@ impl EmbeddedEngine {
         let request: InferenceRequest = serde_json::from_str(request_json)
             .map_err(|e| Self::err_json(EngineError::InvalidRequest(e.to_string())))?;
         self.invoke(request)
+            .map(|resp| serde_json::to_string(&resp).unwrap_or_default())
+            .map_err(Self::err_json)
+    }
+
+    /// Parse a [`ResponsesRequest`] from JSON, run one turn, and return the
+    /// [`ResponsesResponse`] as JSON — the UniFFI-friendly stateful surface. On
+    /// failure the `Err` payload is a JSON [`ErrorInfo`] with a stable code.
+    pub fn respond_json(&self, request_json: &str) -> Result<String, String> {
+        let request: ResponsesRequest = serde_json::from_str(request_json)
+            .map_err(|e| Self::err_json(EngineError::InvalidRequest(e.to_string())))?;
+        self.respond(request)
             .map(|resp| serde_json::to_string(&resp).unwrap_or_default())
             .map_err(Self::err_json)
     }
@@ -296,6 +314,44 @@ impl DaemonClient {
             .await
             .map_err(|e| ClientError::Transport(e.to_string()))?;
         Self::decode(resp).await
+    }
+
+    /// `POST /v1/responses` — one turn of the stateful Responses API. The returned
+    /// [`ResponsesResponse::id`] is passed as `previous_response_id` to continue.
+    pub async fn respond(
+        &self,
+        request: &ResponsesRequest,
+    ) -> Result<ResponsesResponse, ClientError> {
+        let resp = self
+            .authed(self.http.post(self.url("/v1/responses")).json(request))
+            .send()
+            .await
+            .map_err(|e| ClientError::Transport(e.to_string()))?;
+        Self::decode(resp).await
+    }
+
+    /// `GET /v1/responses/{id}` — the stored message history for a conversation.
+    pub async fn conversation(&self, id: &str) -> Result<Vec<Message>, ClientError> {
+        self.get_json(&format!("/v1/responses/{id}")).await
+    }
+
+    /// `DELETE /v1/responses/{id}` — forget a stored conversation; returns whether
+    /// one existed. A not-found id is reported as `Ok(false)`, not an error.
+    pub async fn delete_conversation(&self, id: &str) -> Result<bool, ClientError> {
+        let resp = self
+            .authed(self.http.delete(self.url(&format!("/v1/responses/{id}"))))
+            .send()
+            .await
+            .map_err(|e| ClientError::Transport(e.to_string()))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        #[derive(serde::Deserialize)]
+        struct DeleteResponse {
+            removed: bool,
+        }
+        let resp: DeleteResponse = Self::decode(resp).await?;
+        Ok(resp.removed)
     }
 
     /// `POST /v1/discovery/refresh`
@@ -446,6 +502,22 @@ mod tests {
             .invoke_json(r#"{"capability":"chat","messages":[]}"#)
             .unwrap_err();
         assert!(err.contains("no_capable_model"));
+    }
+
+    #[test]
+    fn embedded_responds_and_reports_invalid_input() {
+        let engine = EmbeddedEngine::new(empty_config()).unwrap();
+
+        // A turn with input but no models still routes and fails with a typed
+        // no_capable_model error (the stateful path reaches routing).
+        let err = engine
+            .respond_json(r#"{"input":"hello","capability":"chat"}"#)
+            .unwrap_err();
+        assert!(err.contains("no_capable_model"), "got: {err}");
+
+        // An empty turn is rejected before routing.
+        let err = engine.respond_json("{}").unwrap_err();
+        assert!(err.contains("invalid_request"), "got: {err}");
     }
 
     #[test]

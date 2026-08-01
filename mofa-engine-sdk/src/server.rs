@@ -111,6 +111,12 @@ impl AppState {
             .route("/v1/capabilities", get(AppState::capabilities_handler))
             .route("/v1/invoke", post(AppState::invoke_handler))
             .route("/v1/invoke/stream", post(AppState::invoke_stream_handler))
+            .route("/v1/responses", post(AppState::responses_handler))
+            .route(
+                "/v1/responses/{id}",
+                get(AppState::get_conversation_handler)
+                    .delete(AppState::delete_conversation_handler),
+            )
             .route("/v1/status", get(AppState::status_handler))
             .route("/v1/memory", get(AppState::memory_handler))
             .route("/v1/lifecycle", get(AppState::lifecycle_handler))
@@ -305,6 +311,46 @@ impl AppState {
                 .interval(Duration::from_secs(15))
                 .text("ping"),
         )
+    }
+
+    /// `POST /v1/responses` — one turn of the stateful Responses API. Returns the
+    /// reply plus an `id` to pass as `previous_response_id` to continue.
+    async fn responses_handler(
+        State(state): State<AppState>,
+        Json(req): Json<mofa_kernel::ResponsesRequest>,
+    ) -> Result<Json<mofa_kernel::ResponsesResponse>, (StatusCode, Json<ErrorInfo>)> {
+        match state.engine.respond(req).await {
+            Ok(resp) => Ok(Json(resp)),
+            Err(e) => Err((AppState::error_status(&e), Json(e.info()))),
+        }
+    }
+
+    /// `GET /v1/responses/{id}` — the stored message history for a conversation.
+    async fn get_conversation_handler(
+        State(state): State<AppState>,
+        Path(id): Path<String>,
+    ) -> Result<Json<Vec<mofa_kernel::Message>>, (StatusCode, Json<ErrorInfo>)> {
+        match state.engine.conversation_messages(&id) {
+            Some(messages) => Ok(Json(messages)),
+            None => {
+                let err = EngineError::InvalidRequest(format!("unknown conversation '{id}'"));
+                Err((StatusCode::NOT_FOUND, Json(err.info())))
+            }
+        }
+    }
+
+    /// `DELETE /v1/responses/{id}` — forget a stored conversation.
+    async fn delete_conversation_handler(
+        State(state): State<AppState>,
+        Path(id): Path<String>,
+    ) -> (StatusCode, Json<UnsubscribeResponse>) {
+        let removed = state.engine.delete_conversation(&id);
+        let status = if removed {
+            StatusCode::OK
+        } else {
+            StatusCode::NOT_FOUND
+        };
+        (status, Json(UnsubscribeResponse { removed }))
     }
 
     async fn status_handler(State(state): State<AppState>) -> Json<mofa_kernel::EngineStatus> {
@@ -570,6 +616,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.headers().get(REQUEST_ID_HEADER).unwrap(), "abc-123");
+    }
+
+    #[tokio::test]
+    async fn responses_endpoint_validates_input() {
+        // With no input at all, the stateful Responses turn is a 400 (the engine
+        // rejects an empty turn) — exercises the route + error mapping end to end.
+        let app = AppState::build_app(test_state(None).await);
+        let resp = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

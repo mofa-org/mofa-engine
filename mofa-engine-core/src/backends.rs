@@ -1,15 +1,17 @@
 //! Provider backend implementations.
 
-pub mod liter_llm;
-pub mod local_asr;
-pub mod local_image_gen;
-pub mod local_tts;
-pub mod ollama;
-pub mod openai_compat;
+pub(crate) mod liter_llm;
+pub(crate) mod local_asr;
+pub(crate) mod local_image_gen;
+pub(crate) mod local_tts;
+pub(crate) mod local_video_gen;
+pub(crate) mod ollama;
+pub(crate) mod openai_compat;
 
-pub use liter_llm::LiterLLMProvider;
-pub use local_asr::LocalAsrProvider;
-pub use local_image_gen::LocalImageGenProvider;
-pub use local_tts::LocalTtsProvider;
-pub use ollama::OllamaProvider;
-pub use openai_compat::OpenAiCompatProvider;
+pub(crate) use liter_llm::LiterLLMProvider;
+pub(crate) use local_asr::LocalAsrProvider;
+pub(crate) use local_image_gen::LocalImageGenProvider;
+pub(crate) use local_tts::LocalTtsProvider;
+pub(crate) use local_video_gen::LocalVideoGenProvider;
+pub(crate) use ollama::OllamaProvider;
+pub(crate) use openai_compat::OpenAiCompatProvider;

@@ -42,7 +42,7 @@ use tokio::process::Command;
 use crate::config::ModelDef;
 
 /// A process-adapter provider that shells out to a local ASR command.
-pub struct LocalAsrProvider {
+pub(crate) struct LocalAsrProvider {
     /// Display name.
     name: String,
     /// Program to execute per transcription.
@@ -62,7 +62,7 @@ pub struct LocalAsrProvider {
 
 impl LocalAsrProvider {
     /// Create a new local ASR process adapter.
-    pub fn new(
+    pub(crate) fn new(
         name: impl Into<String>,
         command: impl Into<String>,
         args: Vec<String>,
@@ -86,7 +86,7 @@ impl LocalAsrProvider {
     /// (`params.diarize = true`). These are placeholder-substituted like the base
     /// `args`, so a CLI flag such as `--speaker-diarize` (or a value derived from
     /// `{input}`/`{output}`) can be supplied.
-    pub fn with_diarize_args(mut self, diarize_args: Vec<String>) -> Self {
+    pub(crate) fn with_diarize_args(mut self, diarize_args: Vec<String>) -> Self {
         self.diarize_args = diarize_args;
         self
     }

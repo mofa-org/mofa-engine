@@ -3,6 +3,16 @@
 # Copy to `config.toml` (current directory) or
 # `~/.config/mofa-engine/config.toml`. Any section may be omitted; defaults
 # shown below are applied. API keys support `${ENV_VAR}` substitution.
+#
+# Security-relevant environment variables (not TOML keys):
+#   MOFA_API_TOKEN          When set, every `/v1` route requires
+#                           `Authorization: Bearer <token>`. Strongly recommended
+#                           whenever `host` is not loopback.
+#   MOFA_CORS_ALLOW_ORIGINS Comma-separated origin allowlist for cross-origin
+#                           browser access to `/v1` (e.g.
+#                           "https://app.example.com"). Unset/empty = same-origin
+#                           only, which is the safe default.
+#   MOFA_LOG_FORMAT=json    Emit structured JSON logs (levels honor RUST_LOG).
 
 [listen]
 host = "127.0.0.1"   # loopback by default; remote access is opt-in
@@ -131,12 +141,31 @@ price_output_per_1k = 0.0011
 #   name = "openai/dall-e-3"
 #   capability = "image_gen"
 
-# Local TTS process-adapter backend. Runs a local command (an MLX/Kokoro or
-# Piper-style CLI) once per synthesis and returns the produced audio file.
-# Enable and point `command`/`args` at your installed runtime. Placeholders:
+# Local TTS process-adapter backend. Runs a local command once per synthesis and
+# returns the produced audio file. Recommended stack (S1/S6): Qwen3-TTS + Crane
+# as the primary voice, with Kokoro as a lighter fallback — configure both and
+# let priority pick Qwen3 first, failing over to Kokoro if it is unavailable.
+# Placeholders:
 #   {text}       input text passed as an argument
 #   {text_file}  path to a temp file holding the input text
 #   {output}     path the command must write audio to
+#
+# Primary: Qwen3-TTS via a Crane wrapper CLI.
+# [[providers]]
+# name = "qwen3-tts"
+# kind = "local_tts"
+# base_url = ""
+# command = "crane-tts"    # a wrapper that runs Qwen3-TTS through Crane
+# args = ["--text-file", "{text_file}", "--out", "{output}"]
+# output_format = "wav"
+# priority = 1             # preferred over the Kokoro fallback below
+# enabled = false
+#   [[providers.models]]
+#   name = "qwen3-tts"
+#   capability = "tts"
+#   memory_mb = 2048
+#
+# Fallback: Kokoro (lighter, faster to load).
 [[providers]]
 name = "local-tts"
 kind = "local_tts"
@@ -144,7 +173,7 @@ base_url = ""            # unused for local_tts, but the field is required
 command = "kokoro-tts"
 args = ["--text-file", "{text_file}", "--output", "{output}"]
 output_format = "wav"
-priority = 2
+priority = 2             # fallback tier: used when the Qwen3 primary is down
 enabled = false          # opt-in: set true once the command is installed
 
   [[providers.models]]
@@ -201,3 +230,36 @@ enabled = false          # opt-in: set true once the command is installed
   name = "sd"
   capability = "image_gen"
   memory_mb = 4096
+
+# Local video-generation process-adapter backend. Runs a local text-to-video CLI
+# (e.g. an AnimateDiff / Stable-Video-Diffusion or Wan-style wrapper) once per
+# clip and returns the produced file (S4). liter-llm has no video endpoint, so
+# this local adapter is the whole video path — verify output with the quality
+# gate before presenting it as finished. Placeholders:
+#   {prompt} {negative_prompt} {width} {height} {seconds} {fps} {output}
+# [[providers]]
+# name = "local-video"
+# kind = "local_video_gen"
+# base_url = ""           # unused for local_video_gen, but the field is required
+# command = "svd"         # a text-to-video wrapper script
+# args = [
+#   "--prompt", "{prompt}",
+#   "--width", "{width}", "--height", "{height}",
+#   "--seconds", "{seconds}", "--fps", "{fps}",
+#   "--output", "{output}",
+# ]
+# output_format = "mp4"
+# priority = 2
+# enabled = false          # opt-in: set true once the command is installed
+#   [[providers.models]]
+#   name = "svd"
+#   capability = "video_gen"
+#   memory_mb = 8192
+
+# Local embedding model via Ollama (RAG enabler, S3). Ollama auto-discovers pulled
+# models; a model whose name contains `embed` (e.g. `nomic-embed-text`,
+# `mxbai-embed-large`) is typed as an `embedding` capability automatically — just
+# `ollama pull nomic-embed-text`. Cloud embeddings work too: add an
+# `openai_compatible` or `liter_llm` model with `capability = "embedding"`
+# (e.g. `text-embedding-3-small`). Send input via `params.input` (a string or an
+# array) or the message contents; the response carries `embedding` vectors.

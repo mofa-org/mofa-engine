@@ -15,7 +15,7 @@ use std::time::Duration;
 use crate::config::ModelDef;
 
 /// A provider for any OpenAI-compatible API.
-pub struct OpenAiCompatProvider {
+pub(crate) struct OpenAiCompatProvider {
     /// Display name.
     name: String,
     /// Base URL.
@@ -51,7 +51,7 @@ impl OpenAiCompatProvider {
     ///
     /// Fails (rather than panicking or silently dropping the configured
     /// timeouts) if the system TLS/HTTP stack cannot build a client.
-    pub fn with_output_dir(
+    pub(crate) fn with_output_dir(
         name: impl Into<String>,
         base_url: impl Into<String>,
         api_key: impl Into<String>,
@@ -208,6 +208,37 @@ impl OpenAiCompatProvider {
         }
         None
     }
+
+    /// Collect the input strings to embed from a request: an explicit
+    /// `params.input` (a string or an array of strings) takes precedence,
+    /// otherwise every non-empty message content is embedded in order. Empty
+    /// input is rejected by the caller.
+    ///
+    /// Shared by the Ollama and liter-llm backends so embedding requests resolve
+    /// their inputs identically across providers.
+    pub(crate) fn embedding_inputs(request: &InferenceRequest) -> Vec<String> {
+        match request.params.get("input") {
+            Some(serde_json::Value::String(s)) if !s.is_empty() => return vec![s.clone()],
+            Some(serde_json::Value::Array(arr)) => {
+                let inputs: Vec<String> = arr
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect();
+                if !inputs.is_empty() {
+                    return inputs;
+                }
+            }
+            _ => {}
+        }
+        request
+            .messages
+            .iter()
+            .map(|m| m.content.clone())
+            .filter(|c| !c.trim().is_empty())
+            .collect()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -216,6 +247,30 @@ struct TtsRequest {
     input: String,
     voice: String,
     response_format: String,
+}
+
+/// OpenAI-style `/embeddings` request: one or more input strings embedded in a
+/// single call (the API accepts a string or an array; we always send an array).
+#[derive(Debug, Serialize)]
+struct EmbeddingRequest {
+    model: String,
+    input: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbeddingResponse {
+    #[serde(default)]
+    data: Vec<EmbeddingData>,
+    usage: Option<ChatUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbeddingData {
+    #[serde(default)]
+    embedding: Vec<f32>,
+    /// Position in the batch; the API may return rows out of order, so we sort by it.
+    #[serde(default)]
+    index: u32,
 }
 
 #[async_trait]
@@ -331,6 +386,7 @@ impl Provider for OpenAiCompatProvider {
             Capability::Chat => self.invoke_chat(model_name, request, start).await,
             Capability::Tts => self.invoke_tts(model_name, request, start).await,
             Capability::Asr => self.invoke_asr(model_name, request, start).await,
+            Capability::Embedding => self.invoke_embedding(model_name, request, start).await,
             other => Err(EngineError::UnsupportedOperation(format!(
                 "provider '{}' does not support {other}",
                 self.name
@@ -485,6 +541,14 @@ impl Provider for OpenAiCompatProvider {
 }
 
 impl OpenAiCompatProvider {
+    /// Fallback health probe for gateways whose `GET /models` returns 404: send a
+    /// minimal (`max_tokens: 1`) chat completion and treat a success as healthy.
+    ///
+    /// Note: this issues a *real, billable* request. It runs only when the cheap
+    /// `/models` probe is unavailable (404), and only at startup and on explicit
+    /// `discovery/refresh`, so the cost is a single 1-token completion per probe
+    /// rather than per inference — an intentional trade to detect reachability for
+    /// providers that do not expose a free model-list endpoint.
     async fn health_via_chat(&self) -> bool {
         let Some(first_chat_model) = self
             .models
@@ -764,6 +828,84 @@ impl OpenAiCompatProvider {
             ..Default::default()
         })
     }
+
+    async fn invoke_embedding(
+        &self,
+        model_name: &str,
+        request: &InferenceRequest,
+        start: std::time::Instant,
+    ) -> Result<InferenceResponse, EngineError> {
+        let inputs = Self::embedding_inputs(request);
+        if inputs.is_empty() {
+            return Err(EngineError::InvalidRequest(
+                "embedding requires text input (params.input or messages)".into(),
+            ));
+        }
+
+        let body = EmbeddingRequest {
+            model: model_name.to_string(),
+            input: inputs,
+        };
+
+        let url = format!("{}/embeddings", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: e.to_string(),
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("embedding HTTP {status}: {text}"),
+            });
+        }
+
+        let mut parsed: EmbeddingResponse =
+            resp.json().await.map_err(|e| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("embedding parse error: {e}"),
+            })?;
+
+        // The API may return rows out of batch order; restore input order.
+        parsed.data.sort_by_key(|d| d.index);
+        let vectors: Vec<Vec<f32>> = parsed.data.into_iter().map(|d| d.embedding).collect();
+        if vectors.is_empty() {
+            return Err(EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: "embedding response contained no vectors".into(),
+            });
+        }
+
+        let (prompt_tokens, tokens_used) = match parsed.usage {
+            // Embeddings bill input tokens only, so total == prompt.
+            Some(u) => (u.prompt_tokens, u.total_tokens.or(u.prompt_tokens)),
+            None => (None, None),
+        };
+        Ok(InferenceResponse {
+            text: None,
+            file: None,
+            embedding: Some(vectors),
+            model_used: model_name.to_string(),
+            provider: self.name.clone(),
+            duration_ms: start.elapsed().as_millis() as u64,
+            request_id: request.request_id.clone(),
+            tokens_used,
+            prompt_tokens,
+            completion_tokens: Some(0),
+            fallback_used: false,
+            routing_reason: None,
+            ..Default::default()
+        })
+    }
 }
 
 #[cfg(test)]
@@ -886,6 +1028,42 @@ mod tests {
         );
         // A lone trailing `\n` is not a complete frame yet.
         assert_eq!(OpenAiCompatProvider::sse_frame_len(b"data: a\n"), None);
+    }
+
+    #[test]
+    fn embedding_inputs_prefers_params_then_messages() {
+        use mofa_kernel::Message;
+
+        // An explicit `params.input` array wins over messages.
+        let mut req = InferenceRequest {
+            capability: Some(Capability::Embedding),
+            messages: vec![Message {
+                role: "user".into(),
+                content: "from message".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        req.params = serde_json::json!({ "input": ["a", "b", ""] });
+        assert_eq!(OpenAiCompatProvider::embedding_inputs(&req), vec!["a", "b"]); // empties dropped
+
+        // A single-string `params.input` embeds one row.
+        req.params = serde_json::json!({ "input": "solo" });
+        assert_eq!(OpenAiCompatProvider::embedding_inputs(&req), vec!["solo"]);
+
+        // With no `params.input`, non-empty message contents are embedded in order.
+        req.params = serde_json::Value::Null;
+        assert_eq!(
+            OpenAiCompatProvider::embedding_inputs(&req),
+            vec!["from message"]
+        );
+
+        // Nothing to embed → empty (the caller turns this into InvalidRequest).
+        let empty = InferenceRequest {
+            capability: Some(Capability::Embedding),
+            ..Default::default()
+        };
+        assert!(OpenAiCompatProvider::embedding_inputs(&empty).is_empty());
     }
 
     #[test]

@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use crate::config::ModelDef;
 
 /// Provider for a local Ollama instance.
-pub struct OllamaProvider {
+pub(crate) struct OllamaProvider {
     /// Display name.
     name: String,
     /// Base URL.
@@ -43,7 +43,7 @@ impl OllamaProvider {
     /// `models` are optional per-model annotations; only entries carrying a
     /// `reasoning_tier` are retained (as tier-routing overrides). All other model
     /// metadata is auto-discovered from Ollama, so the list may be empty.
-    pub fn new(
+    pub(crate) fn new(
         name: impl Into<String>,
         base_url: impl Into<String>,
         models: &[ModelDef],
@@ -149,6 +149,24 @@ struct OllamaChatResponse {
     total_duration: Option<u64>,
 }
 
+/// Request to Ollama's `/api/embed` endpoint (batch-capable).
+#[derive(Debug, Serialize)]
+struct OllamaEmbedRequest {
+    model: String,
+    input: Vec<String>,
+}
+
+/// Response from Ollama's `/api/embed` endpoint.
+#[derive(Debug, Deserialize)]
+struct OllamaEmbedResponse {
+    /// One vector per input, in input order.
+    #[serde(default)]
+    embeddings: Vec<Vec<f32>>,
+    /// Prompt/input tokens, when reported.
+    #[serde(default)]
+    prompt_eval_count: Option<u32>,
+}
+
 /// One NDJSON object from Ollama's `stream: true` response.
 #[derive(Debug, Deserialize)]
 struct OllamaStreamChunk {
@@ -198,6 +216,77 @@ impl OllamaProvider {
             });
         }
         out
+    }
+
+    /// Embed one or more inputs via Ollama's `/api/embed`. Inputs are resolved
+    /// the same way as the cloud backends (`params.input` string/array, else the
+    /// message contents), so embedding requests are portable across providers.
+    async fn embed(
+        &self,
+        model_name: &str,
+        request: &InferenceRequest,
+    ) -> Result<InferenceResponse, EngineError> {
+        let inputs =
+            crate::backends::openai_compat::OpenAiCompatProvider::embedding_inputs(request);
+        if inputs.is_empty() {
+            return Err(EngineError::InvalidRequest(
+                "embedding requires text input (params.input or messages)".into(),
+            ));
+        }
+
+        let body = OllamaEmbedRequest {
+            model: model_name.to_string(),
+            input: inputs,
+        };
+        let url = format!("{}/api/embed", self.base_url);
+        let start = std::time::Instant::now();
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: e.to_string(),
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("embed HTTP {status}: {text}"),
+            });
+        }
+
+        let embed: OllamaEmbedResponse =
+            resp.json().await.map_err(|e| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("embed parse error: {e}"),
+            })?;
+        if embed.embeddings.is_empty() {
+            return Err(EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: "embed response contained no vectors".into(),
+            });
+        }
+
+        Ok(InferenceResponse {
+            text: None,
+            file: None,
+            embedding: Some(embed.embeddings),
+            model_used: model_name.to_string(),
+            provider: self.name.clone(),
+            duration_ms: start.elapsed().as_millis() as u64,
+            request_id: request.request_id.clone(),
+            tokens_used: embed.prompt_eval_count,
+            prompt_tokens: embed.prompt_eval_count,
+            completion_tokens: Some(0),
+            fallback_used: false,
+            routing_reason: None,
+            ..Default::default()
+        })
     }
 
     /// Resolve one image reference to the raw base64 payload Ollama accepts.
@@ -280,20 +369,30 @@ impl Provider for OllamaProvider {
             .filter_map(|m| {
                 let model_name = m.name.or(m.model)?;
                 let lower = model_name.to_lowercase();
-                if lower.contains("embed") || lower.contains(":cloud") || lower.contains("-cloud") {
+                // Ollama's cloud-hosted tags are not local models; skip them.
+                if lower.contains(":cloud") || lower.contains("-cloud") {
                     return None;
                 }
 
-                // TODO: Ollama's `/api/tags` does not report modality, so every
-                // non-embedding model is typed as `Chat`. A locally-pulled vision
-                // model therefore won't be routed for a `Vlm` capability request,
-                // though it can still answer an image-bearing *chat* turn (see
-                // `to_ollama_messages`). Modality inference from the model family is
-                // deferred.
+                // The tags endpoint reports no modality, so we infer capability
+                // from the name: models named `*embed*` serve `Embedding`
+                // (e.g. `nomic-embed-text`, `mxbai-embed-large`) and everything
+                // else is typed `Chat`.
+                //
+                // TODO: this same lack of modality metadata means a locally-pulled
+                // *vision* model is still typed `Chat`, so it won't be routed for an
+                // explicit `Vlm` request (though it can answer an image-bearing chat
+                // turn — see `to_ollama_messages`). Family-based modality inference
+                // is deferred.
+                let capability = if lower.contains("embed") {
+                    Capability::Embedding
+                } else {
+                    Capability::Chat
+                };
                 let mut card = ModelCard::new(
                     self.name.clone(),
                     model_name.clone(),
-                    Capability::Chat,
+                    capability,
                     CostTier::Free,
                 );
                 card.id = ModelId::canonical(&self.name, &model_name);
@@ -418,6 +517,12 @@ impl Provider for OllamaProvider {
         request: &InferenceRequest,
     ) -> Result<InferenceResponse, EngineError> {
         let model_name = ModelId::name(model_id);
+
+        // Embedding is a distinct endpoint (`/api/embed`), so dispatch it before
+        // building a chat body.
+        if request.capability == Some(Capability::Embedding) {
+            return self.embed(model_name, request).await;
+        }
 
         let messages = self.to_ollama_messages(request).await;
         if messages.is_empty() {
