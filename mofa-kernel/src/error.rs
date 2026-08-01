@@ -27,6 +27,18 @@ pub enum ErrorCode {
     Internal,
 }
 
+/// One failed candidate in a failover chain: which provider/model was tried and
+/// why it failed. Lets an Agent see *all* attempts, not just the last error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailedAttempt {
+    /// Provider that was tried.
+    pub provider: String,
+    /// Model that was tried (canonical short name).
+    pub model: String,
+    /// Human-readable failure reason.
+    pub reason: String,
+}
+
 /// Structured error body suitable for HTTP and SDKs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorInfo {
@@ -38,6 +50,12 @@ pub struct ErrorInfo {
     pub retryable: bool,
     /// Optional source provider/backend.
     pub source: Option<String>,
+    /// Complete per-candidate failure chain (empty unless failover was attempted).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_chain: Vec<FailedAttempt>,
+    /// Machine-readable routing reason for the primary candidate, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_reason: Option<String>,
 }
 
 /// Top-level engine error.
@@ -89,6 +107,23 @@ pub enum EngineError {
     /// An internal/unexpected error.
     #[error("internal error: {0}")]
     Internal(String),
+
+    /// Every routing candidate was exhausted during failover. Carries the full
+    /// per-candidate failure chain so an Agent can decide whether to retry or
+    /// switch tiers, rather than seeing only the last error.
+    #[error("all candidates failed: {message}")]
+    Failover {
+        /// Code of the final (last-tried) failure.
+        code: ErrorCode,
+        /// Aggregate human-readable message (the last failure's message).
+        message: String,
+        /// Whether retrying the whole request might succeed.
+        retryable: bool,
+        /// Per-candidate failures, in attempt order.
+        chain: Vec<FailedAttempt>,
+        /// Machine-readable routing reason for the primary candidate.
+        routing_reason: Option<String>,
+    },
 }
 
 impl EngineError {
@@ -104,19 +139,21 @@ impl EngineError {
             Self::UnsupportedOperation(_) => ErrorCode::UnsupportedOperation,
             Self::Config(_) => ErrorCode::Config,
             Self::Internal(_) => ErrorCode::Internal,
+            Self::Failover { code, .. } => *code,
         }
     }
 
     /// Whether retrying the same request may succeed.
     pub fn retryable(&self) -> bool {
-        matches!(
-            self,
+        match self {
             Self::ProviderError { .. }
-                | Self::CircuitOpen(_)
-                | Self::MemoryPressure { .. }
-                | Self::Timeout(_)
-                | Self::Internal(_)
-        )
+            | Self::CircuitOpen(_)
+            | Self::MemoryPressure { .. }
+            | Self::Timeout(_)
+            | Self::Internal(_) => true,
+            Self::Failover { retryable, .. } => *retryable,
+            _ => false,
+        }
     }
 
     /// Optional source provider/backend for this error.
@@ -129,11 +166,30 @@ impl EngineError {
 
     /// Convert to a structured error body.
     pub fn info(&self) -> ErrorInfo {
+        if let Self::Failover {
+            code,
+            message,
+            retryable,
+            chain,
+            routing_reason,
+        } = self
+        {
+            return ErrorInfo {
+                code: *code,
+                message: message.clone(),
+                retryable: *retryable,
+                source: chain.last().map(|a| a.provider.clone()),
+                failed_chain: chain.clone(),
+                routing_reason: routing_reason.clone(),
+            };
+        }
         ErrorInfo {
             code: self.code(),
             message: self.to_string(),
             retryable: self.retryable(),
             source: self.source_name().map(ToOwned::to_owned),
+            failed_chain: Vec::new(),
+            routing_reason: None,
         }
     }
 }
@@ -161,5 +217,50 @@ mod tests {
         assert_eq!(info.code, ErrorCode::CircuitOpen);
         assert!(info.retryable);
         assert_eq!(info.source.as_deref(), Some("ollama"));
+        // Non-failover errors carry an empty chain that is omitted from JSON.
+        assert!(info.failed_chain.is_empty());
+        assert!(
+            !serde_json::to_string(&info)
+                .unwrap()
+                .contains("failed_chain")
+        );
+    }
+
+    #[test]
+    fn failover_info_carries_full_chain() {
+        let e = EngineError::Failover {
+            code: ErrorCode::ProviderError,
+            message: "provider 'openai' error: 503".into(),
+            retryable: true,
+            chain: vec![
+                FailedAttempt {
+                    provider: "ollama".into(),
+                    model: "qwen".into(),
+                    reason: "circuit open".into(),
+                },
+                FailedAttempt {
+                    provider: "openai".into(),
+                    model: "gpt-4o".into(),
+                    reason: "503".into(),
+                },
+            ],
+            routing_reason: Some("resident local preferred".into()),
+        };
+        let info = e.info();
+        assert_eq!(info.code, ErrorCode::ProviderError);
+        assert!(info.retryable);
+        assert_eq!(info.failed_chain.len(), 2);
+        assert_eq!(info.failed_chain[0].provider, "ollama");
+        assert_eq!(info.failed_chain[1].model, "gpt-4o");
+        assert_eq!(
+            info.routing_reason.as_deref(),
+            Some("resident local preferred")
+        );
+        // `source` points at the last-tried provider.
+        assert_eq!(info.source.as_deref(), Some("openai"));
+
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("failed_chain"));
+        assert!(json.contains("routing_reason"));
     }
 }

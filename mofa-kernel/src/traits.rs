@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use crate::error::EngineError;
 use crate::types::{
     BackendFeature, BackendHealth, InferenceRequest, InferenceResponse, LifecycleResult, ModelCard,
-    ProviderKind,
+    ProviderKind, StreamDelta, StreamSink,
 };
 
 /// A model provider backend.
@@ -41,6 +41,31 @@ pub trait Provider: Send + Sync {
         model_id: &str,
         request: &InferenceRequest,
     ) -> Result<InferenceResponse, EngineError>;
+
+    /// Stream inference output as it is produced.
+    ///
+    /// Providers push incremental text deltas to `sink` and return the final
+    /// aggregate response (with the full text/file, tokens, etc.). The engine
+    /// owns the surrounding `Started`/`Completed`/`Error` envelope.
+    ///
+    /// The default implementation provides *non-streaming compatibility*: it
+    /// runs [`invoke`](Self::invoke) and emits the whole text output as a single
+    /// delta. Backends that support incremental generation (e.g. Ollama) should
+    /// override this to stream real tokens.
+    async fn stream(
+        &self,
+        model_id: &str,
+        request: &InferenceRequest,
+        sink: StreamSink,
+    ) -> Result<InferenceResponse, EngineError> {
+        let response = self.invoke(model_id, request).await?;
+        if let Some(text) = &response.text
+            && !text.is_empty()
+        {
+            let _ = sink.send(StreamDelta::Text(text.clone())).await;
+        }
+        Ok(response)
+    }
 }
 
 #[cfg(test)]

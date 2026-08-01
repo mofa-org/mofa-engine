@@ -5,8 +5,8 @@
 use async_trait::async_trait;
 use mofa_kernel::{
     BackendFeature, BackendHealth, Capability, CostTier, EngineError, InferenceRequest,
-    InferenceResponse, LifecycleResult, ModelAvailability, ModelCard, ModelResidency, Provider,
-    ProviderKind, canonical_model_id, model_id_name,
+    InferenceResponse, LifecycleResult, ModelAvailability, ModelCard, ModelId, ModelResidency,
+    Provider, ProviderKind, ReasoningEffort, StreamDelta, StreamSink,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -26,42 +26,81 @@ pub struct OpenAiCompatProvider {
     models: Vec<ModelDef>,
     /// Cost tier for all models from this provider.
     cost_tier: CostTier,
+    /// Directory for generated TTS artifacts.
+    output_dir: std::path::PathBuf,
     /// HTTP client.
     client: Client,
 }
 
 impl OpenAiCompatProvider {
-    /// Create a new OpenAI-compatible provider.
+    /// Create a new OpenAI-compatible provider with default (temp-dir) artifact
+    /// output. Test-support: the engine factory uses [`Self::with_output_dir`].
+    #[cfg(test)]
     pub fn new(
         name: impl Into<String>,
         base_url: impl Into<String>,
         api_key: impl Into<String>,
         models: Vec<ModelDef>,
         cost_tier: CostTier,
-    ) -> Self {
+    ) -> Result<Self, EngineError> {
+        Self::with_output_dir(name, base_url, api_key, models, cost_tier, None)
+    }
+
+    /// Create a provider, writing TTS artifacts into `output_dir` (or the system
+    /// temp dir when `None`) so they land where the artifact sweeper looks.
+    ///
+    /// Fails (rather than panicking or silently dropping the configured
+    /// timeouts) if the system TLS/HTTP stack cannot build a client.
+    pub fn with_output_dir(
+        name: impl Into<String>,
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        models: Vec<ModelDef>,
+        cost_tier: CostTier,
+        output_dir: Option<String>,
+    ) -> Result<Self, EngineError> {
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(120))
             .build()
-            .unwrap_or_default();
+            .map_err(|e| {
+                EngineError::Config(format!(
+                    "failed to build OpenAI-compatible HTTP client: {e}"
+                ))
+            })?;
 
-        Self {
+        Ok(Self {
             name: name.into(),
             base_url: base_url.into(),
             api_key: api_key.into(),
             models,
             cost_tier,
+            output_dir: output_dir
+                .filter(|s| !s.is_empty())
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir),
             client,
-        }
+        })
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Default)]
 struct ChatCompletionRequest {
     model: String,
     messages: Vec<ChatMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
+}
+
+/// Ask the server to emit a final usage-only chunk during streaming (OpenAI
+/// only reports token counts in a stream when this is set).
+#[derive(Debug, Serialize, Default)]
+struct StreamOptions {
+    include_usage: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -84,6 +123,91 @@ struct ChatChoice {
 #[derive(Debug, Deserialize)]
 struct ChatUsage {
     total_tokens: Option<u32>,
+    #[serde(default)]
+    prompt_tokens: Option<u32>,
+    #[serde(default)]
+    completion_tokens: Option<u32>,
+}
+
+/// One `chat.completion.chunk` object from an OpenAI-style SSE stream.
+#[derive(Debug, Deserialize)]
+struct ChatCompletionChunk {
+    #[serde(default)]
+    choices: Vec<ChatChunkChoice>,
+    /// Present only on the terminal usage chunk (requires `stream_options`).
+    #[serde(default)]
+    usage: Option<ChatUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatChunkChoice {
+    #[serde(default)]
+    delta: ChatDelta,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ChatDelta {
+    #[serde(default)]
+    content: Option<String>,
+}
+
+/// A parsed SSE event from the chat stream.
+enum SseEvent {
+    /// A `chat.completion.chunk` payload.
+    Chunk(ChatCompletionChunk),
+    /// The terminal `data: [DONE]` sentinel.
+    Done,
+}
+
+impl OpenAiCompatProvider {
+    /// Parse one SSE event block (the bytes preceding a blank-line delimiter).
+    ///
+    /// Joins the event's `data:` field lines with newlines per the SSE spec
+    /// (a single leading space after `data:` is stripped), ignoring
+    /// comments/`event:` lines and tolerating `\r\n` (`str::lines` drops the
+    /// terminator). Blank blocks and unparseable payloads yield `None`.
+    fn parse_sse_event(block: &[u8]) -> Option<SseEvent> {
+        let text = std::str::from_utf8(block).ok()?;
+        let mut data = String::new();
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("data:") {
+                if !data.is_empty() {
+                    data.push('\n');
+                }
+                // Per the spec a single space immediately after the colon is part
+                // of the delimiter, not the value; any further whitespace is content.
+                data.push_str(rest.strip_prefix(' ').unwrap_or(rest));
+            }
+        }
+        if data.is_empty() {
+            return None;
+        }
+        if data == "[DONE]" {
+            return Some(SseEvent::Done);
+        }
+        serde_json::from_str::<ChatCompletionChunk>(&data)
+            .ok()
+            .map(SseEvent::Chunk)
+    }
+
+    /// Length (in bytes) of the first complete SSE event frame in `buf`,
+    /// including its blank-line delimiter, or `None` if no complete frame is
+    /// buffered yet. Recognizes both `\n\n` and the spec-permitted `\r\n\r\n`
+    /// (as `\n` followed by `\r\n`), so a CRLF-emitting server or proxy streams
+    /// correctly rather than buffering the whole body.
+    fn sse_frame_len(buf: &[u8]) -> Option<usize> {
+        for i in 0..buf.len() {
+            if buf[i] != b'\n' {
+                continue;
+            }
+            match buf.get(i + 1) {
+                Some(b'\n') => return Some(i + 2),
+                Some(b'\r') if buf.get(i + 2) == Some(&b'\n') => return Some(i + 3),
+                _ => {}
+            }
+        }
+        None
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -116,12 +240,16 @@ impl Provider for OpenAiCompatProvider {
                 let cap = Capability::from_str_loose(&m.capability)?;
                 let mut card =
                     ModelCard::new(self.name.clone(), m.name.clone(), cap, self.cost_tier);
-                card.id = canonical_model_id(&self.name, &m.name);
+                card.id = ModelId::canonical(&self.name, &m.name);
                 card.availability = ModelAvailability::Configured;
                 card.residency = ModelResidency::Remote;
                 card.context_window = m.context_window.unwrap_or(4096);
                 card.memory_estimate_bytes = m.memory_mb.unwrap_or(0) * 1024 * 1024;
                 card.execution.max_concurrency = 32;
+                card.reasoning_tier = m
+                    .reasoning_tier
+                    .as_deref()
+                    .and_then(ReasoningEffort::from_str_loose);
                 card.refresh_status();
                 Some(card)
             })
@@ -164,7 +292,7 @@ impl Provider for OpenAiCompatProvider {
 
     async fn load(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
         Ok(LifecycleResult {
-            model_id: canonical_model_id(&self.name, model_id_name(model_id)),
+            model_id: ModelId::canonical(&self.name, ModelId::name(model_id)),
             residency: ModelResidency::Remote,
             memory_bytes: Some(0),
             changed: false,
@@ -173,7 +301,7 @@ impl Provider for OpenAiCompatProvider {
 
     async fn unload(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
         Ok(LifecycleResult {
-            model_id: canonical_model_id(&self.name, model_id_name(model_id)),
+            model_id: ModelId::canonical(&self.name, ModelId::name(model_id)),
             residency: ModelResidency::Remote,
             memory_bytes: Some(0),
             changed: false,
@@ -185,7 +313,7 @@ impl Provider for OpenAiCompatProvider {
         model_id: &str,
         request: &InferenceRequest,
     ) -> Result<InferenceResponse, EngineError> {
-        let model_name = model_id_name(model_id);
+        let model_name = ModelId::name(model_id);
         let capability = request.capability.unwrap_or(Capability::Chat);
         let start = std::time::Instant::now();
 
@@ -209,6 +337,151 @@ impl Provider for OpenAiCompatProvider {
             ))),
         }
     }
+
+    /// Real per-token streaming over OpenAI-style Server-Sent Events.
+    ///
+    /// Overrides the pseudo-streaming default: sends `stream: true`, reads the
+    /// response body incrementally, and forwards each `choices[].delta.content`
+    /// token through `sink` as it arrives. Only chat streams token-by-token;
+    /// other capabilities fall back to a single-shot emit via [`invoke`].
+    async fn stream(
+        &self,
+        model_id: &str,
+        request: &InferenceRequest,
+        sink: StreamSink,
+    ) -> Result<InferenceResponse, EngineError> {
+        let capability = request.capability.unwrap_or(Capability::Chat);
+        if capability != Capability::Chat {
+            let response = self.invoke(model_id, request).await?;
+            if let Some(text) = &response.text
+                && !text.is_empty()
+            {
+                let _ = sink.send(StreamDelta::Text(text.clone())).await;
+            }
+            return Ok(response);
+        }
+
+        let model_name = ModelId::name(model_id);
+        let messages: Vec<ChatMessage> = request
+            .messages
+            .iter()
+            .map(|m| ChatMessage {
+                role: m.role.clone(),
+                content: m.content.clone(),
+            })
+            .collect();
+        if messages.is_empty() {
+            return Err(EngineError::InvalidRequest("no messages provided".into()));
+        }
+        let max_tokens = request
+            .params
+            .get("max_tokens")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+
+        let body = ChatCompletionRequest {
+            model: model_name.to_string(),
+            messages,
+            max_tokens,
+            stream: Some(true),
+            stream_options: Some(StreamOptions {
+                include_usage: true,
+            }),
+        };
+
+        let url = format!("{}/chat/completions", self.base_url);
+        let start = std::time::Instant::now();
+        let mut resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: e.to_string(),
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("HTTP {status}: {text}"),
+            });
+        }
+
+        // OpenAI SSE: events are delimited by a blank line (`\n\n`). Buffer bytes,
+        // emit each token's `delta.content` as its event completes, and capture the
+        // token counts from the terminal usage-only chunk.
+        let mut buf: Vec<u8> = Vec::new();
+        let mut full = String::new();
+        let mut prompt_tokens = None;
+        let mut completion_tokens = None;
+        let mut total_tokens = None;
+
+        let mut apply = |event: SseEvent, full: &mut String| -> Option<String> {
+            let SseEvent::Chunk(chunk) = event else {
+                return None;
+            };
+            if let Some(u) = chunk.usage {
+                prompt_tokens = u.prompt_tokens;
+                completion_tokens = u.completion_tokens;
+                total_tokens = u.total_tokens;
+            }
+            let content = chunk.choices.into_iter().next()?.delta.content?;
+            if content.is_empty() {
+                return None;
+            }
+            full.push_str(&content);
+            Some(content)
+        };
+
+        'read: while let Some(bytes) =
+            resp.chunk().await.map_err(|e| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("stream read error: {e}"),
+            })?
+        {
+            buf.extend_from_slice(&bytes);
+            while let Some(frame_len) = Self::sse_frame_len(&buf) {
+                let block: Vec<u8> = buf.drain(..frame_len).collect();
+                if let Some(event) = Self::parse_sse_event(&block)
+                    && let Some(delta) = apply(event, &mut full)
+                    && sink.send(StreamDelta::Text(delta)).await.is_err()
+                {
+                    // Receiver dropped (client disconnected): stop draining upstream.
+                    break 'read;
+                }
+            }
+        }
+        // Any trailing event without a final blank line.
+        if let Some(event) = Self::parse_sse_event(&buf)
+            && let Some(delta) = apply(event, &mut full)
+        {
+            let _ = sink.send(StreamDelta::Text(delta)).await;
+        }
+
+        let tokens_used = total_tokens.or(match (prompt_tokens, completion_tokens) {
+            (None, None) => None,
+            (p, c) => Some(p.unwrap_or(0) + c.unwrap_or(0)),
+        });
+        Ok(InferenceResponse {
+            text: Some(full),
+            file: None,
+            model_used: model_name.to_string(),
+            provider: self.name.clone(),
+            duration_ms: start.elapsed().as_millis() as u64,
+            request_id: request.request_id.clone(),
+            tokens_used,
+            prompt_tokens,
+            completion_tokens,
+            fallback_used: false,
+            routing_reason: None,
+            ..Default::default()
+        })
+    }
 }
 
 impl OpenAiCompatProvider {
@@ -229,6 +502,7 @@ impl OpenAiCompatProvider {
                 content: "hi".into(),
             }],
             max_tokens: Some(1),
+            ..Default::default()
         };
 
         let url = format!("{}/chat/completions", self.base_url);
@@ -272,6 +546,7 @@ impl OpenAiCompatProvider {
             model: model_name.to_string(),
             messages,
             max_tokens,
+            ..Default::default()
         };
 
         let url = format!("{}/chat/completions", self.base_url);
@@ -309,7 +584,10 @@ impl OpenAiCompatProvider {
             .and_then(|c| c.message.as_ref())
             .map(|m| m.content.clone());
 
-        let tokens = chat.usage.and_then(|u| u.total_tokens);
+        let (tokens, prompt_tokens, completion_tokens) = match chat.usage {
+            Some(u) => (u.total_tokens, u.prompt_tokens, u.completion_tokens),
+            None => (None, None, None),
+        };
         let duration_ms = start.elapsed().as_millis() as u64;
 
         Ok(InferenceResponse {
@@ -320,8 +598,11 @@ impl OpenAiCompatProvider {
             duration_ms,
             request_id: request.request_id.clone(),
             tokens_used: tokens,
+            prompt_tokens,
+            completion_tokens,
             fallback_used: false,
             routing_reason: None,
+            ..Default::default()
         })
     }
 
@@ -385,15 +666,18 @@ impl OpenAiCompatProvider {
             detail: format!("TTS read error: {e}"),
         })?;
 
-        let file_name = format!("mofa_tts_{}.wav", uuid::Uuid::new_v4());
-        let path = std::env::temp_dir().join(&file_name);
-        std::fs::write(&path, &bytes)
+        let path = self
+            .output_dir
+            .join(format!("mofa_tts_{}.mp3", uuid::Uuid::new_v4()));
+        tokio::fs::write(&path, &bytes)
+            .await
             .map_err(|e| EngineError::Internal(format!("write error: {e}")))?;
+        let path = path.to_string_lossy().to_string();
 
         let duration_ms = start.elapsed().as_millis() as u64;
         Ok(InferenceResponse {
             text: None,
-            file: Some(file_name),
+            file: Some(path),
             model_used: model_name.to_string(),
             provider: self.name.clone(),
             duration_ms,
@@ -401,6 +685,7 @@ impl OpenAiCompatProvider {
             tokens_used: None,
             fallback_used: false,
             routing_reason: None,
+            ..Default::default()
         })
     }
 
@@ -415,7 +700,7 @@ impl OpenAiCompatProvider {
             .as_deref()
             .ok_or_else(|| EngineError::InvalidRequest("ASR requires input_file".into()))?;
 
-        let file_bytes = std::fs::read(file_path).map_err(|e| {
+        let file_bytes = tokio::fs::read(file_path).await.map_err(|e| {
             EngineError::InvalidRequest(format!("cannot read file '{file_path}': {e}"))
         })?;
 
@@ -476,6 +761,7 @@ impl OpenAiCompatProvider {
             tokens_used: None,
             fallback_used: false,
             routing_reason: None,
+            ..Default::default()
         })
     }
 }
@@ -496,16 +782,19 @@ mod tests {
                     capability: "chat".into(),
                     context_window: Some(8192),
                     memory_mb: None,
+                    ..Default::default()
                 },
                 ModelDef {
                     name: "model-b".into(),
                     capability: "tts".into(),
                     context_window: None,
                     memory_mb: Some(512),
+                    ..Default::default()
                 },
             ],
             CostTier::Medium,
-        );
+        )
+        .unwrap();
 
         let cards = provider.discover().await.unwrap();
         assert_eq!(cards.len(), 2);
@@ -518,8 +807,101 @@ mod tests {
 
     #[test]
     fn kind_is_openai_compat() {
-        let p = OpenAiCompatProvider::new("x", "https://example.com", "key", vec![], CostTier::Low);
+        let p = OpenAiCompatProvider::new("x", "https://example.com", "key", vec![], CostTier::Low)
+            .unwrap();
         assert_eq!(p.kind(), ProviderKind::OpenAiCompatible);
         assert_eq!(p.name(), "x");
+    }
+
+    #[test]
+    fn sse_events_accumulate_text_and_usage() {
+        // A realistic OpenAI `stream: true` sequence: two content deltas, an empty
+        // delta, a terminal usage-only chunk, and the `[DONE]` sentinel.
+        let blocks: Vec<&[u8]> = vec![
+            br#"data: {"choices":[{"delta":{"role":"assistant","content":"He"}}]}"#,
+            br#"data: {"choices":[{"delta":{"content":"llo"}}]}"#,
+            br#"data: {"choices":[{"delta":{"content":""}}]}"#,
+            br#"data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}"#,
+            b"data: [DONE]",
+        ];
+
+        let mut full = String::new();
+        let mut deltas = Vec::new();
+        let mut prompt = None;
+        let mut completion = None;
+        let mut total = None;
+        for block in blocks {
+            match OpenAiCompatProvider::parse_sse_event(block) {
+                Some(SseEvent::Chunk(chunk)) => {
+                    if let Some(u) = chunk.usage {
+                        prompt = u.prompt_tokens;
+                        completion = u.completion_tokens;
+                        total = u.total_tokens;
+                    }
+                    if let Some(content) = chunk
+                        .choices
+                        .into_iter()
+                        .next()
+                        .and_then(|c| c.delta.content)
+                        && !content.is_empty()
+                    {
+                        full.push_str(&content);
+                        deltas.push(content);
+                    }
+                }
+                Some(SseEvent::Done) | None => {}
+            }
+        }
+
+        assert_eq!(deltas, vec!["He", "llo"]);
+        assert_eq!(full, "Hello");
+        assert_eq!(prompt, Some(5));
+        assert_eq!(completion, Some(3));
+        assert_eq!(total, Some(8));
+    }
+
+    #[test]
+    fn parse_sse_event_handles_done_blank_and_garbage() {
+        assert!(matches!(
+            OpenAiCompatProvider::parse_sse_event(b"data: [DONE]"),
+            Some(SseEvent::Done)
+        ));
+        assert!(OpenAiCompatProvider::parse_sse_event(b"").is_none());
+        assert!(OpenAiCompatProvider::parse_sse_event(b": keep-alive comment").is_none());
+        assert!(OpenAiCompatProvider::parse_sse_event(b"data: not json").is_none());
+    }
+
+    #[test]
+    fn sse_frame_len_detects_lf_and_crlf_delimiters() {
+        // `\n\n` frame: `"data: a\n\n"` is 9 bytes (the drained frame incl. both
+        // newlines), leaving `"rest"`.
+        assert_eq!(
+            OpenAiCompatProvider::sse_frame_len(b"data: a\n\nrest"),
+            Some(9)
+        );
+        // `\r\n\r\n` frame (CRLF server/proxy): `"data: a\r\n\r\n"` is 11 bytes.
+        assert_eq!(
+            OpenAiCompatProvider::sse_frame_len(b"data: a\r\n\r\nrest"),
+            Some(11)
+        );
+        // A lone trailing `\n` is not a complete frame yet.
+        assert_eq!(OpenAiCompatProvider::sse_frame_len(b"data: a\n"), None);
+    }
+
+    #[test]
+    fn parse_sse_event_joins_multiple_data_lines() {
+        // Two `data:` lines are joined with a newline, yielding valid JSON.
+        let block = b"data: {\"choices\":[{\"delta\":\ndata: {\"content\":\"hi\"}}]}";
+        let Some(SseEvent::Chunk(chunk)) = OpenAiCompatProvider::parse_sse_event(block) else {
+            panic!("expected a parsed chunk from joined data lines");
+        };
+        assert_eq!(
+            chunk
+                .choices
+                .into_iter()
+                .next()
+                .and_then(|c| c.delta.content),
+            Some("hi".to_string())
+        );
     }
 }

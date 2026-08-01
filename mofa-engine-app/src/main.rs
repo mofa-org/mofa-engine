@@ -1,127 +1,198 @@
 //! MoFA Engine — multimodal AI model orchestration engine.
 //!
-//! Binary entry point. Parses CLI arguments, loads configuration,
-//! initialises the engine, and starts the HTTP server.
+//! Binary entry point. Runs the HTTP server by default, and offers CLI
+//! subcommands (`status`, `capabilities`, `invoke`, `refresh`,
+//! `validate-config`) that talk to a running daemon over the `/v1` API.
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use mofa_engine_core::{Engine, EngineConfig};
-use mofa_engine_sdk::start_server;
-use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::trace::SdkTracerProvider;
+use mofa_engine_sdk::{DaemonClient, Server};
+use mofa_kernel::{Capability, InferenceRequest, Message};
 use std::path::PathBuf;
-use std::sync::Arc;
-use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
-
-fn init_tracer(
-    endpoint: &str,
-) -> Result<opentelemetry_sdk::trace::SdkTracer, opentelemetry::trace::TraceError> {
-    let exporter = opentelemetry_otlp::SpanExporter::builder()
-        .with_tonic()
-        .with_endpoint(endpoint)
-        .build()?;
-
-    let provider = SdkTracerProvider::builder()
-        .with_batch_exporter(exporter)
-        .with_resource(Resource::builder().with_service_name("mofa-engine").build())
-        .build();
-
-    opentelemetry::global::set_tracer_provider(provider.clone());
-
-    use opentelemetry::trace::TracerProvider;
-    Ok(provider.tracer("mofa-engine"))
-}
+use tracing_subscriber::{EnvFilter, prelude::*};
 
 /// MoFA Engine — multimodal AI model orchestration
 #[derive(Parser, Debug)]
 #[command(name = "mofa-engine", version, about)]
 struct Cli {
     /// Path to config.toml (default: auto-detect)
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     config: Option<PathBuf>,
 
-    /// Override listen port
+    /// Override listen port (serve mode)
     #[arg(short, long)]
     port: Option<u16>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// Base URL argument shared by the daemon-facing subcommands.
+#[derive(clap::Args, Debug)]
+struct DaemonArgs {
+    /// Base URL of the running engine daemon.
+    #[arg(long, default_value = "http://127.0.0.1:8420")]
+    url: String,
+    /// Bearer token for a secured daemon (defaults to $MOFA_API_TOKEN).
+    #[arg(long)]
+    token: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Run the HTTP server (default).
+    Serve,
+    /// Validate the configuration and exit.
+    ValidateConfig,
+    /// List a running daemon's capabilities.
+    Capabilities(DaemonArgs),
+    /// Show a running daemon's status.
+    Status(DaemonArgs),
+    /// Re-run discovery on a running daemon.
+    Refresh(DaemonArgs),
+    /// Invoke a model on a running daemon.
+    Invoke {
+        #[command(flatten)]
+        daemon: DaemonArgs,
+        /// Capability to request (e.g. chat, tts).
+        #[arg(long)]
+        capability: Option<String>,
+        /// Specific model name to request.
+        #[arg(long)]
+        model: Option<String>,
+        /// Text input.
+        #[arg(long)]
+        text: String,
+    },
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    Cli::init_tracing();
+    Cli::parse().run().await
+}
 
-    // Load and validate configuration.
-    let mut config = EngineConfig::load_checked(cli.config.as_deref())?;
-
-    // CLI port override
-    if let Some(port) = cli.port {
-        config.listen.port = port;
-    }
-
-    let host = config.listen.host.clone();
-    let port = config.listen.port;
-
-    #[allow(unused_variables)]
-    let observability_enabled = config.observability.enabled;
-    #[allow(unused_variables)]
-    let otlp_endpoint = config.observability.otlp_endpoint.clone();
-
-    // Initialize Tracing Subscriber
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let fmt_layer = fmt::layer().with_target(false);
-
-    let otel_layer = if observability_enabled {
-        if let Some(endpoint) = &otlp_endpoint {
-            match init_tracer(endpoint) {
-                Ok(tracer) => Some(tracing_opentelemetry::layer().with_tracer(tracer)),
-                Err(e) => {
-                    eprintln!("Failed to initialize OTLP tracer: {e}");
-                    None
-                }
+impl Cli {
+    /// Dispatch the parsed command to its handler. Serve/validate run in-process;
+    /// the remaining subcommands act on a running daemon over the `/v1` API.
+    async fn run(self) -> anyhow::Result<()> {
+        let Cli {
+            config,
+            port,
+            command,
+        } = self;
+        match command {
+            None | Some(Command::Serve) => Self::serve(config, port).await,
+            Some(Command::ValidateConfig) => Self::validate_config(config),
+            Some(Command::Capabilities(d)) => {
+                Self::print_json(Self::daemon_client(d).capabilities().await)
             }
-        } else {
-            None
+            Some(Command::Status(d)) => Self::print_json(Self::daemon_client(d).status().await),
+            Some(Command::Refresh(d)) => Self::print_json(Self::daemon_client(d).refresh().await),
+            Some(Command::Invoke {
+                daemon,
+                capability,
+                model,
+                text,
+            }) => {
+                let request = InferenceRequest {
+                    capability: capability.as_deref().and_then(Capability::from_str_loose),
+                    model,
+                    messages: vec![Message {
+                        role: "user".into(),
+                        content: text,
+                        ..Default::default()
+                    }],
+                    request_id: String::new(),
+                    ..Default::default()
+                };
+                Self::print_json(Self::daemon_client(daemon).invoke(&request).await)
+            }
         }
-    } else {
-        None
-    };
-
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(fmt_layer)
-        .with(otel_layer)
-        .init();
-
-    let mut metrics_state = None;
-    let mut obs_sender = None;
-
-    if observability_enabled {
-        tracing::info!("Initializing observability pipeline...");
-        let (metrics, sender) =
-            mofa_observability::collector::init_pipeline(otlp_endpoint.as_deref());
-        metrics_state = Some(metrics);
-        obs_sender = Some(sender);
     }
 
-    tracing::info!("MoFA Engine v{} starting", env!("CARGO_PKG_VERSION"));
+    /// Initialise tracing. Set `MOFA_LOG_FORMAT=json` for structured JSON logs
+    /// (suitable for aggregation); otherwise human-readable text. Levels honour
+    /// `RUST_LOG`.
+    fn init_tracing() {
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+        let json = std::env::var("MOFA_LOG_FORMAT")
+            .map(|v| v.eq_ignore_ascii_case("json"))
+            .unwrap_or(false);
 
-    // Create engine
-    let engine = Engine::try_new(config).await?;
-
-    // Start Observability Bridge
-    if let Some(sender) = obs_sender {
-        let rx = engine.subscribe_events();
-        let engine_clone = Arc::clone(&engine);
-        let metrics_clone = metrics_state.clone();
-        tokio::spawn(async move {
-            mofa_engine_sdk::observability_bridge::run(rx, sender, engine_clone, metrics_clone)
-                .await;
-        });
+        let registry = tracing_subscriber::registry().with(filter);
+        if json {
+            registry
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .json()
+                        .with_current_span(true)
+                        .with_span_list(false),
+                )
+                .init();
+        } else {
+            registry
+                .with(tracing_subscriber::fmt::layer().with_target(false))
+                .init();
+        }
     }
 
-    // Start server
-    start_server(engine, metrics_state, &host, port)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    /// Build a daemon client from the shared args, taking the bearer token from
+    /// `--token` or, failing that, `$MOFA_API_TOKEN`.
+    fn daemon_client(args: DaemonArgs) -> DaemonClient {
+        let token = args
+            .token
+            .or_else(|| std::env::var("MOFA_API_TOKEN").ok())
+            .filter(|t| !t.is_empty());
+        let client = DaemonClient::new(args.url);
+        match token {
+            Some(t) => client.with_token(t),
+            None => client,
+        }
+    }
 
-    Ok(())
+    /// Run the daemon in-process.
+    async fn serve(config_path: Option<PathBuf>, port: Option<u16>) -> anyhow::Result<()> {
+        let mut config = EngineConfig::load_checked(config_path.as_deref())?;
+        if let Some(port) = port {
+            config.listen.port = port;
+        }
+        let host = config.listen.host.clone();
+        let port = config.listen.port;
+
+        tracing::info!("MoFA Engine v{} starting", env!("CARGO_PKG_VERSION"));
+        let engine = Engine::try_new(config).await?;
+        Server::start(engine, &host, port)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    /// Validate configuration without starting the engine.
+    fn validate_config(config_path: Option<PathBuf>) -> anyhow::Result<()> {
+        match EngineConfig::load_checked(config_path.as_deref()) {
+            Ok(cfg) => {
+                println!(
+                    "configuration is valid: {} provider(s), listen {}:{}",
+                    cfg.providers.len(),
+                    cfg.listen.host,
+                    cfg.listen.port
+                );
+                Ok(())
+            }
+            Err(e) => Err(anyhow::anyhow!("invalid configuration: {e}")),
+        }
+    }
+
+    /// Pretty-print a client result as JSON, or fail with the error.
+    fn print_json<T: serde::Serialize, E: std::fmt::Display>(
+        result: Result<T, E>,
+    ) -> anyhow::Result<()> {
+        match result {
+            Ok(value) => {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                Ok(())
+            }
+            Err(e) => Err(anyhow::anyhow!("{e}")),
+        }
+    }
 }
