@@ -6,11 +6,12 @@ import { MetricsStrip } from './MetricsStrip';
 import { DualTrackView } from './DualTrackView';
 import { useEngineMetrics } from './useEngineMetrics';
 import { engine } from '../engine';
-import { Activity, LayoutDashboard, Cpu, Network, ExternalLink, Layers, DollarSign } from 'lucide-react';
+import { Activity, LayoutDashboard, Cpu, Network, ExternalLink, Layers, DollarSign, ShieldCheck } from 'lucide-react';
+import { DataFlowAudit } from './DataFlowAudit';
 
 const GRAFANA_URL = import.meta.env.VITE_GRAFANA_URL || 'http://localhost:3000';
 
-type TabId = 'dual-track' | 'overview' | 'memory' | 'routing' | 'cost';
+type TabId = 'dual-track' | 'audit' | 'overview' | 'memory' | 'routing' | 'cost';
 
 interface TabConfig {
   id: TabId;
@@ -27,6 +28,13 @@ const TABS: TabConfig[] = [
     icon: <Layers className="w-4 h-4" />,
     dashboardPath: '',
     description: 'Real-time side-by-side comparison of local hardware footprint vs cloud financial cost.'
+  },
+  {
+    id: 'audit',
+    label: 'Data Flow Audit',
+    icon: <ShieldCheck className="w-4 h-4" />,
+    dashboardPath: '',
+    description: 'Privacy compliance audit — verify sensitive data never hits cloud endpoints.'
   },
   {
     id: 'overview',
@@ -175,6 +183,8 @@ export function ObservabilityView() {
         <div className="flex-1 min-h-[600px]">
           {activeTab === 'dual-track' ? (
             <DualTrackView />
+          ) : activeTab === 'audit' ? (
+            <DataFlowAudit />
           ) : grafanaAvailable === null ? (
             <div className="w-full h-full flex items-center justify-center">
               <div className="text-text-dim animate-pulse text-sm">Checking observability stack...</div>
