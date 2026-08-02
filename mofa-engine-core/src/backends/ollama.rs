@@ -597,6 +597,15 @@ impl Provider for OllamaProvider {
         sink: StreamSink,
     ) -> Result<InferenceResponse, EngineError> {
         let model_name = ModelId::name(model_id);
+
+        // Embedding is a distinct, non-incremental endpoint (`/api/embed`): there
+        // are no token deltas to stream, so fall back to a single-shot invoke and
+        // return its vectors — mirroring the cloud backends, whose `stream` also
+        // delegates non-chat capabilities to `invoke`.
+        if request.capability == Some(Capability::Embedding) {
+            return self.embed(model_name, request).await;
+        }
+
         let messages = self.to_ollama_messages(request).await;
         if messages.is_empty() {
             return Err(EngineError::InvalidRequest("no messages provided".into()));

@@ -271,18 +271,9 @@ impl AppState {
     ) -> Result<Json<mofa_kernel::InferenceResponse>, (StatusCode, Json<ErrorInfo>)> {
         match state.engine.invoke(req).await {
             Ok(resp) => Ok(Json(resp)),
-            Err(e) => {
-                let status = match &e {
-                    mofa_kernel::EngineError::NoCapableModel(_) => StatusCode::NOT_FOUND,
-                    mofa_kernel::EngineError::InvalidRequest(_) => StatusCode::BAD_REQUEST,
-                    mofa_kernel::EngineError::CircuitOpen(_) => StatusCode::SERVICE_UNAVAILABLE,
-                    mofa_kernel::EngineError::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
-                    mofa_kernel::EngineError::UnsupportedOperation(_) => StatusCode::BAD_REQUEST,
-                    mofa_kernel::EngineError::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,
-                    _ => StatusCode::INTERNAL_SERVER_ERROR,
-                };
-                Err((status, Json(e.info())))
-            }
+            // Share the one status mapping with the other endpoints so a `Failover`
+            // (exhausted candidate chain) is a retryable 503, not a misleading 500.
+            Err(e) => Err((AppState::error_status(&e), Json(e.info()))),
         }
     }
 
@@ -532,6 +523,33 @@ mod tests {
     use mofa_engine_core::EngineConfig;
     use mofa_engine_core::config::{ListenConfig, MemoryConfig, PreflightConfig, TimeoutConfig};
     use tower::ServiceExt; // for `oneshot`
+
+    #[test]
+    fn error_status_maps_failover_to_service_unavailable() {
+        // `/v1/invoke` surfaces `Failover` when the whole candidate chain is
+        // exhausted; it must map to a retryable 503, not a 500. This is the single
+        // mapping the handler previously got wrong before it shared `error_status`.
+        let failover = EngineError::Failover {
+            code: mofa_kernel::ErrorCode::ProviderError,
+            message: "all candidates failed".into(),
+            retryable: true,
+            chain: vec![],
+            routing_reason: None,
+        };
+        assert_eq!(
+            AppState::error_status(&failover),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        // A couple of anchor cases so the shared mapping stays stable.
+        assert_eq!(
+            AppState::error_status(&EngineError::NoCapableModel("chat".into())),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            AppState::error_status(&EngineError::InvalidRequest("bad".into())),
+            StatusCode::BAD_REQUEST
+        );
+    }
 
     #[test]
     fn health_response_serializes() {

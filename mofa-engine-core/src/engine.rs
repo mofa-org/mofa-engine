@@ -1082,13 +1082,25 @@ impl Engine {
         rx
     }
 
+    /// Emit a terminal `Error` chunk for a streaming request that failed *before*
+    /// generation began, recording the failed-request metric so a pre-dispatch
+    /// failure (circuit open, no capable model, admission timeout, …) is counted
+    /// exactly like the equivalent unary `invoke` failure rather than being
+    /// invisible to `mofa_requests_total`. The terminal match after generation
+    /// starts records metrics itself (with the real duration), so this helper is
+    /// only used on the pre-dispatch error paths.
+    async fn fail_stream(&self, out: &mpsc::Sender<StreamChunk>, err: EngineError) {
+        self.metrics.record_request(false, 0, false);
+        let _ = out.send(StreamChunk::Error(err.info())).await;
+    }
+
     /// Drive one streaming request end to end, emitting chunks to `out`.
     async fn run_stream(&self, req: InferenceRequest, out: mpsc::Sender<StreamChunk>) {
         if let Err(e) = self
             .reject_ambiguous_short_name(&req)
             .and_then(|()| self.check_input_path(&req))
         {
-            let _ = out.send(StreamChunk::Error(e.info())).await;
+            self.fail_stream(&out, e).await;
             return;
         }
         self.confirm_prediction(&req);
@@ -1098,7 +1110,7 @@ impl Engine {
         let candidates = self.build_candidates(&all_models, &req, &providers);
         let Some(decision) = candidates.first() else {
             let err = EngineError::NoCapableModel(Self::requested_capability(&req));
-            let _ = out.send(StreamChunk::Error(err.info())).await;
+            self.fail_stream(&out, err).await;
             return;
         };
 
@@ -1118,19 +1130,19 @@ impl Engine {
                 let err = EngineError::NoCapableModel(format!(
                     "estimated cost ${est:.4} exceeds budget ${ceiling:.4}"
                 ));
-                let _ = out.send(StreamChunk::Error(err.info())).await;
+                self.fail_stream(&out, err).await;
                 return;
             }
         }
 
         if !self.circuit_breakers.allow_request(&provider_name) {
             let err = EngineError::CircuitOpen(provider_name.clone());
-            let _ = out.send(StreamChunk::Error(err.info())).await;
+            self.fail_stream(&out, err).await;
             return;
         }
         let Some(provider) = self.find_provider(&provider_name) else {
             let err = EngineError::Internal(format!("provider '{provider_name}' not found"));
-            let _ = out.send(StreamChunk::Error(err.info())).await;
+            self.fail_stream(&out, err).await;
             return;
         };
 
@@ -1145,7 +1157,7 @@ impl Engine {
             .await
         {
             self.emit_request_completed(&req.request_id, 0, false);
-            let _ = out.send(StreamChunk::Error(e.info())).await;
+            self.fail_stream(&out, e).await;
             return;
         }
 
@@ -1156,13 +1168,13 @@ impl Engine {
             Ok(Err(_)) => {
                 self.emit_request_completed(&req.request_id, 0, false);
                 let err = EngineError::Internal("concurrency semaphore closed".into());
-                let _ = out.send(StreamChunk::Error(err.info())).await;
+                self.fail_stream(&out, err).await;
                 return;
             }
             Err(_) => {
                 self.emit_request_completed(&req.request_id, 0, false);
                 let err = EngineError::Timeout(format!("queue wait exceeded for '{model_id}'"));
-                let _ = out.send(StreamChunk::Error(err.info())).await;
+                self.fail_stream(&out, err).await;
                 return;
             }
         };
@@ -3526,5 +3538,26 @@ mod tests {
             }
             other => panic!("expected Error chunk, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn stream_predispatch_failure_is_counted_in_metrics() {
+        // A stream rejected *before* generation begins (here: no capable model)
+        // must still be counted as a handled+failed request, exactly like the
+        // equivalent unary `invoke` failure — otherwise the streaming path
+        // undercounts failures in `mofa_requests_total` / `_failed_total`.
+        let engine = build_engine(vec![], 100, 0);
+        let chunks = collect_stream(engine.invoke_stream(chat_request(None))).await;
+        assert!(matches!(chunks.as_slice(), [StreamChunk::Error(_)]));
+
+        let metrics = engine.metrics_prometheus();
+        assert!(
+            metrics.contains("mofa_requests_total 1"),
+            "pre-dispatch stream failure was not counted as a handled request:\n{metrics}"
+        );
+        assert!(
+            metrics.contains("mofa_requests_failed_total 1"),
+            "pre-dispatch stream failure was not counted as a failed request:\n{metrics}"
+        );
     }
 }

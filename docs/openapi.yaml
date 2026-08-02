@@ -3,40 +3,125 @@ info:
   title: MoFA Engine API
   version: 0.1.0
   description: >-
-    MoFA Engine HTTP API. Covers the Stage 0-2 baseline plus the Stage 3-5
-    additions: deterministic routing with failover, reservation-based memory and
-    lifecycle, and Preflight (hint/subscription/history) warming.
+    MoFA Engine HTTP API: deterministic capability routing with failover,
+    reservation-based memory and lifecycle management, Preflight
+    (hint/subscription/history) warming, dual-track (local/cloud) observability,
+    real token streaming, and the stateful Responses API.
+
+
+    ## Versioning
+
+    Business endpoints are served under the `/v1` prefix, which is the stability
+    contract for this API. Operational endpoints (`/`, `/health`, `/metrics`) are
+    intentionally unversioned, since they are process/infrastructure contracts
+    rather than part of the evolving API surface.
+
+
+    ## Authentication
+
+    When the daemon is started with the `MOFA_API_TOKEN` environment variable,
+    every `/v1` route requires an `Authorization: Bearer <token>` header and a
+    request without a valid token receives `401`. When `MOFA_API_TOKEN` is unset
+    (appropriate only for a trusted local machine) the `/v1` API is open. The
+    public operational routes (`/`, `/health`, `/metrics`) are never gated.
+
+
+    Every response carries an `x-request-id` header for log correlation; a
+    client-supplied `x-request-id` (up to 128 chars) is echoed back, otherwise the
+    engine generates one.
+# Bearer auth applies to every operation by default; the public operational
+# routes below opt out with an empty `security: []`.
+security:
+  - bearerAuth: []
 paths:
+  /:
+    get:
+      summary: Embedded dashboard (HTML)
+      security: []
+      responses:
+        "200":
+          description: The dashboard single-page app.
+          content:
+            text/html:
+              schema:
+                type: string
   /health:
     get:
       summary: Health check
+      security: []
       responses:
         "200":
           description: Engine process health.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /metrics:
+    get:
+      summary: Prometheus text-exposition metrics
+      description: >
+        Bounded-cardinality engine metrics (requests, failures, fallback,
+        load/unload/eviction counters, a request-latency histogram, per-provider
+        token/cost totals tagged by locality, and memory / model / provider
+        gauges). Public — not behind the `/v1` auth gate, so scrapers can reach it.
+      security: []
+      responses:
+        "200":
+          description: Prometheus exposition text.
+          content:
+            text/plain:
+              schema:
+                type: string
   /v1/capabilities:
     get:
       summary: List registered model capabilities
       responses:
         "200":
           description: Registered model cards.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ModelCard"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
   /v1/status:
     get:
       summary: Get engine status
       responses:
         "200":
           description: Engine, backend, and memory status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EngineStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
   /v1/events:
     get:
       summary: Subscribe to server-sent engine events
       responses:
         "200":
           description: SSE event stream.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
   /v1/discovery/refresh:
     post:
       summary: Refresh backend health and model discovery
       responses:
         "200":
           description: Updated engine status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EngineStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
   /v1/invoke:
     post:
       summary: Invoke a model by capability or name
@@ -59,14 +144,25 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "404":
           description: No model satisfies the request.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorInfo"
+        "500":
+          description: >
+            Internal error (provider error, memory pressure, or misconfiguration).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorInfo"
         "503":
-          description: Provider circuit is open.
+          description: >
+            Provider circuit is open, or every failover candidate was exhausted
+            (the error's `failed_chain` lists each attempt).
           content:
             application/json:
               schema:
@@ -82,13 +178,13 @@ paths:
       summary: Invoke a model and stream typed output as Server-Sent Events
       description: >
         Streams the response as SSE. Each `data:` line is a JSON StreamChunk: a
-        `started` event, then zero or more `text` deltas, then a terminal
-        `completed` or `error`. Errors after the stream opens are delivered
-        in-band as an `error` chunk (HTTP status is 200 once streaming begins),
-        so clients handle success and failure through one channel. The interface
-        is versioned and supports a non-streaming compatibility mode, in which a
-        backend emits `started`, a single full-text `text` chunk, then
-        `completed`.
+        `started` event, then zero or more `text` (and, for reasoning-capable
+        models, `reasoning`) deltas, then a terminal `completed` or `error`.
+        Errors after the stream opens are delivered in-band as an `error` chunk
+        (HTTP status is 200 once streaming begins), so clients handle success and
+        failure through one channel. The interface is versioned and supports a
+        non-streaming compatibility mode, in which a backend emits `started`, a
+        single full-text `text` chunk, then `completed`.
       requestBody:
         required: true
         content:
@@ -102,6 +198,8 @@ paths:
             text/event-stream:
               schema:
                 $ref: "#/components/schemas/StreamChunk"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
   /v1/responses:
     post:
       summary: One turn of the stateful Responses API (multi-turn deep reasoning)
@@ -131,8 +229,28 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "404":
           description: No model satisfies the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorInfo"
+        "500":
+          description: Internal error while serving the turn.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorInfo"
+        "503":
+          description: Provider circuit open, or every failover candidate exhausted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorInfo"
+        "504":
+          description: Request timed out.
           content:
             application/json:
               schema:
@@ -155,6 +273,8 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/Message"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "404":
           description: Unknown conversation id.
           content:
@@ -172,8 +292,18 @@ paths:
       responses:
         "200":
           description: The conversation was removed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RemovedResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "404":
           description: Unknown conversation id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RemovedResponse"
   /v1/memory:
     get:
       summary: Current memory accounting (budget, reservations, leases)
@@ -184,6 +314,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MemoryReport"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
   /v1/lifecycle:
     get:
       summary: Rolling model lifecycle history (load/unload/evict)
@@ -196,6 +328,8 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/LifecycleRecord"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
   /v1/preflight:
     get:
       summary: Preflight effectiveness counters
@@ -206,6 +340,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/PreflightStats"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
   /v1/subscriptions:
     get:
       summary: List active capability subscriptions
@@ -218,6 +354,8 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/SubscriptionInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
     post:
       summary: Create a capability subscription (kept warm + eviction-protected)
       requestBody:
@@ -233,6 +371,7 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [id]
                 properties:
                   id:
                     type: integer
@@ -242,6 +381,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
   /v1/subscriptions/{id}:
     delete:
       summary: Remove a capability subscription
@@ -257,19 +398,15 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  removed:
-                    type: boolean
+                $ref: "#/components/schemas/RemovedResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "404":
           description: No such subscription.
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  removed:
-                    type: boolean
+                $ref: "#/components/schemas/RemovedResponse"
   /v1/models/load:
     post:
       summary: Manually load (warm) a model
@@ -287,7 +424,15 @@ paths:
               schema:
                 $ref: "#/components/schemas/ModelActionResponse"
         "400":
-          description: Unknown or busy model.
+          description: Unknown model.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          description: Load failed (provider error, memory pressure, or timeout).
           content:
             application/json:
               schema:
@@ -303,7 +448,8 @@ paths:
               $ref: "#/components/schemas/ModelActionRequest"
       responses:
         "200":
-          description: Model unloaded (or was not known).
+          description: >
+            Model unloaded; `changed` is false when the model was not known.
           content:
             application/json:
               schema:
@@ -314,22 +460,35 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorInfo"
-  /metrics:
-    get:
-      summary: Prometheus text-exposition metrics
-      description: >
-        Bounded-cardinality engine metrics (requests, failures, fallback,
-        load/unload/eviction counters, a request-latency histogram, and memory /
-        model / provider gauges). Public — not behind the `/v1` auth gate.
-      responses:
-        "200":
-          description: Prometheus exposition text.
-          content:
-            text/plain:
-              schema:
-                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        Required on `/v1` routes when the daemon is started with `MOFA_API_TOKEN`.
+  responses:
+    Unauthorized:
+      description: >
+        Missing or invalid bearer token (only when the daemon is started with
+        `MOFA_API_TOKEN`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorInfo"
   schemas:
+    HealthResponse:
+      type: object
+      required: [status, version, uptime_secs]
+      properties:
+        status:
+          type: string
+        version:
+          type: string
+        uptime_secs:
+          type: integer
     InferenceRequest:
       type: object
       properties:
@@ -405,9 +564,12 @@ components:
           type: object
           description: >
             Capability-specific passthrough options. Recognized keys include
-            `language` and `diarize` (ASR speaker separation, S1), `detail`
-            (VLM billing tier), `voice` (TTS), `size` (ImageGen), and
-            `max_tokens` (also used for the `max_cost_usd` estimate).
+            `input` (TTS/embedding text; string or array for embedding),
+            `voice` (TTS), `language` and `diarize` (ASR speaker separation, S1),
+            `detail` (VLM billing tier), `prompt` / `negative_prompt` / `size`
+            (`WxH`) / `width` / `height` (ImageGen and VideoGen), `seconds` and
+            `fps` (VideoGen), and `max_tokens` (also used for the `max_cost_usd`
+            estimate).
         hint_next:
           type: string
         request_id:
@@ -523,6 +685,15 @@ components:
             type: { const: text }
             delta: { type: string }
         - type: object
+          description: >
+            A piece of the model's thought chain (reasoning-capable models),
+            emitted distinctly from answer `text` so callers can display or audit
+            it separately. Only produced when the request sets `reasoning.include`.
+          required: [type, delta]
+          properties:
+            type: { const: reasoning }
+            delta: { type: string }
+        - type: object
           required: [type, duration_ms, fallback_used]
           properties:
             type: { const: completed }
@@ -535,13 +706,34 @@ components:
             fallback_used: { type: boolean }
             routing_reason: { type: [string, "null"] }
         - type: object
+          description: >
+            Terminal error event, carrying an ErrorInfo body flattened alongside
+            the `type` tag.
           required: [type, code, message, retryable]
           properties:
             type: { const: error }
-            code: { type: string }
+            code:
+              type: string
+              enum:
+                [
+                  no_capable_model,
+                  provider_error,
+                  circuit_open,
+                  memory_pressure,
+                  invalid_request,
+                  timeout,
+                  unsupported_operation,
+                  config,
+                  internal,
+                ]
             message: { type: string }
             retryable: { type: boolean }
             source: { type: [string, "null"] }
+            failed_chain:
+              type: array
+              items:
+                $ref: "#/components/schemas/FailedAttempt"
+            routing_reason: { type: [string, "null"] }
     ModelActionRequest:
       type: object
       required: [model_id]
@@ -557,12 +749,37 @@ components:
           type: string
         changed:
           type: boolean
+    RemovedResponse:
+      type: object
+      required: [removed]
+      properties:
+        removed:
+          type: boolean
+    FailedAttempt:
+      type: object
+      required: [provider, model, reason]
+      properties:
+        provider: { type: string }
+        model: { type: string }
+        reason: { type: string }
     ErrorInfo:
       type: object
       required: [code, message, retryable]
       properties:
         code:
           type: string
+          enum:
+            [
+              no_capable_model,
+              provider_error,
+              circuit_open,
+              memory_pressure,
+              invalid_request,
+              timeout,
+              unsupported_operation,
+              config,
+              internal,
+            ]
         message:
           type: string
         retryable:
@@ -576,15 +793,130 @@ components:
             attempted and every candidate failed). Lets an Agent decide whether to
             retry or switch tiers rather than seeing only the last error.
           items:
-            type: object
-            required: [provider, model, reason]
-            properties:
-              provider: { type: string }
-              model: { type: string }
-              reason: { type: string }
+            $ref: "#/components/schemas/FailedAttempt"
         routing_reason:
           type: string
           description: Machine-readable routing reason for the primary candidate.
+    ExecutionState:
+      type: object
+      required: [active_requests, max_concurrency]
+      properties:
+        active_requests:
+          type: integer
+        max_concurrency:
+          type: integer
+    ModelCard:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Canonical `provider/model` identifier.
+        name:
+          type: string
+        provider:
+          type: string
+        capability:
+          type: string
+          enum: [chat, tts, asr, image_gen, video_gen, vlm, embedding]
+        capabilities:
+          type: array
+          items:
+            type: string
+            enum: [chat, tts, asr, image_gen, video_gen, vlm, embedding]
+        status:
+          type: string
+          enum: [cold, warming, hot, busy, failed]
+        availability:
+          type: string
+          enum: [discovered, configured, unavailable]
+        residency:
+          type: string
+          enum: [unknown, unloaded, loading, loaded, unloading, remote]
+        execution:
+          $ref: "#/components/schemas/ExecutionState"
+        cost_tier:
+          type: string
+          enum: [free, low, medium, high]
+        context_window:
+          type: integer
+        memory_estimate_bytes:
+          type: integer
+        reasoning_tier:
+          type: [string, "null"]
+          enum: [low, medium, high, null]
+          description: >
+            Reasoning tier this model serves, for `reasoning.effort` tier routing.
+            Null for non-tiered models.
+    ProviderHealth:
+      type: object
+      required: [name, healthy, circuit_state]
+      properties:
+        name:
+          type: string
+        healthy:
+          type: boolean
+        circuit_state:
+          type: string
+    BackendStatus:
+      type: object
+      required: [name, kind, health, circuit_state, features]
+      properties:
+        name:
+          type: string
+        kind:
+          type: string
+          enum:
+            [
+              ollama,
+              openai_compatible,
+              local_tts,
+              local_asr,
+              local_image_gen,
+              local_video_gen,
+              liter_llm,
+            ]
+        health:
+          type: string
+          enum: [unknown, healthy, degraded, unavailable]
+        circuit_state:
+          type: string
+          description: closed, open, or half_open.
+        features:
+          type: array
+          items:
+            type: string
+            enum:
+              [
+                discovery,
+                load,
+                unload,
+                residency_inspection,
+                streaming,
+                memory_reporting,
+              ]
+    EngineStatus:
+      type: object
+      properties:
+        total_models:
+          type: integer
+        loaded_models:
+          type: integer
+        providers:
+          type: integer
+        memory_used_bytes:
+          type: integer
+        memory_budget_bytes:
+          type: integer
+        uptime_secs:
+          type: integer
+        provider_health:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProviderHealth"
+        backends:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackendStatus"
     AllocationSnapshot:
       type: object
       properties:
