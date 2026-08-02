@@ -51,7 +51,7 @@ pub struct SubscriptionInfo {
 
 impl SubscriptionRegistry {
     /// Create an empty registry.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             inner: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(1),
@@ -66,7 +66,7 @@ impl SubscriptionRegistry {
     ///
     /// `ttl` bounds the subscription's lifetime; pass `None` for one that lives
     /// until explicitly removed.
-    pub fn subscribe(
+    pub(crate) fn subscribe(
         &self,
         app_id: Option<String>,
         session_id: Option<String>,
@@ -86,7 +86,7 @@ impl SubscriptionRegistry {
     }
 
     /// Remove a subscription by id. Returns whether one was removed.
-    pub fn unsubscribe(&self, id: u64) -> bool {
+    pub(crate) fn unsubscribe(&self, id: u64) -> bool {
         let mut subs = self.lock();
         let before = subs.len();
         subs.retain(|s| s.id != id);
@@ -97,7 +97,7 @@ impl SubscriptionRegistry {
     ///
     /// Prunes and reads under a single lock, so the result is a consistent
     /// snapshot and expired entries are dropped exactly once.
-    pub fn active_capabilities(&self) -> HashSet<Capability> {
+    pub(crate) fn active_capabilities(&self) -> HashSet<Capability> {
         let now = Instant::now();
         let mut subs = self.lock();
         subs.retain(|s| !s.is_expired(now));
@@ -106,14 +106,14 @@ impl SubscriptionRegistry {
             .collect()
     }
 
-    /// Whether `capability` is currently subscribed. Test-support.
+    /// Whether `capability` is currently subscribed. Test-support (this module only).
     #[cfg(test)]
-    pub fn is_subscribed(&self, capability: Capability) -> bool {
+    fn is_subscribed(&self, capability: Capability) -> bool {
         self.active_capabilities().contains(&capability)
     }
 
     /// List all live subscriptions.
-    pub fn list(&self) -> Vec<SubscriptionInfo> {
+    pub(crate) fn list(&self) -> Vec<SubscriptionInfo> {
         let now = Instant::now();
         let mut subs = self.lock();
         subs.retain(|s| !s.is_expired(now));

@@ -72,6 +72,9 @@ pub enum ProviderKind {
     LocalAsr,
     /// Local process-adapter image-generation backend (e.g. a Stable Diffusion CLI).
     LocalImageGen,
+    /// Local process-adapter video-generation backend (e.g. an AnimateDiff / SVD
+    /// or Wan-style CLI).
+    LocalVideoGen,
     /// Multi-vendor cloud gateway via the `liter-llm` crate (143+ providers,
     /// unified OpenAI-style contract).
     LiterLlm,
@@ -84,7 +87,11 @@ impl ProviderKind {
     pub fn is_local(self) -> bool {
         matches!(
             self,
-            Self::Ollama | Self::LocalTts | Self::LocalAsr | Self::LocalImageGen
+            Self::Ollama
+                | Self::LocalTts
+                | Self::LocalAsr
+                | Self::LocalImageGen
+                | Self::LocalVideoGen
         )
     }
 }
@@ -547,13 +554,60 @@ impl InferenceRequest {
     }
 }
 
+/// A turn in the stateful Responses API (S2 multi-turn deep reasoning).
+///
+/// The engine stores each turn's full message history keyed by the returned
+/// [`ResponsesResponse::id`], so a caller continues a conversation by passing
+/// that id as `previous_response_id` on the next turn instead of resending the
+/// whole history. All routing knobs (capability, model, `prefer`, `reasoning`,
+/// `params`, …) come from the flattened [`InferenceRequest`], so a Responses
+/// turn routes exactly like a one-shot `invoke`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResponsesRequest {
+    /// Continue the conversation stored under this prior response id. `None`
+    /// starts a new conversation. An unknown id is a (non-retryable) error rather
+    /// than a silent fresh start, so a caller notices an expired/evicted chain.
+    #[serde(default)]
+    pub previous_response_id: Option<String>,
+    /// System instructions, applied only when *starting* a new conversation
+    /// (ignored when continuing, since the stored history already carries them).
+    #[serde(default)]
+    pub instructions: Option<String>,
+    /// Convenience shorthand for a single new user message this turn. Appended
+    /// after any explicit `messages`.
+    #[serde(default)]
+    pub input: Option<String>,
+    /// Routing knobs and any explicit `messages` for this turn, flattened so a
+    /// Responses request is a superset of an [`InferenceRequest`] on the wire.
+    #[serde(flatten)]
+    pub request: InferenceRequest,
+}
+
+/// Result of a [`ResponsesRequest`] turn.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResponsesResponse {
+    /// Id of *this* response. Pass it as `previous_response_id` to continue the
+    /// conversation from here.
+    pub id: String,
+    /// Total messages now stored in the conversation (including this turn's reply).
+    pub message_count: usize,
+    /// The underlying inference result (text, tokens, cost, provider, routing),
+    /// flattened so a Responses reply is a superset of an [`InferenceResponse`].
+    #[serde(flatten)]
+    pub response: InferenceResponse,
+}
+
 /// Response from an inference call.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InferenceResponse {
     /// Text output (for chat, ASR, etc.).
     pub text: Option<String>,
-    /// File output path (for TTS, image gen, etc.).
+    /// File output path (for TTS, image gen, video gen, etc.).
     pub file: Option<String>,
+    /// Embedding vectors (for the `embedding` capability): one row per input, in
+    /// input order. `None` for non-embedding responses so the field is omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<Vec<Vec<f32>>>,
     /// Which model actually handled the request.
     pub model_used: String,
     /// Which provider served it.

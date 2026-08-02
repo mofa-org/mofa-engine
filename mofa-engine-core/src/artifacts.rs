@@ -11,11 +11,11 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 /// Name prefix stamped on every engine-generated artifact.
-pub const ARTIFACT_PREFIX: &str = "mofa_";
+pub(crate) const ARTIFACT_PREFIX: &str = "mofa_";
 
 /// Deletes stale engine artifacts from a directory.
 #[derive(Debug, Clone)]
-pub struct ArtifactSweeper {
+pub(crate) struct ArtifactSweeper {
     dir: PathBuf,
     retention: Duration,
 }
@@ -23,7 +23,7 @@ pub struct ArtifactSweeper {
 impl ArtifactSweeper {
     /// Create a sweeper for `dir` (defaulting to the system temp dir) that
     /// removes engine artifacts older than `retention`.
-    pub fn new(dir: Option<PathBuf>, retention: Duration) -> Self {
+    pub(crate) fn new(dir: Option<PathBuf>, retention: Duration) -> Self {
         Self {
             dir: dir.unwrap_or_else(std::env::temp_dir),
             retention,
@@ -31,13 +31,13 @@ impl ArtifactSweeper {
     }
 
     /// The retention window; artifacts at least this old are removed.
-    pub fn retention(&self) -> Duration {
+    pub(crate) fn retention(&self) -> Duration {
         self.retention
     }
 
     /// Delete engine artifacts older than the retention. Returns how many files
     /// were removed. Non-engine files and unreadable entries are left untouched.
-    pub fn sweep(&self) -> usize {
+    pub(crate) fn sweep(&self) -> usize {
         let now = SystemTime::now();
         let Ok(entries) = std::fs::read_dir(&self.dir) else {
             return 0;

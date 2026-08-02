@@ -15,7 +15,7 @@ const TIER_MATCH_BONUS: i64 = 5_000;
 
 /// Provider facts needed by routing.
 #[derive(Debug, Clone)]
-pub struct RoutingProvider {
+pub(crate) struct RoutingProvider {
     /// Provider name.
     pub name: String,
     /// Provider kind.
@@ -30,7 +30,7 @@ pub struct RoutingProvider {
 
 /// Explainable route decision.
 #[derive(Debug, Clone)]
-pub struct RouteDecision<'a> {
+pub(crate) struct RouteDecision<'a> {
     /// Selected model.
     pub model: &'a ModelCard,
     /// Composite score.
@@ -40,7 +40,7 @@ pub struct RouteDecision<'a> {
 }
 
 /// Selects the best model for a given request from a pool of candidates.
-pub struct Router;
+pub(crate) struct Router;
 
 impl Router {
     /// Apply hard constraints, then score and rank every valid candidate,
@@ -51,7 +51,7 @@ impl Router {
     /// whose estimated footprint exceeds the entire budget can never be admitted
     /// even after evicting everything else, so it is dropped here rather than
     /// failing later at load time. Pass `None` to skip this filter.
-    pub fn route_ranked<'a>(
+    pub(crate) fn route_ranked<'a>(
         models: &'a [ModelCard],
         request: &InferenceRequest,
         providers: &[RoutingProvider],

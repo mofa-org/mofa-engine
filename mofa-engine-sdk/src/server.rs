@@ -111,6 +111,12 @@ impl AppState {
             .route("/v1/capabilities", get(AppState::capabilities_handler))
             .route("/v1/invoke", post(AppState::invoke_handler))
             .route("/v1/invoke/stream", post(AppState::invoke_stream_handler))
+            .route("/v1/responses", post(AppState::responses_handler))
+            .route(
+                "/v1/responses/{id}",
+                get(AppState::get_conversation_handler)
+                    .delete(AppState::delete_conversation_handler),
+            )
             .route("/v1/status", get(AppState::status_handler))
             .route("/v1/memory", get(AppState::memory_handler))
             .route("/v1/lifecycle", get(AppState::lifecycle_handler))
@@ -265,18 +271,9 @@ impl AppState {
     ) -> Result<Json<mofa_kernel::InferenceResponse>, (StatusCode, Json<ErrorInfo>)> {
         match state.engine.invoke(req).await {
             Ok(resp) => Ok(Json(resp)),
-            Err(e) => {
-                let status = match &e {
-                    mofa_kernel::EngineError::NoCapableModel(_) => StatusCode::NOT_FOUND,
-                    mofa_kernel::EngineError::InvalidRequest(_) => StatusCode::BAD_REQUEST,
-                    mofa_kernel::EngineError::CircuitOpen(_) => StatusCode::SERVICE_UNAVAILABLE,
-                    mofa_kernel::EngineError::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
-                    mofa_kernel::EngineError::UnsupportedOperation(_) => StatusCode::BAD_REQUEST,
-                    mofa_kernel::EngineError::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,
-                    _ => StatusCode::INTERNAL_SERVER_ERROR,
-                };
-                Err((status, Json(e.info())))
-            }
+            // Share the one status mapping with the other endpoints so a `Failover`
+            // (exhausted candidate chain) is a retryable 503, not a misleading 500.
+            Err(e) => Err((AppState::error_status(&e), Json(e.info()))),
         }
     }
 
@@ -305,6 +302,46 @@ impl AppState {
                 .interval(Duration::from_secs(15))
                 .text("ping"),
         )
+    }
+
+    /// `POST /v1/responses` — one turn of the stateful Responses API. Returns the
+    /// reply plus an `id` to pass as `previous_response_id` to continue.
+    async fn responses_handler(
+        State(state): State<AppState>,
+        Json(req): Json<mofa_kernel::ResponsesRequest>,
+    ) -> Result<Json<mofa_kernel::ResponsesResponse>, (StatusCode, Json<ErrorInfo>)> {
+        match state.engine.respond(req).await {
+            Ok(resp) => Ok(Json(resp)),
+            Err(e) => Err((AppState::error_status(&e), Json(e.info()))),
+        }
+    }
+
+    /// `GET /v1/responses/{id}` — the stored message history for a conversation.
+    async fn get_conversation_handler(
+        State(state): State<AppState>,
+        Path(id): Path<String>,
+    ) -> Result<Json<Vec<mofa_kernel::Message>>, (StatusCode, Json<ErrorInfo>)> {
+        match state.engine.conversation_messages(&id) {
+            Some(messages) => Ok(Json(messages)),
+            None => {
+                let err = EngineError::InvalidRequest(format!("unknown conversation '{id}'"));
+                Err((StatusCode::NOT_FOUND, Json(err.info())))
+            }
+        }
+    }
+
+    /// `DELETE /v1/responses/{id}` — forget a stored conversation.
+    async fn delete_conversation_handler(
+        State(state): State<AppState>,
+        Path(id): Path<String>,
+    ) -> (StatusCode, Json<UnsubscribeResponse>) {
+        let removed = state.engine.delete_conversation(&id);
+        let status = if removed {
+            StatusCode::OK
+        } else {
+            StatusCode::NOT_FOUND
+        };
+        (status, Json(UnsubscribeResponse { removed }))
     }
 
     async fn status_handler(State(state): State<AppState>) -> Json<mofa_kernel::EngineStatus> {
@@ -488,6 +525,33 @@ mod tests {
     use tower::ServiceExt; // for `oneshot`
 
     #[test]
+    fn error_status_maps_failover_to_service_unavailable() {
+        // `/v1/invoke` surfaces `Failover` when the whole candidate chain is
+        // exhausted; it must map to a retryable 503, not a 500. This is the single
+        // mapping the handler previously got wrong before it shared `error_status`.
+        let failover = EngineError::Failover {
+            code: mofa_kernel::ErrorCode::ProviderError,
+            message: "all candidates failed".into(),
+            retryable: true,
+            chain: vec![],
+            routing_reason: None,
+        };
+        assert_eq!(
+            AppState::error_status(&failover),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        // A couple of anchor cases so the shared mapping stays stable.
+        assert_eq!(
+            AppState::error_status(&EngineError::NoCapableModel("chat".into())),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            AppState::error_status(&EngineError::InvalidRequest("bad".into())),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
     fn health_response_serializes() {
         let resp = HealthResponse {
             status: "ok",
@@ -570,6 +634,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.headers().get(REQUEST_ID_HEADER).unwrap(), "abc-123");
+    }
+
+    #[tokio::test]
+    async fn responses_endpoint_validates_input() {
+        // With no input at all, the stateful Responses turn is a 400 (the engine
+        // rejects an empty turn) — exercises the route + error mapping end to end.
+        let app = AppState::build_app(test_state(None).await);
+        let resp = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

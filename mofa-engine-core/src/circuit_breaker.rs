@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 /// Circuit breaker state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CircuitState {
+pub(crate) enum CircuitState {
     /// Normal operation — requests flow through.
     Closed,
     /// Provider is deemed unhealthy — all requests fail fast.
@@ -30,7 +30,7 @@ impl std::fmt::Display for CircuitState {
 
 /// Configuration for the circuit breaker.
 #[derive(Debug, Clone)]
-pub struct CircuitBreakerConfig {
+pub(crate) struct CircuitBreakerConfig {
     /// Number of consecutive failures before opening the circuit.
     pub failure_threshold: u32,
     /// Seconds to wait in Open before transitioning to HalfOpen.
@@ -170,14 +170,14 @@ impl ProviderBreaker {
 }
 
 /// Manages circuit breakers for all providers.
-pub struct CircuitBreakerRegistry {
+pub(crate) struct CircuitBreakerRegistry {
     breakers: Mutex<HashMap<String, ProviderBreaker>>,
     config: CircuitBreakerConfig,
 }
 
 impl CircuitBreakerRegistry {
     /// Create a new registry with the given configuration.
-    pub fn new(config: CircuitBreakerConfig) -> Self {
+    pub(crate) fn new(config: CircuitBreakerConfig) -> Self {
         Self {
             breakers: Mutex::new(HashMap::new()),
             config,
@@ -185,7 +185,7 @@ impl CircuitBreakerRegistry {
     }
 
     /// Check if a request to the given provider is allowed.
-    pub fn allow_request(&self, provider: &str) -> bool {
+    pub(crate) fn allow_request(&self, provider: &str) -> bool {
         let mut breakers = self.breakers.lock().unwrap_or_else(|e| e.into_inner());
         let breaker = breakers
             .entry(provider.to_string())
@@ -194,7 +194,7 @@ impl CircuitBreakerRegistry {
     }
 
     /// Record a successful request for a provider.
-    pub fn record_success(&self, provider: &str) {
+    pub(crate) fn record_success(&self, provider: &str) {
         let mut breakers = self.breakers.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(b) = breakers.get_mut(provider) {
             b.record_success();
@@ -202,7 +202,7 @@ impl CircuitBreakerRegistry {
     }
 
     /// Record a failed request for a provider.
-    pub fn record_failure(&self, provider: &str) {
+    pub(crate) fn record_failure(&self, provider: &str) {
         let mut breakers = self.breakers.lock().unwrap_or_else(|e| e.into_inner());
         let breaker = breakers
             .entry(provider.to_string())
@@ -211,7 +211,7 @@ impl CircuitBreakerRegistry {
     }
 
     /// Get the current state for a provider.
-    pub fn state(&self, provider: &str) -> CircuitState {
+    pub(crate) fn state(&self, provider: &str) -> CircuitState {
         let breakers = self.breakers.lock().unwrap_or_else(|e| e.into_inner());
         breakers
             .get(provider)

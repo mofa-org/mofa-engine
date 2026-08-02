@@ -28,7 +28,7 @@ struct ProviderUsage {
 
 /// Process-wide engine counters.
 #[derive(Default)]
-pub struct EngineMetrics {
+pub(crate) struct EngineMetrics {
     requests_total: AtomicU64,
     requests_failed: AtomicU64,
     requests_fallback: AtomicU64,
@@ -46,7 +46,7 @@ pub struct EngineMetrics {
 
 impl EngineMetrics {
     /// Record the outcome of one logical inference request.
-    pub fn record_request(&self, success: bool, duration_ms: u64, fallback_used: bool) {
+    pub(crate) fn record_request(&self, success: bool, duration_ms: u64, fallback_used: bool) {
         self.requests_total.fetch_add(1, Ordering::Relaxed);
         if !success {
             self.requests_failed.fetch_add(1, Ordering::Relaxed);
@@ -69,7 +69,7 @@ impl EngineMetrics {
 
     /// Fold a lifecycle event (as recorded in the lifecycle history) into the
     /// relevant lifecycle counter.
-    pub fn record_lifecycle(&self, event: &str) {
+    pub(crate) fn record_lifecycle(&self, event: &str) {
         match event {
             "load" => &self.loads_total,
             "unload" => &self.unloads_total,
@@ -85,7 +85,7 @@ impl EngineMetrics {
     ///
     /// `is_local` tags the series with the dual-track `locality` label so the
     /// dashboard can compare on-device vs cloud spend/throughput (PRD §5.3).
-    pub fn record_usage(
+    pub(crate) fn record_usage(
         &self,
         provider: &str,
         is_local: bool,
@@ -117,7 +117,7 @@ impl EngineMetrics {
     ///
     /// `gauges` are point-in-time values pulled from the engine (memory, model
     /// counts, preflight, and per-provider routability) sampled at scrape time.
-    pub fn render_prometheus(&self, gauges: &MetricsGauges) -> String {
+    pub(crate) fn render_prometheus(&self, gauges: &MetricsGauges) -> String {
         let mut out = String::with_capacity(2048);
 
         let counter = |out: &mut String, name: &str, help: &str, value: u64| {
@@ -303,7 +303,7 @@ impl EngineMetrics {
 
 /// Point-in-time gauge values sampled from the engine at scrape time.
 #[derive(Debug, Default, Clone)]
-pub struct MetricsGauges {
+pub(crate) struct MetricsGauges {
     /// Known models in the registry.
     pub models_total: u64,
     /// Models currently resident.

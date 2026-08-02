@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use liter_llm::{
     AssistantContent, AssistantMessage, ChatCompletionRequest, ClientConfigBuilder, ContentPart,
-    CreateImageRequest, DefaultClient, ImageDetail, LlmClient, Message as LiterMessage,
-    SystemMessage, UserContent, UserMessage,
+    CreateImageRequest, DefaultClient, EmbeddingInput, EmbeddingRequest as LiterEmbeddingRequest,
+    ImageDetail, LlmClient, Message as LiterMessage, SystemMessage, UserContent, UserMessage,
 };
 use mofa_kernel::{
     BackendFeature, BackendHealth, Capability, CostTier, EngineError, InferenceRequest,
@@ -28,7 +28,7 @@ use tokio_stream::StreamExt as _;
 use crate::config::ModelDef;
 
 /// A provider that reaches many cloud vendors through the `liter-llm` gateway.
-pub struct LiterLLMProvider {
+pub(crate) struct LiterLLMProvider {
     /// Display name.
     name: String,
     /// Configured models (each `name` is a liter-llm `provider/model` id).
@@ -49,7 +49,7 @@ impl LiterLLMProvider {
     /// When `api_key` is empty, liter-llm resolves the vendor's environment
     /// variable (e.g. `OPENAI_API_KEY`) from the first model's `provider/` prefix.
     /// A non-empty `base_url` overrides the vendor default (e.g. a private gateway).
-    pub fn new(
+    pub(crate) fn new(
         name: impl Into<String>,
         api_key: Option<String>,
         base_url: impl Into<String>,
@@ -246,6 +246,77 @@ impl LiterLLMProvider {
             duration_ms: start.elapsed().as_millis() as u64,
             request_id: request.request_id.clone(),
             tokens_used: None,
+            fallback_used: false,
+            routing_reason: None,
+            ..Default::default()
+        })
+    }
+
+    /// Text embedding (S3/RAG enabler): embed one or more inputs in a single
+    /// call. Inputs come from `params.input` (string or array) or, failing that,
+    /// the message contents — shared with the OpenAI-compatible backend so both
+    /// resolve inputs identically.
+    async fn invoke_embedding(
+        &self,
+        model_name: &str,
+        request: &InferenceRequest,
+        start: Instant,
+    ) -> Result<InferenceResponse, EngineError> {
+        let inputs =
+            crate::backends::openai_compat::OpenAiCompatProvider::embedding_inputs(request);
+        if inputs.is_empty() {
+            return Err(EngineError::InvalidRequest(
+                "embedding requires text input (params.input or messages)".into(),
+            ));
+        }
+
+        let req = LiterEmbeddingRequest {
+            model: model_name.to_string(),
+            input: EmbeddingInput::Multiple(inputs),
+            ..Default::default()
+        };
+
+        let mut resp = self
+            .client()?
+            .embed(req)
+            .await
+            .map_err(|e| self.provider_error(e))?;
+
+        // Providers may return rows out of batch order; restore input order.
+        resp.data.sort_by_key(|d| d.index);
+        let vectors: Vec<Vec<f32>> = resp.data.into_iter().map(|d| d.embedding).collect();
+        if vectors.is_empty() {
+            return Err(EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: "embedding response contained no vectors".into(),
+            });
+        }
+
+        // Embeddings bill input tokens only (completion is always zero).
+        let (prompt_tokens, tokens_used) = match resp.usage {
+            Some(u) => {
+                let prompt = u.prompt_tokens as u32;
+                let total = if u.total_tokens > 0 {
+                    u.total_tokens as u32
+                } else {
+                    prompt
+                };
+                (Some(prompt), Some(total))
+            }
+            None => (None, None),
+        };
+
+        Ok(InferenceResponse {
+            text: None,
+            file: None,
+            embedding: Some(vectors),
+            model_used: model_name.to_string(),
+            provider: self.name.clone(),
+            duration_ms: start.elapsed().as_millis() as u64,
+            request_id: request.request_id.clone(),
+            tokens_used,
+            prompt_tokens,
+            completion_tokens: Some(0),
             fallback_used: false,
             routing_reason: None,
             ..Default::default()
@@ -494,6 +565,7 @@ impl Provider for LiterLLMProvider {
             Capability::Chat => self.invoke_chat(model_name, request, start).await,
             Capability::Vlm => self.invoke_vlm(model_name, request, start).await,
             Capability::ImageGen => self.invoke_image_gen(model_name, request, start).await,
+            Capability::Embedding => self.invoke_embedding(model_name, request, start).await,
             other => Err(EngineError::UnsupportedOperation(format!(
                 "provider '{}' does not support {other} via liter-llm",
                 self.name

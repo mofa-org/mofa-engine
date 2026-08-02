@@ -113,7 +113,7 @@ pub(crate) struct Prediction {
 
 impl PreflightPredictor {
     /// Create a new predictor.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
         }
@@ -130,7 +130,7 @@ impl PreflightPredictor {
     /// chain therefore only ever accumulates transitions that genuinely occurred
     /// within some scope — an edge that spanned two different scopes (because
     /// their requests interleaved) is never invented.
-    pub fn record(&self, scope: &str, capability: Capability) {
+    pub(crate) fn record(&self, scope: &str, capability: Capability) {
         let mut scopes = self.lock();
         Self::evict_if_full(&mut scopes, scope);
 
@@ -177,7 +177,7 @@ impl PreflightPredictor {
     /// Tries the scope's own chain first; if it lacks enough samples or
     /// confidence, falls back to the global chain. Returns `None` when neither
     /// clears `min_samples` and `confidence_threshold`.
-    pub fn predict(
+    pub(crate) fn predict(
         &self,
         scope: &str,
         current: Capability,
@@ -251,31 +251,31 @@ pub struct PreflightStats {
 
 impl PreflightMetrics {
     /// A warm task was spawned.
-    pub fn warm_started(&self) {
+    pub(crate) fn warm_started(&self) {
         self.warms_started.fetch_add(1, Ordering::Relaxed);
     }
     /// A warm task completed successfully.
-    pub fn warm_completed(&self) {
+    pub(crate) fn warm_completed(&self) {
         self.warms_completed.fetch_add(1, Ordering::Relaxed);
     }
     /// A warm task failed.
-    pub fn warm_failed(&self) {
+    pub(crate) fn warm_failed(&self) {
         self.warms_failed.fetch_add(1, Ordering::Relaxed);
     }
     /// A warm was skipped (deduplicated, disabled, or unsafe).
-    pub fn warm_skipped(&self) {
+    pub(crate) fn warm_skipped(&self) {
         self.warms_skipped.fetch_add(1, Ordering::Relaxed);
     }
     /// A prediction was produced.
-    pub fn prediction(&self) {
+    pub(crate) fn prediction(&self) {
         self.predictions.fetch_add(1, Ordering::Relaxed);
     }
     /// A prior prediction matched the next request.
-    pub fn hit(&self) {
+    pub(crate) fn hit(&self) {
         self.hits.fetch_add(1, Ordering::Relaxed);
     }
     /// A prior prediction did not match the next request.
-    pub fn miss(&self) {
+    pub(crate) fn miss(&self) {
         self.misses.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -285,7 +285,7 @@ impl PreflightMetrics {
     /// concurrent updates the fields may reflect slightly different instants;
     /// they are monotonic and eventually consistent, which is what the metrics
     /// consumers need.
-    pub fn snapshot(&self) -> PreflightStats {
+    pub(crate) fn snapshot(&self) -> PreflightStats {
         PreflightStats {
             warms_started: self.warms_started.load(Ordering::Relaxed),
             warms_completed: self.warms_completed.load(Ordering::Relaxed),

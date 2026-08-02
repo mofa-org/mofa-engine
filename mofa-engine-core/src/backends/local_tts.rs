@@ -37,7 +37,7 @@ use tokio::process::Command;
 use crate::config::ModelDef;
 
 /// A process-adapter provider that shells out to a local TTS command.
-pub struct LocalTtsProvider {
+pub(crate) struct LocalTtsProvider {
     /// Display name.
     name: String,
     /// Program to execute per synthesis.
@@ -54,7 +54,7 @@ pub struct LocalTtsProvider {
 
 impl LocalTtsProvider {
     /// Create a new local TTS process adapter.
-    pub fn new(
+    pub(crate) fn new(
         name: impl Into<String>,
         command: impl Into<String>,
         args: Vec<String>,

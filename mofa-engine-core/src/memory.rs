@@ -18,7 +18,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// Tracks per-model memory reservations and enforces a global budget.
-pub struct MemoryManager {
+pub(crate) struct MemoryManager {
     /// Total budget in bytes.
     budget_bytes: u64,
     /// Per-model allocations.
@@ -64,7 +64,7 @@ impl MemoryManager {
     /// Create a new memory manager.
     ///
     /// If `budget_mb` is `None`, auto-detect from system RAM (use 70% of total).
-    pub fn new(budget_mb: Option<u64>) -> Self {
+    pub(crate) fn new(budget_mb: Option<u64>) -> Self {
         let budget_bytes = match budget_mb {
             Some(mb) => mb.saturating_mul(1024 * 1024),
             None => Self::detect_system_memory(),
@@ -90,24 +90,25 @@ impl MemoryManager {
     }
 
     /// Total budget in bytes.
-    pub fn budget_bytes(&self) -> u64 {
+    pub(crate) fn budget_bytes(&self) -> u64 {
         self.budget_bytes
     }
 
     /// Currently reserved bytes across all models.
-    pub fn used_bytes(&self) -> u64 {
+    pub(crate) fn used_bytes(&self) -> u64 {
         self.lock().values().map(|a| a.reserved_bytes).sum()
     }
 
     /// Bytes still available within the budget.
-    pub fn available_bytes(&self) -> u64 {
+    pub(crate) fn available_bytes(&self) -> u64 {
         self.budget_bytes.saturating_sub(self.used_bytes())
     }
 
     /// Whether `needed_bytes` currently fits within the budget without eviction.
-    /// Test-support: production paths reserve atomically via [`Self::try_reserve`].
+    /// Test-support (this module only): production paths reserve atomically via
+    /// [`Self::try_reserve`].
     #[cfg(test)]
-    pub fn can_fit(&self, needed_bytes: u64) -> bool {
+    fn can_fit(&self, needed_bytes: u64) -> bool {
         self.available_bytes() >= needed_bytes
     }
 
@@ -117,7 +118,7 @@ impl MemoryManager {
     /// reservations can never jointly exceed the budget. Re-reserving a model
     /// that already holds an allocation accounts only for the *delta*, and
     /// preserves its lease count. Returns `true` if the reservation succeeded.
-    pub fn try_reserve(&self, model_id: &str, bytes: u64) -> bool {
+    pub(crate) fn try_reserve(&self, model_id: &str, bytes: u64) -> bool {
         let mut allocs = self.lock();
         let used_by_others: u64 = allocs
             .iter()
@@ -139,10 +140,11 @@ impl MemoryManager {
         true
     }
 
-    /// Unconditionally record a reservation, ignoring the budget. Test-support:
-    /// production paths reserve atomically via [`Self::try_reserve`].
+    /// Unconditionally record a reservation, ignoring the budget. Test-support
+    /// (used by other modules' tests, hence `pub(crate)`): production paths
+    /// reserve atomically via [`Self::try_reserve`].
     #[cfg(test)]
-    pub fn allocate(&self, model_id: &str, bytes: u64) {
+    pub(crate) fn allocate(&self, model_id: &str, bytes: u64) {
         let mut allocs = self.lock();
         match allocs.get_mut(model_id) {
             Some(existing) => {
@@ -156,7 +158,7 @@ impl MemoryManager {
     }
 
     /// Release a model's reservation entirely.
-    pub fn deallocate(&self, model_id: &str) {
+    pub(crate) fn deallocate(&self, model_id: &str) {
         self.lock().remove(model_id);
     }
 
@@ -165,7 +167,7 @@ impl MemoryManager {
     /// The observed value is recorded for reporting, and the reservation is
     /// raised to it when the model uses more than estimated, so accounting never
     /// undercounts real usage.
-    pub fn reconcile(&self, model_id: &str, observed_bytes: u64) {
+    pub(crate) fn reconcile(&self, model_id: &str, observed_bytes: u64) {
         let mut allocs = self.lock();
         if let Some(a) = allocs.get_mut(model_id) {
             a.observed_bytes = Some(observed_bytes);
@@ -174,7 +176,7 @@ impl MemoryManager {
     }
 
     /// Update a model's last-access time (for LRU and idle-timeout decisions).
-    pub fn touch(&self, model_id: &str) {
+    pub(crate) fn touch(&self, model_id: &str) {
         if let Some(a) = self.lock().get_mut(model_id) {
             a.last_access = Instant::now();
         }
@@ -184,7 +186,7 @@ impl MemoryManager {
     ///
     /// No-op for models without an allocation (e.g. cloud-backed models, which
     /// hold no local memory and are never eviction candidates).
-    pub fn lease(&self, model_id: &str) {
+    pub(crate) fn lease(&self, model_id: &str) {
         if let Some(a) = self.lock().get_mut(model_id) {
             a.leases = a.leases.saturating_add(1);
             a.last_access = Instant::now();
@@ -192,7 +194,7 @@ impl MemoryManager {
     }
 
     /// Release a previously acquired inference lease.
-    pub fn release_lease(&self, model_id: &str) {
+    pub(crate) fn release_lease(&self, model_id: &str) {
         if let Some(a) = self.lock().get_mut(model_id) {
             a.leases = a.leases.saturating_sub(1);
             a.last_access = Instant::now();
@@ -200,7 +202,7 @@ impl MemoryManager {
     }
 
     /// Number of active leases on a model.
-    pub fn lease_count(&self, model_id: &str) -> u32 {
+    pub(crate) fn lease_count(&self, model_id: &str) -> u32 {
         self.lock().get(model_id).map(|a| a.leases).unwrap_or(0)
     }
 
@@ -208,7 +210,7 @@ impl MemoryManager {
     ///
     /// Models in `protected`, and any model holding an active lease, are never
     /// returned.
-    pub fn lru_candidate(&self, protected: &[String]) -> Option<String> {
+    pub(crate) fn lru_candidate(&self, protected: &[String]) -> Option<String> {
         self.lock()
             .iter()
             .filter(|(id, a)| a.leases == 0 && !protected.iter().any(|p| p == *id))
@@ -218,7 +220,7 @@ impl MemoryManager {
 
     /// Return every model whose idle time meets or exceeds `idle`, excluding
     /// leased and `protected` models. Used by the idle-timeout sweep.
-    pub fn idle_candidates(&self, idle: Duration, protected: &[String]) -> Vec<String> {
+    pub(crate) fn idle_candidates(&self, idle: Duration, protected: &[String]) -> Vec<String> {
         self.lock()
             .iter()
             .filter(|(id, a)| {
@@ -231,7 +233,7 @@ impl MemoryManager {
     }
 
     /// Snapshot of all current allocations, sorted by model id for determinism.
-    pub fn snapshot(&self) -> Vec<AllocationSnapshot> {
+    pub(crate) fn snapshot(&self) -> Vec<AllocationSnapshot> {
         let mut out: Vec<AllocationSnapshot> = self
             .lock()
             .iter()

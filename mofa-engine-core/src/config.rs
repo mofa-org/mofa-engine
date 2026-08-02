@@ -187,29 +187,32 @@ impl Default for TimeoutConfig {
     }
 }
 
+// These `Duration` accessors are consumed only by the engine (in-crate), so they
+// are `pub(crate)`; the struct itself and its `_secs` fields stay `pub` for
+// external configuration/serialization.
 impl TimeoutConfig {
     /// Overall request budget as a `Duration`.
-    pub fn request(&self) -> std::time::Duration {
+    pub(crate) fn request(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.request_secs)
     }
     /// Queue-wait budget as a `Duration`.
-    pub fn queue(&self) -> std::time::Duration {
+    pub(crate) fn queue(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.queue_secs)
     }
     /// Load budget as a `Duration`.
-    pub fn load(&self) -> std::time::Duration {
+    pub(crate) fn load(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.load_secs)
     }
     /// Inference budget as a `Duration`.
-    pub fn inference(&self) -> std::time::Duration {
+    pub(crate) fn inference(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.inference_secs)
     }
     /// Discovery probe budget as a `Duration`.
-    pub fn discovery(&self) -> std::time::Duration {
+    pub(crate) fn discovery(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.discovery_secs)
     }
     /// Health probe budget as a `Duration`.
-    pub fn health(&self) -> std::time::Duration {
+    pub(crate) fn health(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.health_secs)
     }
 }
@@ -495,17 +498,25 @@ impl EngineConfig {
                     provider.name
                 )));
             }
-            if provider.kind == "local_tts" {
+            // Every local process-adapter kind is spawned from a configured
+            // `command` and serves an explicit model list, so validate all three
+            // uniformly: catch a missing command or empty model list here (at
+            // `validate-config` time) rather than later at engine construction or
+            // silently discovering nothing.
+            if matches!(
+                provider.kind.as_str(),
+                "local_tts" | "local_asr" | "local_image_gen" | "local_video_gen"
+            ) {
                 if provider.command.as_deref().unwrap_or_default().is_empty() {
                     return Err(EngineError::Config(format!(
-                        "provider '{}' (local_tts) requires a non-empty command",
-                        provider.name
+                        "provider '{}' ({}) requires a non-empty command",
+                        provider.name, provider.kind
                     )));
                 }
                 if provider.models.is_empty() {
                     return Err(EngineError::Config(format!(
-                        "provider '{}' (local_tts) must declare at least one model",
-                        provider.name
+                        "provider '{}' ({}) must declare at least one model",
+                        provider.name, provider.kind
                     )));
                 }
             }
@@ -755,6 +766,7 @@ impl ProviderConfig {
             "local_tts" => Ok(ProviderKind::LocalTts),
             "local_asr" => Ok(ProviderKind::LocalAsr),
             "local_image_gen" => Ok(ProviderKind::LocalImageGen),
+            "local_video_gen" => Ok(ProviderKind::LocalVideoGen),
             "liter_llm" => Ok(ProviderKind::LiterLlm),
             other => Err(EngineError::Config(format!(
                 "unknown provider kind '{}' for provider '{}'",
@@ -862,6 +874,58 @@ mod tests {
         let mut cfg = EngineConfig::from_env();
         cfg.preflight.confidence_threshold = 1.5;
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_requires_command_and_models_for_all_local_kinds() {
+        // Every local process-adapter kind must be validated uniformly: a missing
+        // command, or an empty model list, is rejected at validate-config time.
+        for kind in [
+            "local_tts",
+            "local_asr",
+            "local_image_gen",
+            "local_video_gen",
+        ] {
+            let base = |command: Option<&str>, models: Vec<ModelDef>| EngineConfig {
+                providers: vec![ProviderConfig {
+                    name: format!("{kind}-provider"),
+                    kind: kind.into(),
+                    base_url: String::new(),
+                    command: command.map(String::from),
+                    models,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let a_model = || {
+                vec![ModelDef {
+                    name: "fixture".into(),
+                    capability: match kind {
+                        "local_tts" => "tts",
+                        "local_asr" => "asr",
+                        "local_video_gen" => "video_gen",
+                        _ => "image_gen",
+                    }
+                    .into(),
+                    ..Default::default()
+                }]
+            };
+
+            // Missing command → rejected.
+            assert!(
+                base(None, a_model()).validate().is_err(),
+                "{kind} without a command should fail validation"
+            );
+            // Empty model list → rejected.
+            assert!(
+                base(Some("some-cli"), vec![]).validate().is_err(),
+                "{kind} with no models should fail validation"
+            );
+            // Command + at least one model → valid.
+            base(Some("some-cli"), a_model())
+                .validate()
+                .unwrap_or_else(|e| panic!("{kind} with command and model should validate: {e}"));
+        }
     }
 
     #[test]
