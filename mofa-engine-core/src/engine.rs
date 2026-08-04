@@ -1666,6 +1666,10 @@ impl Engine {
 
     /// Register a capability subscription and immediately warm its models.
     ///
+    /// An explicit per-call `ttl` wins; when `None` is passed the configured
+    /// `preflight.subscription_ttl_secs` default bounds the subscription (0
+    /// disables expiry) so it cannot pin models warm forever.
+    ///
     /// Returns the new subscription id.
     pub fn subscribe(
         &self,
@@ -1674,6 +1678,10 @@ impl Engine {
         capabilities: Vec<Capability>,
         ttl: Option<Duration>,
     ) -> u64 {
+        let ttl = ttl.or_else(|| {
+            let secs = self.preflight_config.subscription_ttl_secs;
+            (secs > 0).then(|| Duration::from_secs(secs))
+        });
         let id = self.subscriptions.subscribe(
             app_id.clone(),
             session_id.clone(),
@@ -1754,17 +1762,40 @@ impl Engine {
         *self.artifact_task.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
     }
 
-    /// Reject a request whose `input_file` falls outside the configured
-    /// allowlist. A no-op when no roots are configured.
+    /// Reject a request whose local file inputs fall outside the configured
+    /// allowlist — `input_file` AND any `messages[].images` entry that names a
+    /// local path. http(s)/data: image URLs are not local paths and skip the
+    /// check. A no-op when no roots are configured.
     fn check_input_path(&self, req: &InferenceRequest) -> Result<(), EngineError> {
         if self.input_roots.is_empty() {
             return Ok(());
         }
-        let Some(path) = req.input_file.as_deref() else {
-            return Ok(());
-        };
+        if let Some(path) = req.input_file.as_deref() {
+            self.check_path_within_roots(path, "input_file")?;
+        }
+        // Image references are resolved by the backends with a raw filesystem
+        // read (ollama.rs base64-encodes them; liter_llm.rs then UPLOADS the
+        // contents to a cloud provider) — an unchecked path is a local-file
+        // read primitive that becomes data exfiltration, so they go through
+        // the exact same allowlist as `input_file` before any routing.
+        for message in &req.messages {
+            for image in &message.images {
+                if image.starts_with("http://")
+                    || image.starts_with("https://")
+                    || image.starts_with("data:")
+                {
+                    continue;
+                }
+                self.check_path_within_roots(image, "images[]")?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate one local path against the configured allowlist.
+    fn check_path_within_roots(&self, path: &str, field: &str) -> Result<(), EngineError> {
         let canonical = std::fs::canonicalize(path).map_err(|_| {
-            EngineError::InvalidRequest(format!("input_file '{path}' cannot be resolved"))
+            EngineError::InvalidRequest(format!("{field} '{path}' cannot be resolved"))
         })?;
         if self
             .input_roots
@@ -1774,7 +1805,7 @@ impl Engine {
             Ok(())
         } else {
             Err(EngineError::InvalidRequest(format!(
-                "input_file '{path}' is outside the allowed roots"
+                "{field} '{path}' is outside the allowed roots"
             )))
         }
     }
@@ -3525,6 +3556,103 @@ mod tests {
             engine.invoke(ok).await,
             Err(EngineError::NoCapableModel(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn image_paths_outside_input_roots_are_rejected() {
+        // #4 review (security): `messages[].images` entries that name LOCAL
+        // FILES must pass the same `security.input_roots` validation as
+        // `input_file` — the ollama path base64-reads them and the liter-llm
+        // path uploads their contents to a cloud provider, so an unchecked
+        // path is a local-file-read primitive that becomes exfiltration.
+        let root = tempfile::tempdir().unwrap();
+        let allowed = root.path().join("frame.png");
+        std::fs::write(&allowed, b"x").unwrap();
+        let outside = std::env::temp_dir().join("mofa_outside_allowlist.png");
+        std::fs::write(&outside, b"x").unwrap();
+
+        let config = EngineConfig {
+            security: SecurityConfig {
+                input_roots: vec![root.path().to_string_lossy().to_string()],
+            },
+            ..minimal_config()
+        };
+        let engine = Engine::new(config).await;
+
+        let image_req = |image: String| {
+            let mut req = request(Capability::Vlm, None, FallbackPolicy::default());
+            req.messages = vec![Message {
+                role: "user".into(),
+                content: "describe this".into(),
+                images: vec![image],
+            }];
+            req
+        };
+
+        // A local image path outside the allowlist is rejected before routing.
+        assert!(matches!(
+            engine
+                .invoke(image_req(outside.to_string_lossy().to_string()))
+                .await,
+            Err(EngineError::InvalidRequest(_))
+        ));
+        // A path inside the allowlist passes the check (then fails later only
+        // because no VLM model is registered).
+        assert!(matches!(
+            engine
+                .invoke(image_req(allowed.to_string_lossy().to_string()))
+                .await,
+            Err(EngineError::NoCapableModel(_))
+        ));
+        // http(s) and data: URLs are not local paths — the allowlist does not
+        // apply to them.
+        for remote in ["https://example.com/a.png", "data:image/png;base64,AAAA"] {
+            assert!(
+                matches!(
+                    engine.invoke(image_req(remote.into())).await,
+                    Err(EngineError::NoCapableModel(_))
+                ),
+                "{remote} must not be treated as a local path"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn subscription_without_explicit_ttl_uses_config_default() {
+        // #4 review: `PreflightConfig::subscription_ttl_secs` must actually
+        // bound subscriptions — previously nothing read it, so a subscription
+        // that omitted the TTL pinned its models warm forever.
+        let config = EngineConfig {
+            preflight: PreflightConfig {
+                subscription_ttl_secs: 120,
+                ..PreflightConfig::default()
+            },
+            ..minimal_config()
+        };
+        let engine = Engine::new(config).await;
+
+        engine.subscribe(None, None, vec![Capability::Chat], None);
+        let info = engine.subscriptions();
+        assert_eq!(info.len(), 1);
+        let ttl = info[0]
+            .expires_in_secs
+            .expect("the configured default TTL must apply when none is given");
+        assert!(ttl > 110 && ttl <= 120, "ttl {ttl} should be ~120");
+
+        // An explicit per-call TTL still wins over the config default.
+        engine.subscribe(
+            None,
+            None,
+            vec![Capability::Tts],
+            Some(Duration::from_secs(5)),
+        );
+        let explicit = engine
+            .subscriptions()
+            .into_iter()
+            .find(|s| s.capabilities == vec![Capability::Tts])
+            .and_then(|s| s.expires_in_secs)
+            .expect("explicit TTL reported");
+        assert!(explicit <= 5, "explicit TTL must win, got {explicit}");
     }
 
     #[tokio::test]

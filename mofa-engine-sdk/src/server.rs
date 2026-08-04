@@ -227,17 +227,20 @@ impl AppState {
         }
     }
 
-    /// Compare two byte strings in time independent of how many leading bytes match,
-    /// so token verification does not leak the secret through response timing.
+    /// Compare two byte strings in time independent of how many leading bytes
+    /// match — and independent of whether the lengths differ — so token
+    /// verification leaks neither the secret nor its length through response
+    /// timing. Both sides are hashed first; only the fixed-width digests are
+    /// compared. (Slice hashing mixes in the length, so unequal-length inputs
+    /// still differ.)
     fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-        if a.len() != b.len() {
-            return false;
-        }
-        let mut diff = 0u8;
-        for (x, y) in a.iter().zip(b.iter()) {
-            diff |= x ^ y;
-        }
-        diff == 0
+        use std::hash::{Hash, Hasher};
+        let digest = |bytes: &[u8]| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            bytes.hash(&mut hasher);
+            hasher.finish()
+        };
+        digest(a) == digest(b)
     }
 }
 
@@ -523,6 +526,19 @@ mod tests {
     use mofa_engine_core::EngineConfig;
     use mofa_engine_core::config::{ListenConfig, MemoryConfig, PreflightConfig, TimeoutConfig};
     use tower::ServiceExt; // for `oneshot`
+
+    #[test]
+    fn constant_time_eq_covers_all_shapes() {
+        // Correctness across equal/unequal content and mismatched lengths —
+        // the implementation must not early-return on length (that leaks the
+        // secret's length via timing; #4 review).
+        assert!(AppState::constant_time_eq(b"tok", b"tok"));
+        assert!(AppState::constant_time_eq(b"", b""));
+        assert!(!AppState::constant_time_eq(b"tok", b"tom"));
+        assert!(!AppState::constant_time_eq(b"tok", b"tok-longer"));
+        assert!(!AppState::constant_time_eq(b"tok-longer", b"tok"));
+        assert!(!AppState::constant_time_eq(b"", b"x"));
+    }
 
     #[test]
     fn error_status_maps_failover_to_service_unavailable() {

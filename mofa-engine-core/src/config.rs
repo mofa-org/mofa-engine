@@ -39,7 +39,8 @@ pub struct EngineConfig {
 /// Retention policy for engine-generated artifacts (e.g. TTS audio files).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactConfig {
-    /// Directory scanned for cleanup (default: the system temp dir).
+    /// Directory scanned for cleanup (default: the mofa-owned `mofa_artifacts`
+    /// subdirectory of the system temp dir).
     #[serde(default)]
     pub dir: Option<String>,
     /// Delete engine artifacts older than this many seconds. `0` disables the
@@ -317,7 +318,8 @@ pub struct ProviderConfig {
     /// Output audio container/extension for `local_tts` artifacts (default `wav`).
     #[serde(default)]
     pub output_format: Option<String>,
-    /// Directory for `local_tts` audio artifacts (default: the system temp dir).
+    /// Directory for `local_tts` audio artifacts (default: the mofa-owned
+    /// `mofa_artifacts` subdirectory of the system temp dir).
     #[serde(default)]
     pub output_dir: Option<String>,
     /// Extra arguments a `local_asr` command receives when a request enables

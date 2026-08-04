@@ -83,10 +83,7 @@ impl LocalVideoGenProvider {
             output_format: output_format
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "mp4".into()),
-            output_dir: output_dir
-                .filter(|s| !s.is_empty())
-                .map(PathBuf::from)
-                .unwrap_or_else(std::env::temp_dir),
+            output_dir: crate::artifacts::ensure_artifact_dir(output_dir),
             models,
         }
     }

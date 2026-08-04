@@ -23,5 +23,9 @@ dashmap = { workspace = true }
 dirs = { workspace = true }
 tempfile = { workspace = true }
 tokio-stream = { workspace = true }
-liter-llm = "1.11.0"
+# Pinned exactly: liter-llm is a young crate whose provider-routing surface we
+# depend on directly, so upgrades are a deliberate reviewed step (re-vet the
+# changelog and our routing assumptions) rather than a floating semver bump.
+# Vetted 1.11.0 for the initial engine landing.
+liter-llm = "=1.11.0"
 base64 = "0.23.0"

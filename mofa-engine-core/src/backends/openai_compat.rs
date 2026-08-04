@@ -46,8 +46,9 @@ impl OpenAiCompatProvider {
         Self::with_output_dir(name, base_url, api_key, models, cost_tier, None)
     }
 
-    /// Create a provider, writing TTS artifacts into `output_dir` (or the system
-    /// temp dir when `None`) so they land where the artifact sweeper looks.
+    /// Create a provider, writing TTS artifacts into `output_dir` (or the
+    /// mofa-owned default artifact directory when `None`) so they land where
+    /// the artifact sweeper looks.
     ///
     /// Fails (rather than panicking or silently dropping the configured
     /// timeouts) if the system TLS/HTTP stack cannot build a client.
@@ -75,10 +76,7 @@ impl OpenAiCompatProvider {
             api_key: api_key.into(),
             models,
             cost_tier,
-            output_dir: output_dir
-                .filter(|s| !s.is_empty())
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(std::env::temp_dir),
+            output_dir: crate::artifacts::ensure_artifact_dir(output_dir),
             client,
         })
     }

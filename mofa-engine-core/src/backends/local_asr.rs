@@ -74,10 +74,7 @@ impl LocalAsrProvider {
             command: command.into(),
             args,
             diarize_args: Vec::new(),
-            output_dir: output_dir
-                .filter(|s| !s.is_empty())
-                .map(PathBuf::from)
-                .unwrap_or_else(std::env::temp_dir),
+            output_dir: crate::artifacts::ensure_artifact_dir(output_dir),
             models,
         }
     }
