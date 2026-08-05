@@ -2130,6 +2130,7 @@ mod tests {
             preflight: PreflightConfig::default(),
             artifacts: Default::default(),
             security: Default::default(),
+            observability: Default::default(),
             providers: vec![],
         }
     }
@@ -2454,6 +2455,7 @@ mod tests {
             preflight: PreflightConfig::default(),
             artifacts: Default::default(),
             security: Default::default(),
+            observability: Default::default(),
             providers: vec![ProviderConfig {
                 name: "disabled-ollama".into(),
                 kind: "ollama".into(),
