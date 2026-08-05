@@ -21,6 +21,7 @@ use mofa_engine_core::preflight::PreflightStats;
 use mofa_engine_core::subscription::SubscriptionInfo;
 use mofa_kernel::{Capability, EngineError, ErrorInfo, InferenceRequest};
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 use tower_http::cors::{Any, CorsLayer};
@@ -228,19 +229,23 @@ impl AppState {
     }
 
     /// Compare two byte strings in time independent of how many leading bytes
-    /// match — and independent of whether the lengths differ — so token
-    /// verification leaks neither the secret nor its length through response
-    /// timing. Both sides are hashed first; only the fixed-width digests are
-    /// compared. (Slice hashing mixes in the length, so unequal-length inputs
-    /// still differ.)
+    /// match, so token verification does not leak the secret through response
+    /// timing.
+    ///
+    /// Delegates to [`subtle::ConstantTimeEq`] rather than a hand-rolled loop:
+    /// "constant-time" is a property of the emitted machine code, and nothing in
+    /// the language stops the optimizer from turning a hand-written accumulator
+    /// loop back into an early-exit branch. `subtle` inserts the optimization
+    /// barriers needed to keep the property after codegen, so we don't reinvent
+    /// (and subtly mis-build) a security primitive open source already solves.
+    ///
+    /// Comparing the raw bytes keeps the token's full entropy. Unequal lengths
+    /// still compare unequal; `subtle` treats the length itself as public, which
+    /// is fine for a bearer token whose length is not sensitive. (Hiding the
+    /// length too would mean hashing both sides with a cryptographic hash first,
+    /// which we don't need here.)
     fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-        use std::hash::{Hash, Hasher};
-        let digest = |bytes: &[u8]| {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            bytes.hash(&mut hasher);
-            hasher.finish()
-        };
-        digest(a) == digest(b)
+        a.ct_eq(b).into()
     }
 }
 

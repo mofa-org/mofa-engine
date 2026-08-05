@@ -21,3 +21,4 @@ tracing = { workspace = true }
 chrono = { workspace = true }
 tokio-stream = { workspace = true }
 uuid = { workspace = true }
+subtle = "2.6.1"
