@@ -386,6 +386,13 @@ impl Provider for OllamaProvider {
                 // is deferred.
                 let capability = if lower.contains("embed") {
                     Capability::Embedding
+                } else if lower.contains("llava")
+                    || lower.contains("qwen2-vl")
+                    || lower.contains("bakllava")
+                    || lower.contains("moondream")
+                    || lower.contains("vision")
+                {
+                    Capability::Vlm
                 } else {
                     Capability::Chat
                 };
@@ -395,6 +402,9 @@ impl Provider for OllamaProvider {
                     capability,
                     CostTier::Free,
                 );
+                if capability == Capability::Vlm {
+                    card.capabilities = vec![Capability::Vlm, Capability::Chat];
+                }
                 card.id = ModelId::canonical(&self.name, &model_name);
                 card.availability = ModelAvailability::Discovered;
                 card.residency = if loaded.contains(&model_name) {

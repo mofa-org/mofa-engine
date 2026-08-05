@@ -256,7 +256,8 @@ def main():
     
     print(f"  • Model:     {result['model_used']}")
     print(f"  • Locality:  {result['locality']}")
-    print(f"  • Cost:      ${result['cost_usd']:.6f}")
+    cost_val = result.get('cost_usd') or 0.0
+    print(f"  • Cost:      ${cost_val:.6f}")
     print(f"  • Latency:   {result['duration_sec']}s")
 
     print_cost_comparison_table(current_prefer=args.prefer, current_detail=args.detail)

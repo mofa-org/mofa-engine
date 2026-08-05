@@ -479,35 +479,20 @@ class MofaEngine:
         Returns:
             InvokeResult with extracted text/structured data.
         """
-        content_parts: List[Dict[str, Any]] = []
-        if question:
-            content_parts.append({"type": "text", "text": question})
-
+        image_list: List[str] = []
         for img in (images or []):
             img_path = Path(img)
             if img_path.exists():
-                # Local file — encode as base64
                 with open(img_path, "rb") as f:
                     b64 = base64.b64encode(f.read()).decode("utf-8")
                     ext = img_path.suffix.lstrip(".").lower()
                     mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "gif": "gif", "webp": "webp"}.get(ext, "jpeg")
-                    content_parts.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/{mime};base64,{b64}", "detail": detail},
-                    })
-            elif img.startswith("http://") or img.startswith("https://") or img.startswith("data:"):
-                content_parts.append({
-                    "type": "image_url",
-                    "image_url": {"url": img, "detail": detail},
-                })
+                    image_list.append(f"data:image/{mime};base64,{b64}")
             else:
-                # Assume base64 string
-                content_parts.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{img}", "detail": detail},
-                })
+                image_list.append(img)
 
-        messages = [{"role": "user", "content": content_parts}]
+        text_prompt = question or "Describe and extract structured information from this image."
+        messages = [{"role": "user", "content": text_prompt, "images": image_list}]
         params: Dict[str, Any] = {"detail": detail}
         return self.invoke(
             capability="vlm",

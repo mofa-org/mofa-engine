@@ -93,7 +93,7 @@ def generate_explainer_video(topic: str, out_path: str, prefer: str = "local", m
     # Step 1: Script
     print(f"  [Step 1/6] ⏳ Generating Script...")
     script_res = engine.chat(
-        prompt=f"Write a 3-scene 15-second explainer script for: {topic}. Output scene prompts clearly.",
+        text=f"Write a 3-scene 15-second explainer script for: {topic}. Output scene prompts clearly.",
         reasoning={"effort": "medium"},
         hint_next="image_gen"
     )
