@@ -20,7 +20,9 @@ use mofa_engine_core::engine::{LifecycleRecord, MemoryReport};
 use mofa_engine_core::preflight::PreflightStats;
 use mofa_engine_core::subscription::SubscriptionInfo;
 use mofa_kernel::{Capability, EngineError, ErrorInfo, InferenceRequest};
+use mofa_observability::collector::MetricsState;
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 use tower_http::cors::{Any, CorsLayer};
@@ -41,6 +43,9 @@ struct AppState {
     started_at: std::time::Instant,
     /// Optional bearer token; when set, `/v1` routes require it.
     api_token: Option<Arc<String>>,
+    /// Observability collector metrics — tagged counters, histograms, gauges.
+    /// `None` when observability is disabled.
+    obs_metrics: Option<Arc<RwLock<MetricsState>>>,
 }
 
 /// The MoFA Engine HTTP server — the public entry point to the versioned `/v1`
@@ -73,10 +78,39 @@ impl Server {
             );
         }
 
+        // ── Observability subsystem ──────────────────────────────────────
+        // Spawn the collector (event→metric aggregation) and the bridge
+        // (engine event→observability event translation).  The bridge feeds
+        // the collector; the collector's MetricsState is read by /metrics.
+        let (obs_sender, obs_receiver) = mofa_observability::collector::create_event_channel(2048);
+        let collector = mofa_observability::collector::MetricsCollector::new(obs_receiver);
+        let obs_metrics = collector.state();
+
+        // Spawn the collector background loop.
+        tokio::spawn(collector.run());
+
+        // Spawn the bridge that translates kernel EngineEvents into
+        // observability events and feeds them to the collector.
+        let bridge_rx = engine.subscribe_events();
+        let bridge_engine = Arc::clone(&engine);
+        let bridge_sender = obs_sender;
+        let bridge_metrics = Some(Arc::clone(&obs_metrics));
+        tokio::spawn(async move {
+            crate::observability_bridge::run(
+                bridge_rx,
+                bridge_sender,
+                bridge_engine,
+                bridge_metrics,
+            )
+            .await;
+        });
+        tracing::info!("Observability bridge and collector started");
+
         let state = AppState {
             engine,
             started_at: std::time::Instant::now(),
             api_token,
+            obs_metrics: Some(obs_metrics),
         };
 
         let app = AppState::build_app(state);
@@ -355,8 +389,22 @@ impl AppState {
     }
 
     /// Prometheus text-exposition metrics. Public (no auth) so scrapers can reach it.
+    ///
+    /// Serves the engine-core counters (untagged) followed by the observability
+    /// collector's tagged counters, histograms, and gauges.
     async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
-        let body = state.engine.metrics_prometheus();
+        let mut body = state.engine.metrics_prometheus();
+
+        // Append the observability collector's tagged metrics.
+        if let Some(ref obs) = state.obs_metrics {
+            let obs_state = obs.read().await;
+            let obs_output = mofa_observability::prometheus::render(&obs_state);
+            if !obs_output.is_empty() {
+                body.push('\n');
+                body.push_str(&obs_output);
+            }
+        }
+
         ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body)
     }
 
@@ -570,12 +618,14 @@ mod tests {
             preflight: PreflightConfig::default(),
             artifacts: Default::default(),
             security: Default::default(),
+            observability: Default::default(),
             providers: vec![],
         };
         AppState {
             engine: mofa_engine_core::Engine::new(config).await,
             started_at: std::time::Instant::now(),
             api_token: api_token.map(|t| Arc::new(t.to_string())),
+            obs_metrics: None,
         }
     }
 

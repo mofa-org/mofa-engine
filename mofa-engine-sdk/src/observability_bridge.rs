@@ -7,8 +7,8 @@ use mofa_engine_core::Engine;
 use mofa_kernel::EngineEvent;
 use mofa_observability::collector::{EventSender, Labels, MetricsState};
 use mofa_observability::events::{
-    EngineEvent as ObsEngineEvent, EventEnvelope, EvictionTriggered, ModelLoaded, ModelUnloaded,
-    RequestCompleted, RequestReceived, UnloadReason,
+    EngineEvent as ObsEngineEvent, EventEnvelope, ModelLoaded, ModelUnloaded, RequestCompleted,
+    RequestReceived, UnloadReason,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -44,17 +44,18 @@ pub async fn run(
         status.memory_budget_bytes as f64 / 1_048_576.0,
     );
 
-    // Set memory gauges
-    let _ = sender
-        .send_critical(EventEnvelope::now(ObsEngineEvent::EvictionTriggered(
-            EvictionTriggered {
-                evicted_model: "_seed".into(),
-                memory_before_bytes: status.memory_used_bytes,
-                memory_after_bytes: status.memory_used_bytes,
-                budget_bytes: status.memory_budget_bytes,
-            },
-        )))
-        .await;
+    // Set memory gauges directly via MetricsState instead of faking eviction events.
+    if let Some(ref ms) = metrics_state {
+        let mut state = ms.write().await;
+        state.memory_used_bytes.set(
+            mofa_observability::collector::Labels::new(),
+            status.memory_used_bytes as f64,
+        );
+        state.memory_budget_bytes.set(
+            mofa_observability::collector::Labels::new(),
+            status.memory_budget_bytes as f64,
+        );
+    }
 
     // Set models_loaded gauge by emitting one ModelLoaded per loaded model
     let caps = engine.capabilities().await;
@@ -116,11 +117,8 @@ pub async fn run(
                             model: Some(model_id),
                             hint: None,
                         });
-                        let mut envelope =
+                        let envelope =
                             EventEnvelope::now(obs_event).with_request_id(&request_id);
-                        if let Some((trace_id, span_id)) = derive_trace_context(&request_id) {
-                            envelope = envelope.with_trace(trace_id, span_id);
-                        }
                         sender.send(envelope);
                     }
                     EngineEvent::RequestCompleted {
@@ -151,12 +149,10 @@ pub async fn run(
                                 model_was_hot: None,
                                 success,
                                 error_code: None,
+                                is_local: None,
                             });
-                        let mut envelope =
+                        let envelope =
                             EventEnvelope::now(obs_event).with_request_id(&request_id);
-                        if let Some((trace_id, span_id)) = derive_trace_context(&request_id) {
-                            envelope = envelope.with_trace(trace_id, span_id);
-                        }
                         sender.send(envelope);
                     }
                     EngineEvent::ModelResidencyChanged {
@@ -201,17 +197,18 @@ pub async fn run(
                         used_bytes,
                         total_bytes,
                     } => {
-                        // Set the memory gauges from the authoritative engine value
-                        let _ = sender
-                            .send_critical(EventEnvelope::now(
-                                ObsEngineEvent::EvictionTriggered(EvictionTriggered {
-                                    evicted_model: "_memory_sync".into(),
-                                    memory_before_bytes: used_bytes,
-                                    memory_after_bytes: used_bytes,
-                                    budget_bytes: total_bytes,
-                                }),
-                            ))
-                            .await;
+                        // Set the memory gauges directly from the authoritative engine value
+                        if let Some(ref ms) = metrics_state {
+                            let mut state = ms.write().await;
+                            state.memory_used_bytes.set(
+                                mofa_observability::collector::Labels::new(),
+                                used_bytes as f64,
+                            );
+                            state.memory_budget_bytes.set(
+                                mofa_observability::collector::Labels::new(),
+                                total_bytes as f64,
+                            );
+                        }
                     }
                     EngineEvent::DiscoveryCompleted {
                         provider, models, ..
@@ -273,15 +270,5 @@ fn map_capability(cap: &mofa_kernel::Capability) -> mofa_observability::events::
             tracing::warn!("Unknown capability variant, defaulting to Chat for observability");
             O::Chat
         }
-    }
-}
-
-fn derive_trace_context(request_id: &str) -> Option<(String, String)> {
-    let trace_id = request_id.replace('-', "");
-    if trace_id.len() == 32 {
-        let span_id = trace_id[0..16].to_string();
-        Some((trace_id, span_id))
-    } else {
-        None
     }
 }

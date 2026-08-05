@@ -9,12 +9,14 @@ pub fn estimate_cost_usd(
     model: &str,
     prompt_tokens: u32,
     completion_tokens: u32,
+    is_local: bool,
 ) -> f64 {
     let provider_lower = provider.to_lowercase();
     let model_lower = model.to_lowercase();
 
-    // Local providers are free ($0.00)
-    if provider_lower == "ollama"
+    // Local providers/backends are free ($0.00)
+    if is_local
+        || provider_lower == "ollama"
         || provider_lower == "kokoro"
         || provider_lower == "funasr"
         || provider_lower == "local"
@@ -46,19 +48,22 @@ mod tests {
 
     #[test]
     fn local_provider_is_free() {
-        assert_eq!(estimate_cost_usd("ollama", "llama3:8b", 1000, 1000), 0.0);
-        assert_eq!(estimate_cost_usd("kokoro", "kokoro", 500, 500), 0.0);
+        assert_eq!(
+            estimate_cost_usd("ollama", "llama3:8b", 1000, 1000, true),
+            0.0
+        );
+        assert_eq!(estimate_cost_usd("kokoro", "kokoro", 500, 500, true), 0.0);
     }
 
     #[test]
     fn gpt4o_cost_calculation() {
-        let cost = estimate_cost_usd("openai", "gpt-4o", 1000, 1000);
+        let cost = estimate_cost_usd("openai", "gpt-4o", 1000, 1000, false);
         assert!((cost - 0.0125).abs() < 1e-5);
     }
 
     #[test]
     fn deepseek_cost_calculation() {
-        let cost = estimate_cost_usd("deepseek", "deepseek-r1", 1000, 1000);
+        let cost = estimate_cost_usd("deepseek", "deepseek-r1", 1000, 1000, false);
         assert!((cost - 0.00274).abs() < 1e-5);
     }
 }

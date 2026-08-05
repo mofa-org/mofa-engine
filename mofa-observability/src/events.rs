@@ -229,6 +229,9 @@ pub struct RequestCompleted {
     pub success: bool,
     /// Error code if failed.
     pub error_code: Option<String>,
+    /// Whether execution ran on a local backend.
+    #[serde(default)]
+    pub is_local: Option<bool>,
 }
 
 // ─── Model Lifecycle Events ──────────────────────────────────────────────────
@@ -402,6 +405,7 @@ mod tests {
             model_was_hot: Some(true),
             success: true,
             error_code: None,
+            is_local: None,
         };
 
         // Warm TTFT should be ~0.1s (Phase 0 measured 0.115s)
@@ -517,6 +521,7 @@ mod tests {
                 model_was_hot: Some(true),
                 success: true,
                 error_code: None,
+                is_local: None,
             }),
             EngineEvent::ModelLoaded(ModelLoaded {
                 model_id: "qwen2.5:7b".into(),
@@ -622,6 +627,7 @@ mod tests {
                 model_was_hot: Some(true),
                 success: true,
                 error_code: None,
+                is_local: None,
             }),
             EngineEvent::ModelLoaded(ModelLoaded {
                 model_id: "qwen2.5:7b".into(),

@@ -244,6 +244,7 @@ async fn simulate_engine_traffic(sender: EventSender) {
                         } else {
                             Some("internal_error".into())
                         },
+                        is_local: None,
                     },
                 )));
             }

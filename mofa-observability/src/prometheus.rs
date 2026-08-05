@@ -75,7 +75,11 @@ fn render_gauge(buf: &mut String, family: &GaugeFamily) {
     if family.values.is_empty() {
         return;
     }
-    let metric_type = if family.name == "mofa_estimated_cost_usd" { "counter" } else { "gauge" };
+    let metric_type = if family.name == "mofa_estimated_cost_usd" {
+        "counter"
+    } else {
+        "gauge"
+    };
     writeln!(buf, "# HELP {} {}", family.name, family.help).unwrap();
     writeln!(buf, "# TYPE {} {}", family.name, metric_type).unwrap();
 
@@ -265,6 +269,7 @@ mod tests {
                 model_was_hot: None,
                 success: true,
                 error_code: None,
+                is_local: None,
             },
         )));
 
@@ -350,6 +355,7 @@ mod tests {
                 model_was_hot: None,
                 success: true,
                 error_code: None,
+                is_local: None,
             },
         )));
 
@@ -394,6 +400,7 @@ mod tests {
                 model_was_hot: None,
                 success: true,
                 error_code: None,
+                is_local: None,
             },
         )));
 
@@ -410,6 +417,7 @@ mod tests {
                 model_was_hot: None,
                 success: false,
                 error_code: Some("timeout".into()),
+                is_local: None,
             },
         )));
 
@@ -451,6 +459,7 @@ mod tests {
                 model_was_hot: Some(true),
                 success: true,
                 error_code: None,
+                is_local: None,
             },
         )));
         state.process_event(&EventEnvelope::now(EngineEvent::PreflightHit(

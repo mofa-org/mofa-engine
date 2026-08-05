@@ -384,16 +384,14 @@ impl MetricsState {
 
                 // Counter: requests by capability × provider × locality × model × status
                 let status = if e.success { "success" } else { "error" };
-                let backend_lower = e.backend.to_lowercase();
-                let locality = if backend_lower == "ollama"
-                    || backend_lower == "kokoro"
-                    || backend_lower == "funasr"
-                    || backend_lower == "local"
-                {
-                    "local"
-                } else {
-                    "cloud"
-                };
+                let is_local = e.is_local.unwrap_or_else(|| {
+                    let backend_lower = e.backend.to_lowercase();
+                    backend_lower == "ollama"
+                        || backend_lower == "kokoro"
+                        || backend_lower == "funasr"
+                        || backend_lower == "local"
+                });
+                let locality = if is_local { "local" } else { "cloud" };
 
                 self.requests_total.inc(
                     Labels::new()
@@ -434,17 +432,8 @@ impl MetricsState {
                     &e.model_id,
                     tokens_in as u32,
                     tokens_out as u32,
+                    is_local,
                 );
-                let backend_lower = e.backend.to_lowercase();
-                let locality = if backend_lower == "ollama"
-                    || backend_lower == "kokoro"
-                    || backend_lower == "funasr"
-                    || backend_lower == "local"
-                {
-                    "local"
-                } else {
-                    "cloud"
-                };
                 self.estimated_cost_usd.add(
                     Labels::new()
                         .add("provider", &e.backend)
@@ -763,6 +752,7 @@ mod tests {
             model_was_hot: Some(true),
             success: true,
             error_code: None,
+            is_local: None,
         }));
 
         state.process_event(&event);
@@ -792,6 +782,7 @@ mod tests {
                 model_was_hot: None,
                 success: true,
                 error_code: None,
+                is_local: None,
             }));
             state.process_event(&event);
         }
@@ -823,6 +814,7 @@ mod tests {
                     model_was_hot: None,
                     success: true,
                     error_code: None,
+                    is_local: None,
                 },
             )));
         }
@@ -840,6 +832,7 @@ mod tests {
                 model_was_hot: None,
                 success: false,
                 error_code: Some("model_not_found".into()),
+                is_local: None,
             },
         )));
 
@@ -904,6 +897,7 @@ mod tests {
                 model_was_hot: Some(true),
                 success: true,
                 error_code: None,
+                is_local: None,
             },
         )));
 
@@ -1035,6 +1029,7 @@ mod tests {
                 model_was_hot: None,
                 success: true,
                 error_code: None,
+                is_local: None,
             },
         )));
         assert_eq!(state.active_requests.values[&Labels::new()], 1.0);
@@ -1118,6 +1113,7 @@ mod tests {
                 model_was_hot: None,
                 success: true,
                 error_code: None,
+                is_local: None,
             },
         )));
 
@@ -1259,6 +1255,7 @@ mod tests {
                         model_was_hot: None,
                         success,
                         error_code: None,
+                        is_local: None,
                     },
                 )));
             }
@@ -1312,6 +1309,7 @@ mod tests {
                 model_was_hot: Some(true),
                 success: true,
                 error_code: None,
+                is_local: Some(true),
             },
         )));
 
@@ -1328,6 +1326,7 @@ mod tests {
                 model_was_hot: Some(true),
                 success: true,
                 error_code: None,
+                is_local: Some(false),
             },
         )));
 
