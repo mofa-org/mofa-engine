@@ -1,18 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Settings, Mic2, History, Activity } from 'lucide-react';
+import { Settings, History, Activity } from 'lucide-react';
 import { SettingsModal } from './SettingsModal';
-const SCENARIOS = [
-  { value: 'success', label: 'Success' },
-  { value: 'memory_pressure', label: 'Memory Pressure & Eviction' },
-  { value: 'circuit_open', label: 'Circuit Open' },
-  { value: 'timeout', label: 'Timeout' },
-  { value: 'no_tts_model', label: 'No TTS Model' },
-  { value: 'no_chat_model', label: 'No Chat Model' },
-  { value: 'empty_script', label: 'Empty Script' },
-  { value: 'fallback', label: 'Fallback' },
-  { value: 'provider_flapping', label: 'Provider Flapping' },
-  { value: 'engine_offline', label: 'Engine Offline' }
-];
 
 interface TopBarProps {
   currentView?: 'studio' | 'observability';
@@ -20,14 +8,6 @@ interface TopBarProps {
 
 export function TopBar({ currentView = 'studio' }: TopBarProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
-  
-  const currentScenario = new URLSearchParams(window.location.search).get('scenario') || 'success';
-
-  const handleScenarioChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const url = new URL(window.location.href);
-    url.searchParams.set('scenario', e.target.value);
-    window.location.href = url.toString();
-  };
 
   useEffect(() => {
     const handleOpen = () => setSettingsOpen(true);

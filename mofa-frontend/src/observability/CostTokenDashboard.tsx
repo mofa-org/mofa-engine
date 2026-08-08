@@ -30,12 +30,14 @@ export function CostTokenDashboard({
   prevSessionDelta = 0,
   isLoading = false
 }: CostTokenDashboardProps) {
-  const [sessionStartTime] = useState(new Date());
+  const [nowTick, setNowTick] = useState<number>(() => Date.now());
+  const [sessionStartTime] = useState(() => new Date());
   const [projectedHourlyCost, setProjectedHourlyCost] = useState(0);
 
   useEffect(() => {
     const interval = setInterval(() => {
       const now = new Date();
+      setNowTick(now.getTime());
       const sessionDurationMs = Math.max(1, now.getTime() - sessionStartTime.getTime());
       const hours = sessionDurationMs / (1000 * 60 * 60);
       if (hours > 0) {
@@ -53,7 +55,7 @@ export function CostTokenDashboard({
   const completionPercent = 100 - promptPercent;
   const budgetPercent = Math.min(100, Math.round((totalCloudCost / budgetCapUsd) * 100));
 
-  const secondsAgo = lastUpdated ? Math.floor((Date.now() - lastUpdated) / 1000) : 0;
+  const secondsAgo = lastUpdated ? Math.floor((nowTick - lastUpdated) / 1000) : 0;
   const isStale = secondsAgo > 10;
 
   if (isLoading) {

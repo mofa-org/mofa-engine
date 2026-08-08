@@ -454,6 +454,58 @@ class MofaEngine:
             params=params,
         )
 
+    # ─── Video Generation (Skeleton — PRD §8.6 scope boundary) ────────
+
+    def video_gen(
+        self,
+        prompt: str,
+        *,
+        duration_secs: int = 10,
+        resolution: str = "720p",
+        style: Optional[str] = None,
+        model: Optional[str] = None,
+        prefer: Optional[str] = None,
+        cancel_token: Optional[str] = None,
+    ) -> InvokeResult:
+        """Generate video from text prompt (PRD §3.6 — interface skeleton only).
+
+        NOTE: True video generation is a scope boundary (PRD §8.6).
+        The engine will return UnsupportedOperation until a VideoGen
+        backend is mounted. This skeleton ensures SDK surface parity
+        and allows downstream code to type-check against the interface.
+
+        Args:
+            prompt: Text description of the video to generate.
+            duration_secs: Target video duration in seconds (default 10).
+            resolution: Output resolution — "480p", "720p", "1080p".
+            style: Style preset (e.g., "cinematic", "animation").
+            model: Model override (future: "sora", "runway-gen3").
+            prefer: "local" | "cloud" routing preference.
+            cancel_token: Client-supplied cancellation token for async abort.
+
+        Returns:
+            InvokeResult with task status or UnsupportedOperation error.
+
+        Raises:
+            requests.HTTPError: 400 UnsupportedOperation from engine.
+        """
+        params: Dict[str, Any] = {
+            "prompt": prompt,
+            "duration_secs": duration_secs,
+            "resolution": resolution,
+        }
+        if style:
+            params["style"] = style
+        if cancel_token:
+            params["cancel_token"] = cancel_token
+        return self.invoke(
+            capability="video_gen",
+            model=model,
+            text=prompt,
+            prefer=prefer,
+            params=params,
+        )
+
     # ─── Multimodal Understanding (Vision / VLM) ──────────────────────
 
     def understand(

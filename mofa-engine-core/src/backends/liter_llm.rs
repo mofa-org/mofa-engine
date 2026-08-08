@@ -61,7 +61,9 @@ impl LiterLLMProvider {
         let key = api_key.unwrap_or_default();
         let has_key = !key.is_empty();
 
-        let mut builder = ClientConfigBuilder::new(key).load_env(!has_key);
+        let mut builder = ClientConfigBuilder::new(key)
+            .load_env(!has_key)
+            .timeout(std::time::Duration::from_secs(120));
         let base_url = base_url.into();
         if !base_url.is_empty() {
             builder = builder.base_url(base_url);

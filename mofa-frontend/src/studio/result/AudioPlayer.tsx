@@ -21,7 +21,7 @@ export function AudioPlayer({ filename, children }: AudioPlayerProps) {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
-  const [downloading, setDownloading] = useState(false);
+  const [_downloading, setDownloading] = useState(false);
   const [downloaded, setDownloaded] = useState(false);
 
   useEffect(() => {

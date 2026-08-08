@@ -3,9 +3,8 @@ import { motion } from 'framer-motion';
 import { motionVariants } from '../../lib/motion';
 import { PipelinePhase } from '../usePipeline';
 import { useElapsed } from '../useElapsed';
-import { formatMs } from '../../lib/utils';
 import { Card } from '../../shared/Card';
-import { Check, AlertCircle, TerminalSquare, MessageSquareText, AudioLines, FileText, PlayCircle } from 'lucide-react';
+import { TerminalSquare } from 'lucide-react';
 import { getErrorDescriptor } from '../../errors/errorCatalog';
 import { InlineError } from '../../errors/InlineError';
 import { EventFeed } from '../../monitor/EventFeed';
@@ -21,12 +20,10 @@ export function TheaterView({ phase, onRetryTts, onReset }: TheaterViewProps) {
   const startedAt = (phase as any).startedAt;
   const elapsed = useElapsed(startedAt, phase.status !== 'error' && phase.status !== 'done');
   
-  const isTranslating = phase.status === 'translating';
   const isSynthesizing = phase.status === 'synthesizing';
   const isChatDone = phase.status === 'translated' || phase.status === 'synthesizing' || phase.status === 'done' || (phase.status === 'error' && phase.failedStep === 'tts');
   
   const chatResult = (phase as any).chat;
-  const ttsResult = (phase as any).tts;
 
   return (
     <motion.div 

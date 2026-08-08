@@ -96,7 +96,9 @@ export class RealEngineClient implements IEngineClient {
           const body = await response.json();
           if (body.error) error = body.error;
           if (body.detail) detail = body.detail;
-        } catch { }
+        } catch {
+          // ignore non-json response body
+        }
         return { success: false, type: 'http', error, detail };
       }
 
@@ -120,7 +122,7 @@ export class RealEngineClient implements IEngineClient {
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
-        for (let line of lines) {
+        for (const line of lines) {
           if (line.startsWith('data:')) {
             const dataStr = line.slice(5).trim();
             if (dataStr === '[DONE]') continue;
@@ -134,7 +136,7 @@ export class RealEngineClient implements IEngineClient {
               if (chunk.final_response) {
                 finalResponse = chunk.final_response;
               }
-            } catch (e) {
+            } catch {
               // Plain string SSE chunk fallback
               if (dataStr) {
                 accumulatedText += dataStr;
@@ -200,10 +202,10 @@ export class RealEngineClient implements IEngineClient {
     // Lazily open the shared SSE connection on first subscriber
     if (!this.sharedEventSource) {
       const url = `${this.baseUrl}/v1/events`;
-      console.log(`[SSE] Opening shared EventSource → ${url}`);
+      if (import.meta.env.DEV) console.log(`[SSE] Opening shared EventSource → ${url}`);
       const es = new EventSource(url);
       es.onopen = () => {
-        console.log(`[SSE] Connection opened, readyState=${es.readyState}, handlers=${this.eventHandlers.size}`);
+        if (import.meta.env.DEV) console.log(`[SSE] Connection opened, readyState=${es.readyState}, handlers=${this.eventHandlers.size}`);
       };
       es.onmessage = (event) => {
         try {
@@ -212,7 +214,7 @@ export class RealEngineClient implements IEngineClient {
           const pascalType = snakeType.replace(/(^|_)([a-z])/g, (_: string, __: string, c: string) => c.toUpperCase());
           const { type: _, ...data } = raw;
           const parsed: EngineEvent = { type: pascalType as any, data, timestamp: Date.now() };
-          console.log(`[SSE] Event received: ${pascalType}, handlers=${this.eventHandlers.size}`);
+          if (import.meta.env.DEV) console.log(`[SSE] Event received: ${pascalType}, handlers=${this.eventHandlers.size}`);
           // Fan out to all registered handlers
           this.eventHandlers.forEach(h => h(parsed));
         } catch (e) {

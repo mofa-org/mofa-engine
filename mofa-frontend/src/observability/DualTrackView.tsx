@@ -30,7 +30,7 @@ export function DualTrackView() {
     refresh
   } = useEngineMetrics();
 
-  const [sessionStartTime] = useState<number>(Date.now());
+  const [sessionStartTime] = useState<number>(() => Date.now());
   const [sessionDurationStr, setSessionDurationStr] = useState('0m 0s');
   const [exported, setExported] = useState(false);
 

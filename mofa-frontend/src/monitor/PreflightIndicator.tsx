@@ -18,7 +18,7 @@ export function PreflightIndicator() {
 
     const handleEvent = (evt: any) => {
       if (evt.type === 'ModelResidencyChanged') {
-        const { model, from, to, reason } = evt.data;
+        const { model, from: _from, to, reason } = evt.data;
         if (to === 'Loading') {
           setStatus(prev => ({ ...prev, type: 'warming', model }));
         } else if (to === 'Unloaded' && reason === 'eviction') {
@@ -32,7 +32,7 @@ export function PreflightIndicator() {
           });
         }
       } else if (evt.type === 'ModelStatusChanged') {
-        const { model, from, to } = evt.data;
+        const { model, from: _from, to } = evt.data;
         if (to === 'Warming') {
           setStatus(prev => ({ ...prev, type: 'warming', model }));
         }

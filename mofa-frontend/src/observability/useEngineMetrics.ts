@@ -162,14 +162,18 @@ export function useEngineMetrics() {
           };
         });
       if (seeded.length > 0) {
-        setActivityFeed(seeded);
+        queueMicrotask(() => {
+          setActivityFeed(seeded);
+        });
       }
     }
   }, [history, activityFeed.length]);
 
   useEffect(() => {
     let mounted = true;
-    fetchStatusAndMetrics();
+    queueMicrotask(() => {
+      if (mounted) fetchStatusAndMetrics();
+    });
 
     const interval = setInterval(() => {
       if (mounted) fetchStatusAndMetrics();

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Card } from '../shared/Card';
 import { AnimatedNumber } from '../shared/AnimatedNumber';
 import { Sparkline } from '../shared/Sparkline';
@@ -30,8 +30,17 @@ export function LatencyAvailabilityDashboard({
   prevSessionDelta = 0,
   isLoading = false
 }: LatencyAvailabilityDashboardProps) {
+  const [nowTick, setNowTick] = useState<number>(() => Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setNowTick(Date.now());
+    }, 3000);
+    return () => clearInterval(timer);
+  }, []);
+
   const latencySavedSec = (warmupHits * 1.45).toFixed(2);
-  const secondsAgo = lastUpdated ? Math.floor((Date.now() - lastUpdated) / 1000) : 0;
+  const secondsAgo = lastUpdated ? Math.floor((nowTick - lastUpdated) / 1000) : 0;
   const isStale = secondsAgo > 10;
 
   if (isLoading) {

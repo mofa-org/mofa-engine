@@ -1,14 +1,13 @@
-import React, { useState, Suspense } from 'react';
+import React, { Suspense } from 'react';
 import { motion } from 'framer-motion';
 import { motionVariants } from '../../lib/motion';
 import { PipelinePhase } from '../usePipeline';
 import { Card } from '../../shared/Card';
-import { Button } from '../../shared/Button';
 import { Badge } from '../../shared/Badge';
 import { formatMs } from '../../lib/utils';
-import { CheckCircle2, Download, Copy, RotateCcw, Zap, Shuffle } from 'lucide-react';
-import { engine } from '../../engine/index';
+import { CheckCircle2, Zap, Shuffle } from 'lucide-react';
 import { PipelineViz } from '../PipelineViz';
+import { ThoughtChainView } from './ThoughtChainView';
 
 const AudioPlayer = React.lazy(() => import('./AudioPlayer').then(m => ({ default: m.AudioPlayer })));
 
@@ -17,26 +16,13 @@ interface ResultViewProps {
   onReset: () => void;
 }
 
-export function ResultView({ phase, onReset }: ResultViewProps) {
+export function ResultView({ phase, onReset: _onReset }: ResultViewProps) {
   const chat = (phase as any).chat;
   const tts = (phase as any).tts;
   const totalMs = (phase as any).totalMs;
-  
-  const [copied, setCopied] = useState(false);
-  
-  const handleCopy = () => {
-    navigator.clipboard.writeText(chat.script);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-  
-  const handleDownload = () => {
-    const url = engine.getAudioUrl(tts.audioFilename);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `mofa-podcast-${Date.now()}.wav`;
-    a.click();
-  };
+
+  const reasoningChunks = chat?.reasoningChunks || (chat?.reasoningText ? [chat.reasoningText] : []);
+  const reasoningTokenCount = chat?.reasoningTokenCount || (reasoningChunks.join('').split(/\s+/).length);
 
   return (
     <motion.div 
@@ -92,6 +78,17 @@ export function ResultView({ phase, onReset }: ResultViewProps) {
           </AudioPlayer>
         </Suspense>
       </div>
+
+      {/* Thought Chain Display for Deep Thinking Reasoning */}
+      {reasoningChunks.length > 0 && (
+        <div className="mb-6">
+          <ThoughtChainView
+            reasoningChunks={reasoningChunks}
+            reasoningTokenCount={reasoningTokenCount}
+            isStreaming={false}
+          />
+        </div>
+      )}
 
       {/* Intelligence Showcase */}
       <div className="mb-6">
