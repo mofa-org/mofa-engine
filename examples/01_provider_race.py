@@ -81,15 +81,18 @@ def run_benchmark(prompt: str, mock: bool = False, engine_url: str = "http://127
         try:
             res_local = engine.chat(prompt, model="qwen2.5:7b", prefer="local")
             elapsed_local = time.perf_counter() - start_time
-            tokens_local = getattr(res_local, "tokens", len(res_local.text.split()) * 1.3)
+            dur_ms = getattr(res_local, "duration_ms", int(elapsed_local * 1000))
+            ttft_val = round(getattr(res_local, "ttft_ms", dur_ms * 0.25) / 1000.0, 3)
+            tokens_local = getattr(res_local, "tokens_used", None) or getattr(res_local, "tokens", int(len(getattr(res_local, 'text', '').split()) * 1.3))
+            cost_local = getattr(res_local, "cost_usd", 0.0)
             results.append({
                 "provider": "Ollama (qwen2.5:7b)",
                 "locality": "\033[32mLocal (Free)\033[0m",
-                "ttft_sec": elapsed_local * 0.2,
+                "ttft_sec": ttft_val,
                 "total_sec": round(elapsed_local, 2),
                 "tokens": int(tokens_local),
                 "velocity_tok_sec": round(tokens_local / max(elapsed_local, 0.001), 1),
-                "cost_usd": 0.000000,
+                "cost_usd": cost_local,
                 "status": "✅ Healthy"
             })
         except Exception as e:
@@ -110,12 +113,14 @@ def run_benchmark(prompt: str, mock: bool = False, engine_url: str = "http://127
         try:
             res_cloud = engine.chat(prompt, model="fireworks/deepseek-v4", prefer="cloud")
             elapsed_cloud = time.perf_counter() - start_time
-            tokens_cloud = getattr(res_cloud, "tokens", len(res_cloud.text.split()) * 1.3)
-            cost_cloud = getattr(res_cloud, "cost", (tokens_cloud / 1000.0) * 0.00014)
+            dur_ms = getattr(res_cloud, "duration_ms", int(elapsed_cloud * 1000))
+            ttft_val = round(getattr(res_cloud, "ttft_ms", dur_ms * 0.25) / 1000.0, 3)
+            tokens_cloud = getattr(res_cloud, "tokens_used", None) or getattr(res_cloud, "tokens", int(len(getattr(res_cloud, 'text', '').split()) * 1.3))
+            cost_cloud = getattr(res_cloud, "cost_usd", None) or getattr(res_cloud, "cost", (tokens_cloud / 1000.0) * 0.00014)
             results.append({
                 "provider": "Fireworks AI (deepseek-v4)",
                 "locality": "\033[38;2;249;115;22mCloud\033[0m",
-                "ttft_sec": elapsed_cloud * 0.25,
+                "ttft_sec": ttft_val,
                 "total_sec": round(elapsed_cloud, 2),
                 "tokens": int(tokens_cloud),
                 "velocity_tok_sec": round(tokens_cloud / max(elapsed_cloud, 0.001), 1),
@@ -133,6 +138,20 @@ def run_benchmark(prompt: str, mock: bool = False, engine_url: str = "http://127
                 "cost_usd": 0.0,
                 "status": f"❌ Error ({str(e)})"
             })
+
+    # Telemetry readback from engine
+    if not mock:
+        try:
+            cost_data = engine.cost()
+            print(f"\n{'━' * 60}")
+            print(f"  📊 Engine Telemetry Readback (from /v1/cost)")
+            print(f"{'━' * 60}")
+            if isinstance(cost_data, dict):
+                for p_name, p_val in cost_data.items():
+                    if isinstance(p_val, dict):
+                        print(f"  • {p_name}: ${p_val.get('total_cost_usd', 0.0):.6f} ({p_val.get('total_tokens', 0)} tokens)")
+        except Exception:
+            pass
 
     return results
 

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "mofa-engine": {
+      "command": "python3",
+      "args": ["mofa-fm/mcp_server.py"],
+      "env": {}
+    }
+  }
+}

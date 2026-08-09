@@ -249,17 +249,19 @@ def process_meeting(
 
     elapsed_time = time.perf_counter() - start_total
 
-    # -------------------------------------------------------------------------
-    # Summary Table
-    # -------------------------------------------------------------------------
-    print(f"📊 SCENARIO S1 EXECUTION SUMMARY")
-    print(f"──────────────────────────────────────────────────────────────────────────")
-    print(f"  • Routing Preference : {prefer}")
-    print(f"  • Locality Status    : {get_locality_badge(prefer)}")
-    print(f"  • Total Latency      : {elapsed_time:.2f}s")
-    print(f"  • Total Cost (USD)   : ${total_cost:.6f}")
-    if narrative_file:
-        print(f"  • Brief Audio File   : {narrative_file}")
+    # Engine Observability Telemetry Readback
+    if not mock:
+        try:
+            engine = MofaEngine(base_url=engine_url)
+            cost_data = engine.cost()
+            print(f"  📊 Engine Telemetry (from /v1/cost):")
+            if isinstance(cost_data, dict):
+                for p_name, p_val in cost_data.items():
+                    if isinstance(p_val, dict):
+                        print(f"     • {p_name}: ${p_val.get('total_cost_usd', 0.0):.6f} ({p_val.get('total_tokens', 0)} tokens)")
+        except Exception:
+            pass
+
     print(f"──────────────────────────────────────────────────────────────────────────\n")
 
     return True
