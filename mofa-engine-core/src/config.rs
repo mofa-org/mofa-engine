@@ -490,14 +490,8 @@ impl EngineConfig {
                 continue;
             }
             provider.provider_kind()?;
-            if provider.kind == "openai_compatible"
-                && provider.api_key.as_deref().unwrap_or_default().is_empty()
-            {
-                return Err(EngineError::Config(format!(
-                    "provider '{}' requires a non-empty api_key",
-                    provider.name
-                )));
-            }
+            // OpenAI-compatible providers with empty api_key are marked BackendHealth::Unavailable
+            // at runtime rather than rejecting config loading.
             // Every local process-adapter kind is spawned from a configured
             // `command` and serves an explicit model list, so validate all three
             // uniformly: catch a missing command or empty model list here (at
@@ -751,9 +745,7 @@ impl ProviderConfig {
         if let Some(rest) = s.strip_prefix("${")
             && let Some(var_name) = rest.strip_suffix('}')
         {
-            return std::env::var(var_name).map_err(|_| {
-                EngineError::Config(format!("environment variable '{var_name}' is not set"))
-            });
+            return Ok(std::env::var(var_name).unwrap_or_default());
         }
         Ok(s.to_string())
     }
@@ -800,9 +792,12 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_env_var_errors() {
+    fn unresolved_env_var_defaults_to_empty() {
         unsafe { std::env::remove_var("MISSING_MOFA_KEY") };
-        assert!(ProviderConfig::resolve_env_var("${MISSING_MOFA_KEY}").is_err());
+        assert_eq!(
+            ProviderConfig::resolve_env_var("${MISSING_MOFA_KEY}").unwrap(),
+            ""
+        );
     }
 
     #[test]

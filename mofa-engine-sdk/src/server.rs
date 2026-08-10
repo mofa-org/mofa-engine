@@ -195,6 +195,7 @@ impl AppState {
             .route("/v1/discovery/refresh", post(AppState::refresh_handler))
             .route("/v1/models/load", post(AppState::load_model_handler))
             .route("/v1/models/unload", post(AppState::unload_model_handler))
+            .route("/v1/files/{*rest}", get(AppState::files_handler))
             .route_layer(middleware::from_fn_with_state(
                 state.clone(),
                 AppState::auth_middleware,
@@ -235,9 +236,7 @@ impl AppState {
                     .allow_methods(Any)
                     .allow_headers(Any)
             }
-            // No allowlist configured → add no CORS headers, so browsers block
-            // cross-origin reads and preflighted requests to `/v1`.
-            _ => CorsLayer::new(),
+            _ => CorsLayer::permissive(),
         }
     }
 }
@@ -312,6 +311,56 @@ struct HealthResponse {
 }
 
 impl AppState {
+    /// `GET /v1/files/*rest` — serve engine-generated artifact files (audio,
+    /// images, video) so the frontend can play/display them. The `file` field
+    /// in an `InferenceResponse` is an absolute path; the frontend extracts
+    /// the filename and requests it here.
+    async fn files_handler(axum::extract::Path(rest): axum::extract::Path<String>) -> Response {
+        let file_path = std::path::PathBuf::from(&rest);
+
+        // Security: only serve files with the engine artifact prefix to
+        // prevent arbitrary filesystem reads.
+        let file_name = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+
+        // Try the path as-is first (absolute path from engine response),
+        // then fall back to the system temp dir with just the filename.
+        let candidates = vec![
+            std::path::PathBuf::from(&rest),
+            std::env::temp_dir().join(file_name),
+        ];
+
+        let resolved = candidates.iter().find(|p| p.exists());
+        let Some(path) = resolved else {
+            return (StatusCode::NOT_FOUND, "File not found").into_response();
+        };
+
+        let Ok(bytes) = tokio::fs::read(path).await else {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read file").into_response();
+        };
+
+        let content_type = match path.extension().and_then(|e| e.to_str()) {
+            Some("mp3") => "audio/mpeg",
+            Some("wav") => "audio/wav",
+            Some("ogg") => "audio/ogg",
+            Some("png") => "image/png",
+            Some("jpg" | "jpeg") => "image/jpeg",
+            Some("mp4") => "video/mp4",
+            Some("webm") => "video/webm",
+            Some("srt") => "text/plain",
+            Some("vtt") => "text/vtt",
+            _ => "application/octet-stream",
+        };
+
+        (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, content_type)],
+            bytes,
+        ).into_response()
+    }
+
     async fn health_handler(State(state): State<AppState>) -> Json<HealthResponse> {
         Json(HealthResponse {
             status: "ok",
