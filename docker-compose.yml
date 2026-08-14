@@ -1,0 +1,40 @@
+version: "3.8"
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: mofa-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_storage:/root/.ollama
+    restart: unless-stopped
+
+  engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mofa-engine
+    ports:
+      - "8420:8420"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - RUST_LOG=info
+      - MOFA_PORT=8420
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./mofa-frontend
+      dockerfile: Dockerfile
+    container_name: mofa-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - engine
+    restart: unless-stopped
+
+volumes:
+  ollama_storage:

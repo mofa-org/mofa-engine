@@ -12,21 +12,79 @@ interface ComposeViewProps {
   onStart: (article: string, options: { systemPrompt: string; voice: string; locality?: 'local' | 'cloud' | 'auto'; model?: string | null }) => void;
 }
 
-const SAMPLES = {
-  'AI News': "A new study reveals that artificial intelligence models are increasingly capable of writing highly optimized code, but struggle with contextual nuances in legacy systems. Researchers at MIT found a 40% increase in developer productivity when pairing AI with human review.",
-  'Science': "The James Webb Space Telescope has captured a stunning new image of the Pillars of Creation. The near-infrared camera peered through dust clouds to reveal nascent stars forming in the gas pillars, located 6,500 light-years away in the Eagle Nebula.",
-  'Short Story': "The rain hasn't stopped for three days. Inside the small café on 5th Street, Elias watched the water run down the windowpane, distorting the neon signs outside. He clutched his coffee mug, waiting for a message that might never come."
-};
+interface ScenarioPreset {
+  id: string;
+  name: string;
+  badge: string;
+  pipeline: string;
+  defaultText: string;
+  systemPrompt: string;
+  voice: string;
+  locality: 'local' | 'cloud' | 'auto';
+}
+
+const SCENARIO_PRESETS: ScenarioPreset[] = [
+  {
+    id: 's6-podcast',
+    name: '🎙️ S6 Podcast Matrix',
+    badge: 'Flagship Audio',
+    pipeline: 'Article → Chat Rewrite (hint_next=tts) → Kokoro TTS Audio',
+    defaultText: "A new study reveals that artificial intelligence models are increasingly capable of writing highly optimized code, but struggle with contextual nuances in legacy systems. Researchers at MIT found a 40% increase in developer productivity when pairing AI with human review.",
+    systemPrompt: "Rewrite as a concise conversational podcast dialogue between two hosts. Keep under 250 characters.",
+    voice: 'Xiaoxiao',
+    locality: 'local'
+  },
+  {
+    id: 's4-explainer',
+    name: '🎬 S4 Explainer Video',
+    badge: 'Flagship Video',
+    pipeline: 'Topic → Script → ImageGen Visuals → TTS Narration → MP4',
+    defaultText: "Quantum computing leverages qubits in superposition to evaluate vast computational search spaces in parallel rather than sequentially.",
+    systemPrompt: "Write a 3-sentence spoken video narration script. Output ONLY spoken words.",
+    voice: 'Alloy',
+    locality: 'local'
+  },
+  {
+    id: 's2-review',
+    name: '📝 S2 Code Review',
+    badge: 'Deep Reasoning',
+    pipeline: 'Git Diff → Responses API (effort=high) → Thought Chain → Report',
+    defaultText: "diff --git a/auth/jwt.py b/auth/jwt.py\n@@ -12,2 +12,2 @@\n-    claims['exp'] = datetime.utcnow() + timedelta(hours=1)\n+    # TODO: Temporarily disable expiry for testing\n+    pass",
+    systemPrompt: "Perform a rigorous security and performance code review. Stream deep reasoning tokens.",
+    voice: 'Echo',
+    locality: 'local'
+  },
+  {
+    id: 's1-meeting',
+    name: '📋 S1 Meeting Minutes',
+    badge: 'Enterprise Audio',
+    pipeline: 'Meeting Audio → ASR Transcribe → LLM Minutes + Action Items → 30s Audio Brief',
+    defaultText: "Speaker 1 (Alice): 'We must lock enterprise data to local models by Friday.'\nSpeaker 2 (Bob): 'Kokoro TTS achieves 85ms latency on Apple Silicon.'\nSpeaker 3 (Carol): 'Zero data egress verified under prefer=local.'",
+    systemPrompt: "Extract executive meeting minutes with Decisions, Action Items, and Risks.",
+    voice: 'Nova',
+    locality: 'local'
+  }
+];
 
 export function ComposeView({ onStart }: ComposeViewProps) {
   const { draft, saveDraft } = useDraft();
-  const [article, setArticle] = useState(draft || SAMPLES['AI News']);
+  const [selectedScenario, setSelectedScenario] = useState<string>('s6-podcast');
+  const [article, setArticle] = useState(draft || SCENARIO_PRESETS[0].defaultText);
   const [voice, setVoice] = useState('Xiaoxiao');
   const [providerOption, setProviderOption] = useState<'local' | 'cloud'>('local');
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [systemPrompt, setSystemPrompt] = useState('Rewrite as a Chinese podcast script, under 200 characters. Output only Chinese.');
+  const [systemPrompt, setSystemPrompt] = useState(SCENARIO_PRESETS[0].systemPrompt);
   
   const { state: engineState } = useEngineConnection();
+
+  const handleSelectScenario = (preset: ScenarioPreset) => {
+    setSelectedScenario(preset.id);
+    setArticle(preset.defaultText);
+    saveDraft(preset.defaultText);
+    setSystemPrompt(preset.systemPrompt);
+    setVoice(preset.voice);
+    setProviderOption(preset.locality === 'cloud' ? 'cloud' : 'local');
+  };
   
   const handleArticleChange = (val: string) => {
     setArticle(val);
@@ -58,6 +116,35 @@ export function ComposeView({ onStart }: ComposeViewProps) {
 
       <OnboardingBanner />
 
+      {/* Scenario Preset Selector Cards */}
+      <div className="mb-4">
+        <div className="text-[12px] font-semibold uppercase tracking-wider text-text-dim mb-2 px-1">Select Delivery Scenario:</div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
+          {SCENARIO_PRESETS.map(preset => {
+            const isSelected = selectedScenario === preset.id;
+            return (
+              <button
+                key={preset.id}
+                onClick={() => handleSelectScenario(preset)}
+                className={`flex flex-col items-start p-2.5 rounded-[var(--radius-small)] border text-left transition-all ${
+                  isSelected
+                    ? 'border-accent-cyan bg-accent-cyan/10 shadow-[0_0_15px_rgba(6,182,212,0.15)]'
+                    : 'border-border-subtle bg-background-card hover:bg-background-hover hover:border-border-strong'
+                }`}
+              >
+                <span className={`text-[12px] font-medium ${isSelected ? 'text-accent-cyan' : 'text-text-primary'}`}>{preset.name}</span>
+                <span className="text-[10px] text-text-dim mt-0.5">{preset.badge}</span>
+              </button>
+            );
+          })}
+        </div>
+        {/* Active Pipeline Indicator */}
+        <div className="px-3 py-1.5 rounded-[var(--radius-small)] bg-background-hover/60 border border-border-subtle text-[11px] text-text-secondary flex items-center gap-2">
+          <Sparkles className="w-3.5 h-3.5 text-accent-cyan shrink-0" />
+          <span className="font-mono">{SCENARIO_PRESETS.find(p => p.id === selectedScenario)?.pipeline}</span>
+        </div>
+      </div>
+
       <Card className="p-6 relative group mb-4 transition-all duration-300 focus-within:border-accent-cyan/50 focus-within:shadow-[0_0_30px_rgba(6,182,212,0.1)]">
         <div className="absolute inset-0 bg-accent-cyan/5 blur-3xl opacity-0 group-focus-within:opacity-100 transition-opacity pointer-events-none" />
         
@@ -70,27 +157,13 @@ export function ComposeView({ onStart }: ComposeViewProps) {
                 handleGenerate();
               }
             }}
-            className="w-full min-h-[200px] max-h-[50vh] bg-transparent resize-y text-[15px] text-text-primary placeholder:text-text-dim focus:outline-none leading-relaxed"
-            placeholder="Paste an English article here — a news piece, a blog post, an essay… or try a sample below ↓"
-            aria-label="Article text"
+            className="w-full min-h-[160px] max-h-[50vh] bg-transparent resize-y text-[14px] font-mono text-text-primary placeholder:text-text-dim focus:outline-none leading-relaxed"
+            placeholder="Paste text, prompt, or diff here..."
+            aria-label="Scenario input"
           />
-          <div className="flex justify-between items-center mt-4 pt-4 border-t border-border-subtle">
-            <div className="flex items-center gap-3">
-              <span className="text-[12px] text-text-dim hidden sm:inline-block">Try a sample:</span>
-              <div className="flex gap-2">
-                {(Object.keys(SAMPLES) as Array<keyof typeof SAMPLES>).map(key => (
-                  <button
-                    key={key}
-                    onClick={() => handleArticleChange(SAMPLES[key])}
-                    className="px-3 py-1 rounded-full bg-background-hover hover:bg-white/5 text-[13px] text-text-secondary hover:text-text-primary transition-colors focus:outline-none focus:ring-2 focus:ring-accent-cyan"
-                    aria-label={`Load sample ${key}`}
-                  >
-                    {key}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <span className="text-[13px] font-mono text-text-dim shrink-0">{article.length} chars</span>
+          <div className="flex justify-between items-center mt-3 pt-3 border-t border-border-subtle">
+            <span className="text-[11px] text-text-dim">Preset input loaded for {SCENARIO_PRESETS.find(p => p.id === selectedScenario)?.name}</span>
+            <span className="text-[12px] font-mono text-text-dim shrink-0">{article.length} chars</span>
           </div>
         </div>
       </Card>

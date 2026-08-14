@@ -17,4 +17,11 @@ test_obs_config.toml
 *.mp3
 *.png
 *.mp4
+*.pdf
+output/
+!examples/samples/*
+!examples/samples/*.mp3
+!examples/samples/*.png
+!examples/samples/*.wav
+
 
