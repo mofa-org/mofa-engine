@@ -87,10 +87,11 @@ impl Router {
             // a conflicting `prefer=cloud`: privacy is never traded for preference.
             let force_local =
                 request.prefer == Prefer::Local || request.data_class.requires_local();
-            if force_local && !provider.kind.is_local() {
+            let is_local = provider.kind.is_local() || model.residency == ModelResidency::Loaded;
+            if force_local && !is_local {
                 continue;
             }
-            if !force_local && request.prefer == Prefer::Cloud && provider.kind.is_local() {
+            if !force_local && request.prefer == Prefer::Cloud && is_local {
                 continue;
             }
 

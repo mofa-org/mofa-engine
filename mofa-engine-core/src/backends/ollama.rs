@@ -121,7 +121,19 @@ struct OllamaChatRequest {
     messages: Vec<OllamaMessage>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    keep_alive: Option<String>,
+    keep_alive: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<OllamaOptions>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct OllamaOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    num_ctx: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    num_predict: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -313,6 +325,37 @@ impl OllamaProvider {
             }
         }
     }
+
+    /// Extract or default Ollama options (num_ctx, num_predict, temperature)
+    /// to support long documents and full meeting transcripts up to 32K tokens.
+    fn resolve_options(request: &InferenceRequest) -> Option<OllamaOptions> {
+        let num_ctx = request
+            .params
+            .get("num_ctx")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+            .or(Some(32768));
+
+        let num_predict = request
+            .params
+            .get("max_tokens")
+            .or_else(|| request.params.get("num_predict"))
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+            .or(Some(4096));
+
+        let temperature = request
+            .params
+            .get("temperature")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32);
+
+        Some(OllamaOptions {
+            num_ctx,
+            num_predict,
+            temperature,
+        })
+    }
 }
 
 #[async_trait]
@@ -448,7 +491,8 @@ impl Provider for OllamaProvider {
                 images: Vec::new(),
             }],
             stream: false,
-            keep_alive: Some("5m".into()),
+            keep_alive: Some(serde_json::json!(-1)),
+            options: None,
         };
         let url = format!("{}/api/chat", self.base_url);
         let resp = self
@@ -489,7 +533,8 @@ impl Provider for OllamaProvider {
                 images: Vec::new(),
             }],
             stream: false,
-            keep_alive: Some("0".into()),
+            keep_alive: Some(serde_json::json!(0)),
+            options: None,
         };
 
         let url = format!("{}/api/chat", self.base_url);
@@ -539,11 +584,13 @@ impl Provider for OllamaProvider {
             return Err(EngineError::InvalidRequest("no messages provided".into()));
         }
 
+        let options = Self::resolve_options(request);
         let body = OllamaChatRequest {
             model: model_name.to_string(),
             messages,
             stream: false,
             keep_alive: None,
+            options,
         };
 
         let url = format!("{}/api/chat", self.base_url);
@@ -621,11 +668,13 @@ impl Provider for OllamaProvider {
             return Err(EngineError::InvalidRequest("no messages provided".into()));
         }
 
+        let options = Self::resolve_options(request);
         let body = OllamaChatRequest {
             model: model_name.to_string(),
             messages,
             stream: true,
             keep_alive: None,
+            options,
         };
         let url = format!("{}/api/chat", self.base_url);
         let start = Instant::now();
