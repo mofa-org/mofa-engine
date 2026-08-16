@@ -10,7 +10,7 @@
       "gridPos": { "x": 0, "y": 0, "w": 6, "h": 6 },
       "targets": [
         {
-          "expr": "sum(rate(mofa_preflight_hits_total[1h])) / (sum(rate(mofa_preflight_hits_total[1h])) + sum(rate(mofa_preflight_misses_total[1h]))) * 100",
+          "expr": "sum(mofa_preflight_hits_total) / clamp_min(sum(mofa_preflight_hits_total) + sum(mofa_preflight_misses_total), 1) * 100",
           "legendFormat": "Accuracy %"
         }
       ],

@@ -7,9 +7,10 @@ use mofa_engine_core::Engine;
 use mofa_kernel::EngineEvent;
 use mofa_observability::collector::{EventSender, Labels, MetricsState};
 use mofa_observability::events::{
-    EngineEvent as ObsEngineEvent, EventEnvelope, ModelLoaded, ModelUnloaded, RequestCompleted,
-    RequestReceived, UnloadReason,
+    EngineEvent as ObsEngineEvent, EventEnvelope, EvictionTriggered, ModelLoaded, ModelUnloaded,
+    PreflightSignal, RequestCompleted, RequestReceived, SignalSource, UnloadReason,
 };
+use mofa_observability::events::{PreflightHit as ObsPreflightHit, PreflightMiss as ObsPreflightMiss};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -19,6 +20,18 @@ struct RequestContext {
     capability: mofa_observability::events::Capability,
     model_id: String,
     backend: String,
+    is_local: bool,
+}
+
+/// Determine if a provider/backend is local (free-tier) or cloud (paid).
+fn is_provider_local(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower == "ollama"
+        || lower == "kokoro"
+        || lower == "funasr"
+        || lower == "local"
+        || lower == "whisper"
+        || lower == "llama.cpp"
 }
 
 /// Runs the observability bridge.
@@ -103,12 +116,15 @@ pub async fn run(
                             "local".to_string()
                         };
 
+                        let is_local = is_provider_local(&backend);
+
                         cache.insert(
                             request_id.clone(),
                             RequestContext {
                                 capability: obs_cap,
                                 model_id: model_id.clone(),
                                 backend: backend.clone(),
+                                is_local,
                             },
                         );
 
@@ -126,14 +142,15 @@ pub async fn run(
                         duration_ms,
                         success,
                     } => {
-                        let (obs_model_id, obs_capability, obs_backend) = cache
+                        let (obs_model_id, obs_capability, obs_backend, obs_is_local) = cache
                             .remove(&request_id)
-                            .map(|ctx| (ctx.model_id, ctx.capability, ctx.backend))
+                            .map(|ctx| (ctx.model_id, ctx.capability, ctx.backend, ctx.is_local))
                             .unwrap_or_else(|| {
                                 (
                                     "unknown".into(),
                                     mofa_observability::events::Capability::Chat,
                                     "unknown".into(),
+                                    true, // default to local when unknown
                                 )
                             });
 
@@ -149,7 +166,7 @@ pub async fn run(
                                 model_was_hot: None,
                                 success,
                                 error_code: None,
-                                is_local: None,
+                                is_local: Some(obs_is_local),
                             });
                         let envelope =
                             EventEnvelope::now(obs_event).with_request_id(&request_id);
@@ -218,6 +235,75 @@ pub async fn run(
                             models = models,
                             "Bridge: discovery completed"
                         );
+                    }
+                    EngineEvent::PreflightWarmStarted {
+                        model_id: _,
+                        source,
+                    } => {
+                        // Map warm start → PreflightSignal prediction event.
+                        // The collector uses this to increment
+                        // mofa_preflight_predictions_total{source="hint|history"}.
+                        let signal_source = match source.as_str() {
+                            "hint" => SignalSource::Hint,
+                            _ => SignalSource::History,
+                        };
+                        // Determine the predicted capability from the model being warmed.
+                        // For now, use Chat as default — the engine doesn't expose
+                        // which capability triggered the warm in the event payload.
+                        sender.send(EventEnvelope::now(
+                            ObsEngineEvent::PreflightSignal(PreflightSignal {
+                                predicted_capability:
+                                    mofa_observability::events::Capability::Chat,
+                                confidence: if signal_source == SignalSource::Hint {
+                                    1.0
+                                } else {
+                                    0.7
+                                },
+                                source: signal_source,
+                            }),
+                        ));
+                    }
+                    EngineEvent::PreflightWarmCompleted {
+                        model_id: _,
+                        success: warm_success,
+                    } => {
+                        // The engine now broadcasts PreflightWarmCompleted for both
+                        // real warm completions AND prediction confirmations (hit/miss).
+                        if warm_success {
+                            sender.send(EventEnvelope::now(
+                                ObsEngineEvent::PreflightHit(ObsPreflightHit {
+                                    predicted_capability:
+                                        mofa_observability::events::Capability::Chat,
+                                    cold_start_avoided_ms: 0,
+                                }),
+                            ));
+                        } else {
+                            sender.send(EventEnvelope::now(
+                                ObsEngineEvent::PreflightMiss(ObsPreflightMiss {
+                                    predicted_capability:
+                                        mofa_observability::events::Capability::Chat,
+                                    actual_capability:
+                                        mofa_observability::events::Capability::Chat,
+                                }),
+                            ));
+                        }
+                    }
+                    EngineEvent::ModelEvicted {
+                        model_id,
+                        reason: _,
+                    } => {
+                        // Map eviction → EvictionTriggered.
+                        // We don't have exact memory before/after from the event,
+                        // so query the engine's current status for best-effort values.
+                        let status = engine.status().await;
+                        sender.send(EventEnvelope::now(
+                            ObsEngineEvent::EvictionTriggered(EvictionTriggered {
+                                evicted_model: model_id,
+                                memory_before_bytes: status.memory_used_bytes, // approximate
+                                memory_after_bytes: status.memory_used_bytes,  // post-eviction
+                                budget_bytes: status.memory_budget_bytes,
+                            }),
+                        ));
                     }
                     _ => {
                         // ModelStatusChanged, ProviderHealthChanged — not mapped yet

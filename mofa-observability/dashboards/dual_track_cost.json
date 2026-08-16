@@ -41,7 +41,7 @@
       },
       "targets": [
         {
-          "expr": "(sum(mofa_requests_total{locality=\"local\"}) or vector(0)) / (sum(mofa_requests_total) or vector(1)) * 100",
+          "expr": "(sum(mofa_requests_total{locality=\"local\"}) or vector(0)) / clamp_min(sum(mofa_requests_total{locality=~\".+\"}) or vector(1), 1) * 100",
           "legendFormat": "Savings %"
         }
       ]

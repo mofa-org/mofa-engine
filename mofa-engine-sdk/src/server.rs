@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, Request, State},
+    extract::{DefaultBodyLimit, Multipart, Path, Request, State},
     http::{HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{
@@ -19,9 +19,10 @@ use mofa_engine_core::Engine;
 use mofa_engine_core::engine::{LifecycleRecord, MemoryReport};
 use mofa_engine_core::preflight::PreflightStats;
 use mofa_engine_core::subscription::SubscriptionInfo;
-use mofa_kernel::{Capability, EngineError, ErrorInfo, InferenceRequest};
+use mofa_kernel::{Capability, EngineError, ErrorInfo, InferenceRequest, Prefer};
 use mofa_observability::collector::MetricsState;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio::sync::RwLock;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
@@ -173,6 +174,11 @@ impl AppState {
             .route("/v1/capabilities", get(AppState::capabilities_handler))
             .route("/v1/invoke", post(AppState::invoke_handler))
             .route("/v1/invoke/stream", post(AppState::invoke_stream_handler))
+            .route(
+                "/v1/audio/transcriptions",
+                post(AppState::audio_transcriptions_handler),
+            )
+            .route("/v1/asr", post(AppState::audio_transcriptions_handler))
             .route("/v1/responses", post(AppState::responses_handler))
             .route(
                 "/v1/responses/{id}",
@@ -310,6 +316,20 @@ struct HealthResponse {
     uptime_secs: u64,
 }
 
+/// ASR transcription response for multipart upload endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscriptionResponse {
+    pub text: String,
+    pub model_used: String,
+    pub provider: String,
+    pub duration_ms: u64,
+    pub request_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens_used: Option<u32>,
+    pub cost_usd: f64,
+    pub locality: String,
+}
+
 impl AppState {
     /// `GET /v1/files/*rest` — serve engine-generated artifact files (audio,
     /// images, video) so the frontend can play/display them. The `file` field
@@ -327,7 +347,7 @@ impl AppState {
 
         // Try the path as-is first (absolute path from engine response),
         // then fall back to the system temp dir with just the filename.
-        let candidates = vec![
+        let candidates = [
             std::path::PathBuf::from(&rest),
             std::env::temp_dir().join(file_name),
         ];
@@ -384,6 +404,144 @@ impl AppState {
             Ok(resp) => Ok(Json(resp)),
             // Share the one status mapping with the other endpoints so a `Failover`
             // (exhausted candidate chain) is a retryable 503, not a misleading 500.
+            Err(e) => Err((AppState::error_status(&e), Json(e.info()))),
+        }
+    }
+
+    /// `POST /v1/audio/transcriptions` & `POST /v1/asr` — OpenAI-compatible
+    /// and MoFA-standard multipart/form-data audio transcription endpoint.
+    ///
+    /// Accepts binary audio upload (`file`), streams it to a temporary buffer
+    /// on the engine, executes local/cloud ASR (FunASR/Whisper), and cleans up.
+    async fn audio_transcriptions_handler(
+        State(state): State<AppState>,
+        mut multipart: Multipart,
+    ) -> Result<Json<TranscriptionResponse>, (StatusCode, Json<ErrorInfo>)> {
+        let mut model = None;
+        let mut prefer = Prefer::Auto;
+        let mut language = None;
+        let mut prompt = None;
+        let mut diarize = false;
+        let mut file_bytes = Vec::new();
+        let mut file_ext = "wav".to_string();
+
+        while let Ok(Some(field)) = multipart.next_field().await {
+            let name = field.name().unwrap_or("").to_string();
+            match name.as_str() {
+                "file" => {
+                    if let Some(file_name) = field.file_name() {
+                        if let Some(ext) = std::path::Path::new(file_name)
+                            .extension()
+                            .and_then(|e| e.to_str())
+                        {
+                            file_ext = ext.to_string();
+                        }
+                    }
+                    if let Ok(bytes) = field.bytes().await {
+                        file_bytes = bytes.to_vec();
+                    }
+                }
+                "model" => {
+                    if let Ok(text) = field.text().await {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() {
+                            model = Some(trimmed.to_string());
+                        }
+                    }
+                }
+                "prefer" | "locality" => {
+                    if let Ok(text) = field.text().await {
+                        prefer = match text.trim().to_lowercase().as_str() {
+                            "local" => Prefer::Local,
+                            "cloud" => Prefer::Cloud,
+                            _ => Prefer::Auto,
+                        };
+                    }
+                }
+                "language" => {
+                    if let Ok(text) = field.text().await {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() {
+                            language = Some(trimmed.to_string());
+                        }
+                    }
+                }
+                "prompt" => {
+                    if let Ok(text) = field.text().await {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() {
+                            prompt = Some(trimmed.to_string());
+                        }
+                    }
+                }
+                "diarize" => {
+                    if let Ok(text) = field.text().await {
+                        diarize = text.trim().eq_ignore_ascii_case("true") || text.trim() == "1";
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if file_bytes.is_empty() {
+            let err = EngineError::InvalidRequest(
+                "no audio file provided in multipart upload (expected form field 'file')".into(),
+            );
+            return Err((StatusCode::BAD_REQUEST, Json(err.info())));
+        }
+
+        // Save uploaded audio bytes to a temporary file on the engine host
+        let temp_dir = std::env::temp_dir();
+        let temp_file_name = format!("mofa_asr_upload_{}.{}", uuid::Uuid::new_v4(), file_ext);
+        let temp_path = temp_dir.join(temp_file_name);
+
+        if let Err(e) = tokio::fs::write(&temp_path, &file_bytes).await {
+            let err = EngineError::Internal(format!(
+                "failed to write uploaded audio to temporary file: {e}"
+            ));
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(err.info())));
+        }
+
+        let req = InferenceRequest {
+            capability: Some(Capability::Asr),
+            model,
+            prefer,
+            input_file: Some(temp_path.to_string_lossy().to_string()),
+            params: json!({
+                "diarize": diarize,
+                "language": language,
+                "prompt": prompt,
+            }),
+            ..Default::default()
+        };
+
+        let result = state.engine.invoke(req).await;
+
+        // Clean up temporary audio file asynchronously
+        let cleanup_path = temp_path.clone();
+        tokio::spawn(async move {
+            let _ = tokio::fs::remove_file(cleanup_path).await;
+        });
+
+        match result {
+            Ok(resp) => {
+                let cost_usd = resp.cost_usd.unwrap_or(0.0);
+                let locality = if resp.fallback_used {
+                    "cloud".to_string()
+                } else {
+                    "local".to_string()
+                };
+                Ok(Json(TranscriptionResponse {
+                    text: resp.text.unwrap_or_default(),
+                    model_used: resp.model_used,
+                    provider: resp.provider,
+                    duration_ms: resp.duration_ms,
+                    request_id: resp.request_id,
+                    tokens_used: resp.tokens_used,
+                    cost_usd,
+                    locality,
+                }))
+            }
             Err(e) => Err((AppState::error_status(&e), Json(e.info()))),
         }
     }
@@ -477,6 +635,37 @@ impl AppState {
             let obs_state = obs.read().await;
             let obs_output = mofa_observability::prometheus::render(&obs_state);
             if !obs_output.is_empty() {
+                // The observability collector provides labeled versions of several
+                // metrics that the core also emits label-free. Serving both violates
+                // the Prometheus spec (duplicate # TYPE declarations) and causes
+                // double-counting in PromQL sum() queries. Strip the duplicates
+                // from the core output, keeping only the collector's richer version.
+                let duplicated: &[&str] = &[
+                    "mofa_requests_total",
+                    "mofa_model_loads_total",
+                    "mofa_model_unloads_total",
+                    "mofa_models_loaded",
+                    "mofa_memory_used_bytes",
+                    "mofa_memory_budget_bytes",
+                    "mofa_preflight_hits_total",
+                ];
+                let filtered: String = body
+                    .lines()
+                    .filter(|line| {
+                        // Keep lines that don't start with a duplicated metric name.
+                        !duplicated.iter().any(|dup| {
+                            // Match "# HELP mofa_xxx", "# TYPE mofa_xxx", or "mofa_xxx ..."/"mofa_xxx{"
+                            if line.starts_with("# HELP ") || line.starts_with("# TYPE ") {
+                                line.split_whitespace().nth(2).map_or(false, |name| name == *dup)
+                            } else {
+                                line.starts_with(dup) && line[dup.len()..]
+                                    .starts_with(|c: char| c == ' ' || c == '{')
+                            }
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                body = filtered;
                 body.push('\n');
                 body.push_str(&obs_output);
             }

@@ -758,7 +758,13 @@ impl Engine {
         self.providers
             .iter()
             .find(|p| p.name == provider)
-            .is_some_and(|p| p.kind.is_local())
+            .is_some_and(|p| {
+                p.kind.is_local()
+                    || self
+                        .models
+                        .iter()
+                        .any(|m| m.provider == provider && m.residency == ModelResidency::Loaded)
+            })
     }
 
     /// Emit the S5 data-flow audit record for one served request: where it ran
@@ -1464,8 +1470,18 @@ impl Engine {
         if let Some((_, predicted)) = self.pending_predictions.remove(&scope) {
             if predicted == cap {
                 self.preflight_metrics.hit();
+                // Broadcast hit so the observability bridge can forward to the collector.
+                let _ = self.event_tx.send(EngineEvent::PreflightWarmCompleted {
+                    model_id: format!("preflight_hit:{}", predicted),
+                    success: true,
+                });
             } else {
                 self.preflight_metrics.miss();
+                // Broadcast miss so the observability bridge can forward to the collector.
+                let _ = self.event_tx.send(EngineEvent::PreflightWarmCompleted {
+                    model_id: format!("preflight_miss:{}→{}", predicted, cap),
+                    success: false,
+                });
             }
         }
     }
@@ -1504,6 +1520,9 @@ impl Engine {
             .as_deref()
             .and_then(Capability::from_str_loose)
         {
+            let scope = Self::scope_key(req);
+            self.preflight_metrics.prediction();
+            self.remember_prediction(scope, hint);
             return Some((hint, "hint"));
         }
         if let Some(cap) = self.first_subscribed_without_resident() {
@@ -1557,6 +1576,12 @@ impl Engine {
             return;
         }
         if let Some((cap, source)) = self.select_warm_capability(req) {
+            // Broadcast prediction event so the observability bridge can forward it.
+            // This fires for every prediction, even if the model is already warm.
+            let _ = self.event_tx.send(EngineEvent::PreflightWarmStarted {
+                model_id: cap.to_string(),
+                source: source.to_string(),
+            });
             self.warm_capability(cap, source, req.app_id.clone(), req.session_id.clone());
         }
     }
