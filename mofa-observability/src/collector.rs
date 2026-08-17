@@ -540,33 +540,20 @@ impl MetricsState {
     }
 
     /// Evict metric labels that haven't been updated in `max_idle` duration.
+    ///
+    /// Only evicts **gauges** — counters and histograms are cumulative over the
+    /// process lifetime so they must never be evicted (their disappearance from
+    /// `/metrics` would cause `rate()` and `histogram_quantile()` to return NaN
+    /// in Prometheus, and `sum()` to silently lose data).
     pub fn evict_stale_labels(&mut self, max_idle: Duration) {
         let now = Instant::now();
 
-        // Counters
-        self.requests_total.evict_stale(now, max_idle);
-        self.model_loads_total.evict_stale(now, max_idle);
-        self.model_unloads_total.evict_stale(now, max_idle);
-        self.failovers_total.evict_stale(now, max_idle);
-        self.evictions_total.evict_stale(now, max_idle);
-        self.preflight_predictions_total.evict_stale(now, max_idle);
-        self.preflight_hits_total.evict_stale(now, max_idle);
-        self.preflight_misses_total.evict_stale(now, max_idle);
-        self.tokens_input_total.evict_stale(now, max_idle);
-        self.tokens_output_total.evict_stale(now, max_idle);
-        self.events_dropped_total.evict_stale(now, max_idle);
+        // NOTE: Counters and histograms are intentionally NOT evicted.
+        // They are cumulative and must persist for the process lifetime.
 
-        // Histograms
-        self.request_duration_seconds.evict_stale(now, max_idle);
-        self.model_load_seconds.evict_stale(now, max_idle);
-        self.ttft_seconds.evict_stale(now, max_idle);
-
-        // Gauges
-        self.memory_used_bytes.evict_stale(now, max_idle);
-        self.memory_budget_bytes.evict_stale(now, max_idle);
-        self.models_loaded.evict_stale(now, max_idle);
+        // Gauges only — these represent point-in-time state and should be
+        // cleaned up when a label set (e.g., a specific model) becomes stale.
         self.active_requests.evict_stale(now, max_idle);
-        self.estimated_cost_usd.evict_stale(now, max_idle);
     }
 }
 
@@ -1271,7 +1258,7 @@ mod tests {
         let labels_fresh = Labels::new().add("model", "fresh");
         let labels_stale = Labels::new().add("model", "stale");
 
-        // Insert labels
+        // Counters should NOT be evicted (they are cumulative)
         state.requests_total.inc(labels_fresh.clone());
         state.requests_total.inc(labels_stale.clone());
 
@@ -1285,11 +1272,26 @@ mod tests {
         // Evict labels older than 10 minutes
         state.evict_stale_labels(Duration::from_secs(600));
 
-        // The stale label should be gone, the fresh one should remain
+        // Counters must persist even when stale — they are cumulative
         assert!(state.requests_total.values.contains_key(&labels_fresh));
-        assert!(!state.requests_total.values.contains_key(&labels_stale));
-        assert!(state.requests_total.last_seen.contains_key(&labels_fresh));
-        assert!(!state.requests_total.last_seen.contains_key(&labels_stale));
+        assert!(
+            state.requests_total.values.contains_key(&labels_stale),
+            "counters must never be evicted"
+        );
+
+        // Gauges SHOULD be evicted when stale
+        state.active_requests.set(labels_fresh.clone(), 1.0);
+        state.active_requests.set(labels_stale.clone(), 2.0);
+        state
+            .active_requests
+            .last_seen
+            .insert(labels_stale.clone(), twenty_mins_ago);
+        state.evict_stale_labels(Duration::from_secs(600));
+        assert!(state.active_requests.values.contains_key(&labels_fresh));
+        assert!(
+            !state.active_requests.values.contains_key(&labels_stale),
+            "stale gauge labels should be evicted"
+        );
     }
 
     #[test]

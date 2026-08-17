@@ -47,11 +47,11 @@
     },
     {
       "type": "barchart",
-      "title": "Model Loads (Last 5m)",
+      "title": "Model Loads (Total)",
       "gridPos": { "x": 0, "y": 6, "w": 8, "h": 8 },
       "targets": [
         {
-          "expr": "sum(increase(mofa_model_loads_total[5m])) by (model)",
+          "expr": "sum by (model) (mofa_model_loads_total) > 0",
           "legendFormat": "{{model}}"
         }
       ]
@@ -62,19 +62,19 @@
       "gridPos": { "x": 8, "y": 6, "w": 8, "h": 8 },
       "targets": [
         {
-          "expr": "sum(increase(mofa_model_unloads_total[5m])) by (reason)",
+          "expr": "sum by (reason) (mofa_model_unloads_total) > 0",
           "legendFormat": "{{reason}}"
         }
       ]
     },
     {
       "type": "timeseries",
-      "title": "Eviction Rate",
+      "title": "Total Evictions",
       "gridPos": { "x": 16, "y": 6, "w": 8, "h": 8 },
       "targets": [
         {
-          "expr": "sum(rate(mofa_evictions_total[1m]))",
-          "legendFormat": "Evictions / sec"
+          "expr": "sum(mofa_evictions_total) or vector(0)",
+          "legendFormat": "Evictions"
         }
       ]
     },
@@ -84,7 +84,7 @@
       "gridPos": { "x": 0, "y": 14, "w": 24, "h": 8 },
       "targets": [
         {
-          "expr": "sum(rate(mofa_model_load_seconds_bucket[5m])) by (le)",
+          "expr": "sum(increase(mofa_model_load_seconds_bucket[5m])) by (le)",
           "format": "heatmap",
           "legendFormat": "{{le}}"
         }

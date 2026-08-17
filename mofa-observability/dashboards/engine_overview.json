@@ -6,12 +6,12 @@
   "panels": [
     {
       "type": "stat",
-      "title": "Request Rate (1m)",
+      "title": "Total Requests",
       "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
       "targets": [
         {
-          "expr": "sum(rate(mofa_requests_total[1m])) or vector(0)",
-          "legendFormat": "Requests / sec"
+          "expr": "sum(mofa_requests_total) or vector(0)",
+          "legendFormat": "Requests"
         }
       ]
     },
@@ -21,7 +21,7 @@
       "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
       "targets": [
         {
-          "expr": "(sum(rate(mofa_requests_total{status=\"error\"}[5m])) or vector(0)) / (sum(rate(mofa_requests_total[5m])) or vector(1)) * 100",
+          "expr": "(sum(mofa_requests_total{status=\"error\"}) or vector(0)) / clamp_min(sum(mofa_requests_total), 1) * 100",
           "legendFormat": "Error %"
         }
       ]
@@ -54,7 +54,7 @@
       "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(mofa_request_duration_seconds_bucket[5m])) by (le, capability)) or vector(0)",
+          "expr": "histogram_quantile(0.95, sum(rate(mofa_request_duration_seconds_bucket[5m])) by (le, capability))",
           "legendFormat": "{{capability}} P95"
         }
       ],
@@ -66,7 +66,7 @@
       "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(mofa_ttft_seconds_bucket[5m])) by (le, model)) or vector(0)",
+          "expr": "histogram_quantile(0.95, sum(rate(mofa_ttft_seconds_bucket[5m])) by (le, model))",
           "legendFormat": "{{model}} TTFT P95"
         }
       ],
@@ -78,7 +78,7 @@
       "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
       "targets": [
         {
-          "expr": "sum(rate(mofa_requests_total[1m])) by (capability) or vector(0)",
+          "expr": "sum(rate(mofa_requests_total[5m])) by (capability)",
           "legendFormat": "{{capability}}"
         }
       ],
@@ -90,7 +90,7 @@
       "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
       "targets": [
         {
-          "expr": "sum(rate(mofa_tokens_output_total[1m])) by (model) or vector(0)",
+          "expr": "sum(rate(mofa_tokens_output_total[5m])) by (model)",
           "legendFormat": "{{model}}"
         }
       ]

@@ -69,7 +69,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(mofa_estimated_cost_usd[1m])) * 60 or vector(0)",
+          "expr": "sum(rate(mofa_estimated_cost_usd[5m])) * 60 or vector(0)",
           "legendFormat": "$/min"
         }
       ]
@@ -96,16 +96,16 @@
     },
     {
       "type": "timeseries",
-      "title": "Token Consumption Velocity (Prompt vs Completion)",
+      "title": "Token Consumption (Prompt vs Completion)",
       "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
       "targets": [
         {
-          "expr": "sum(rate(mofa_tokens_input_total[1m])) or sum(mofa_tokens_input_total) or vector(0)",
-          "legendFormat": "Prompt Tokens / sec"
+          "expr": "sum(mofa_tokens_input_total) or vector(0)",
+          "legendFormat": "Total Prompt Tokens"
         },
         {
-          "expr": "sum(rate(mofa_tokens_output_total[1m])) or sum(mofa_tokens_output_total) or vector(0)",
-          "legendFormat": "Completion Tokens / sec"
+          "expr": "sum(mofa_tokens_output_total) or vector(0)",
+          "legendFormat": "Total Completion Tokens"
         }
       ]
     }

@@ -10,10 +10,85 @@ PRD v3.1 §6.3 — Full Python SDK surface.
 import json
 import os
 import base64
-import requests
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Generator, Any, Union
 from pathlib import Path
+
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+    import urllib.request
+    import urllib.error
+    import urllib.parse
+
+    class SimpleResponse:
+        def __init__(self, status_code: int, content: bytes, headers: dict = None):
+            self.status_code = status_code
+            self._content = content
+            self.headers = headers or {}
+
+        def json(self):
+            return json.loads(self._content.decode("utf-8"))
+
+        @property
+        def text(self):
+            return self._content.decode("utf-8")
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(f"HTTP {self.status_code}: {self.text}")
+
+        def iter_lines(self, decode_unicode=True):
+            for line in self._content.splitlines():
+                if decode_unicode:
+                    yield line.decode("utf-8")
+                else:
+                    yield line
+
+    class SimpleSession:
+        def __init__(self):
+            self.trust_env = False
+
+        def get(self, url: str, headers: dict = None, params: dict = None, timeout: float = 30, stream: bool = False):
+            if params:
+                query = urllib.parse.urlencode(params)
+                url = f"{url}?{query}"
+            req = urllib.request.Request(url, headers=headers or {})
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    return SimpleResponse(resp.status, resp.read(), dict(resp.headers))
+            except urllib.error.HTTPError as e:
+                return SimpleResponse(e.code, e.read(), dict(e.headers))
+
+        def post(self, url: str, json: dict = None, data: dict = None, files: dict = None, headers: dict = None, timeout: float = 300, stream: bool = False):
+            headers = headers or {}
+            body_bytes = b""
+            if json is not None:
+                headers["Content-Type"] = "application/json"
+                body_bytes = __import__("json").dumps(json).encode("utf-8")
+            elif files or data:
+                # Basic multipart or form encoding
+                boundary = "----MofaSdkBoundary" + os.urandom(8).hex()
+                headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
+                chunks = []
+                if data:
+                    for k, v in data.items():
+                        chunks.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n".encode("utf-8"))
+                if files:
+                    for k, (fname, fobj, ftype) in files.items():
+                        fdata = fobj.read() if hasattr(fobj, "read") else fobj
+                        chunks.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"; filename=\"{fname}\"\r\nContent-Type: {ftype}\r\n\r\n".encode("utf-8") + fdata + b"\r\n")
+                chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
+                body_bytes = b"".join(chunks)
+
+            req = urllib.request.Request(url, data=body_bytes, headers=headers)
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    return SimpleResponse(resp.status, resp.read(), dict(resp.headers))
+            except urllib.error.HTTPError as e:
+                return SimpleResponse(e.code, e.read(), dict(e.headers))
 
 VOICE_ALIASES: Dict[str, str] = {
     "zh-female-1": "af_heart",
@@ -61,8 +136,11 @@ class MofaEngine:
 
     def __init__(self, base_url: str = "http://127.0.0.1:8420"):
         self.base_url = base_url.rstrip("/")
-        self.session = requests.Session()
-        self.session.trust_env = False
+        if HAS_REQUESTS:
+            self.session = requests.Session()
+            self.session.trust_env = False
+        else:
+            self.session = SimpleSession()
 
     # ─── Health & Status ──────────────────────────────────────────────
 
@@ -159,7 +237,7 @@ class MofaEngine:
             duration_ms=d.get("duration_ms", 0),
             request_id=d.get("request_id", ""),
             tokens_used=d.get("tokens_used"),
-            cost_usd=d.get("cost_usd", 0.0),
+            cost_usd=float(d.get("cost_usd") if d.get("cost_usd") is not None else 0.0),
             locality=d.get("locality", "local"),
             words=d.get("words"),
         )
@@ -401,7 +479,7 @@ class MofaEngine:
                         locality=d.get("locality", "local"),
                         words=d.get("words"),
                     )
-                except requests.exceptions.HTTPError:
+                except Exception:
                     pass  # Fall through to invoke-based approach
 
         # Fallback: use invoke with input_file path

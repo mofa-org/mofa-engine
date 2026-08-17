@@ -10,7 +10,7 @@
       "gridPos": { "x": 0, "y": 0, "w": 6, "h": 6 },
       "targets": [
         {
-          "expr": "sum(mofa_preflight_hits_total) / clamp_min(sum(mofa_preflight_hits_total) + sum(mofa_preflight_misses_total), 1) * 100",
+          "expr": "sum(mofa_preflight_hits_total) / clamp_min(sum(mofa_preflight_hits_total) + (sum(mofa_preflight_misses_total) or vector(0)), 1) * 100",
           "legendFormat": "Accuracy %"
         }
       ],
@@ -35,7 +35,7 @@
       "gridPos": { "x": 6, "y": 0, "w": 10, "h": 6 },
       "targets": [
         {
-          "expr": "sum(rate(mofa_preflight_predictions_total[5m])) by (source)",
+          "expr": "sum by (source) (mofa_preflight_predictions_total) or vector(0)",
           "legendFormat": "{{source}}"
         }
       ]
@@ -46,11 +46,11 @@
       "gridPos": { "x": 16, "y": 0, "w": 8, "h": 6 },
       "targets": [
         {
-          "expr": "sum(mofa_preflight_hits_total)",
+          "expr": "sum(mofa_preflight_hits_total) or vector(0)",
           "legendFormat": "Hits"
         },
         {
-          "expr": "sum(mofa_preflight_misses_total)",
+          "expr": "sum(mofa_preflight_misses_total) or vector(0)",
           "legendFormat": "Misses"
         }
       ]
@@ -61,7 +61,7 @@
       "gridPos": { "x": 0, "y": 6, "w": 12, "h": 6 },
       "targets": [
         {
-          "expr": "sum(rate(mofa_failovers_total[5m]))",
+          "expr": "sum(rate(mofa_requests_fallback_total[5m])) or vector(0)",
           "legendFormat": "Failovers / sec"
         }
       ]
@@ -72,7 +72,7 @@
       "gridPos": { "x": 12, "y": 6, "w": 12, "h": 6 },
       "targets": [
         {
-          "expr": "sum(rate(mofa_requests_total[5m])) by (capability)",
+          "expr": "sum by (capability) (mofa_requests_total)",
           "legendFormat": "{{capability}}"
         }
       ]
