@@ -1,14 +1,17 @@
-#!/usr/bin/env python3
-"""Deep local-model test suite for MoFA Engine.
+import json, sys, os, time
+from pathlib import Path
 
-Tests Ollama models with real inference, memory tracking,
-routing priority, failover, hint preflight, and pipelines.
-"""
-import requests, json, sys, os, time
+# Add mofa-fm to path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "mofa-fm")))
+try:
+    import requests
+    S = requests.Session()
+    S.trust_env = False
+except ImportError:
+    from mofa_sdk import SimpleSession
+    S = SimpleSession()
 
 BASE = "http://127.0.0.1:8420"
-S = requests.Session()
-S.trust_env = False
 
 passed = 0
 total = 0

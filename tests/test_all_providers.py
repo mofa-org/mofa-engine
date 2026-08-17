@@ -1,10 +1,17 @@
-#!/usr/bin/env python3
-"""Test every API provider via MoFA Engine."""
-import requests, json, sys, os, time
+import json, sys, os, time
+from pathlib import Path
+
+# Add mofa-fm to path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "mofa-fm")))
+try:
+    import requests
+    S = requests.Session()
+    S.trust_env = False
+except ImportError:
+    from mofa_sdk import SimpleSession
+    S = SimpleSession()
 
 BASE = "http://127.0.0.1:8420"
-S = requests.Session()
-S.trust_env = False
 
 def invoke(cap=None, model=None, text="Reply with exactly one word: OK", timeout=60):
     body = {"messages": [{"role": "user", "content": text}]}
