@@ -141,6 +141,12 @@ price_output_per_1k = 0.0011
 #   name = "openai/dall-e-3"
 #   capability = "image_gen"
 
+# Built-in zero-config voice: when this config declares NO TTS backend, the engine
+# automatically registers the operating system's native voice (macOS `say`, Linux
+# `espeak-ng`/`espeak`) as a low-priority local fallback — so local audio scenarios
+# work with nothing installed. Any TTS backend you declare below outranks it. No
+# configuration is needed to use it; it appears as provider `system-tts`.
+
 # Local TTS process-adapter backend. Runs a local command once per synthesis and
 # returns the produced audio file. Recommended stack (S1/S6): Qwen3-TTS + Crane
 # as the primary voice, with Kokoro as a lighter fallback — configure both and
@@ -149,6 +155,9 @@ price_output_per_1k = 0.0011
 #   {text}       input text passed as an argument
 #   {text_file}  path to a temp file holding the input text
 #   {output}     path the command must write audio to
+#   {voice}      voice name from params.voice (empty if unset)
+#   {speed}      speaking rate from params.speed (empty if unset)
+#   {format}     container from params.format; also sets the {output} extension
 #
 # Primary: Qwen3-TTS via a Crane wrapper CLI.
 # [[providers]]

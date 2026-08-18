@@ -1353,6 +1353,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mofa-explainer"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "dirs",
+ "mofa-engine-core",
+ "mofa-kernel",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "mofa-kernel"
 version = "0.1.0"
 dependencies = [

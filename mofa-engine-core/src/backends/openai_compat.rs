@@ -266,9 +266,11 @@ struct EmbeddingResponse {
 struct EmbeddingData {
     #[serde(default)]
     embedding: Vec<f32>,
-    /// Position in the batch; the API may return rows out of order, so we sort by it.
-    #[serde(default)]
-    index: u32,
+    /// Position in the batch; the API may return rows out of order, so we sort by
+    /// it. `Option` (not a `#[serde(default)]` `0`) so we can tell a real index
+    /// from an absent one — collapsing every absent index to `0` would turn the
+    /// sort into a silent no-op and could mismatch rows to inputs.
+    index: Option<u32>,
 }
 
 #[async_trait]
@@ -873,8 +875,14 @@ impl OpenAiCompatProvider {
                 detail: format!("embedding parse error: {e}"),
             })?;
 
-        // The API may return rows out of batch order; restore input order.
-        parsed.data.sort_by_key(|d| d.index);
+        // The API may return rows out of batch order; restore input order — but
+        // only when every row actually carries an index. If any row omits it we
+        // can't reorder reliably, so we trust the provider's returned order
+        // (OpenAI-compatible servers return rows in input order) rather than
+        // reordering on missing data.
+        if parsed.data.iter().all(|d| d.index.is_some()) {
+            parsed.data.sort_by_key(|d| d.index);
+        }
         let vectors: Vec<Vec<f32>> = parsed.data.into_iter().map(|d| d.embedding).collect();
         if vectors.is_empty() {
             return Err(EngineError::ProviderError {

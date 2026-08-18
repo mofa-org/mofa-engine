@@ -42,7 +42,8 @@ pub(crate) struct LocalTtsProvider {
     name: String,
     /// Program to execute per synthesis.
     command: String,
-    /// Argument template with `{text}`, `{text_file}`, and `{output}` placeholders.
+    /// Argument template with `{text}`, `{text_file}`, `{output}`, `{voice}`,
+    /// `{speed}`, and `{format}` placeholders.
     args: Vec<String>,
     /// Output audio extension/container (e.g. `wav`, `mp3`).
     output_format: String,
@@ -114,11 +115,39 @@ impl LocalTtsProvider {
             .filter(|t| !t.trim().is_empty())
             .ok_or_else(|| EngineError::InvalidRequest("TTS requires text input".into()))?;
 
-        let output_path = self.output_dir.join(format!(
-            "mofa_tts_{}.{}",
-            uuid::Uuid::new_v4(),
-            self.output_format
-        ));
+        // Per-request voice/speed/format (S1/S6). The request's `params` can select
+        // a voice and speaking rate, and choose the output container; each flows to
+        // the command via its matching placeholder. `format` also picks the artifact
+        // extension when set, so a caller asking for mp3 gets `…​.mp3`, not the
+        // backend default. Absent params substitute to empty (a no-op in the args).
+        let voice = request
+            .params
+            .get("voice")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        // `speed` may arrive as a number (1.5) or a string ("1.5"); normalize both
+        // to a plain string for substitution.
+        let speed = request
+            .params
+            .get("speed")
+            .map(|v| {
+                v.as_str()
+                    .map(String::from)
+                    .unwrap_or_else(|| v.to_string())
+            })
+            .unwrap_or_default();
+        let format = request
+            .params
+            .get("format")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.output_format)
+            .to_string();
+
+        let output_path =
+            self.output_dir
+                .join(format!("mofa_tts_{}.{}", uuid::Uuid::new_v4(), format));
 
         // Materialize a temp text file only if the command template references it.
         let needs_text_file = self.args.iter().any(|a| a.contains("{text_file}"));
@@ -147,6 +176,9 @@ impl LocalTtsProvider {
                 arg.replace("{text}", &text)
                     .replace("{text_file}", &text_file_str)
                     .replace("{output}", &output_str)
+                    .replace("{voice}", &voice)
+                    .replace("{speed}", &speed)
+                    .replace("{format}", &format)
             })
             .collect();
 
@@ -436,6 +468,38 @@ mod tests {
             .unwrap();
         let produced = std::fs::read_to_string(resp.file.unwrap()).unwrap();
         assert_eq!(produced, "spoken words");
+    }
+
+    #[tokio::test]
+    async fn passes_voice_and_format_through_params() {
+        let dir = tempfile::tempdir().unwrap();
+        // Fixture: write the substituted `{voice}` into `{output}`, so we can assert
+        // the placeholder reached the command. The request's `format` should also
+        // override the backend's default extension.
+        let p = LocalTtsProvider::new(
+            "local-tts",
+            "sh",
+            vec![
+                "-c".into(),
+                "printf '%s' \"$1\" > \"$2\"".into(),
+                "sh".into(),
+                "{voice}".into(),
+                "{output}".into(),
+            ],
+            Some("wav".into()), // backend default…
+            Some(dir.path().to_string_lossy().to_string()),
+            tts_models(),
+        );
+
+        let mut req = tts_request("hello");
+        req.params = serde_json::json!({ "voice": "narrator", "format": "mp3" });
+        let resp = p.invoke("local-tts/fixture", &req).await.unwrap();
+        let file = resp.file.expect("a TTS artifact path");
+
+        // …request `format=mp3` overrode the `wav` default extension:
+        assert!(file.ends_with(".mp3"), "got {file}");
+        // …and `{voice}` was substituted from params:
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "narrator");
     }
 
     #[tokio::test]

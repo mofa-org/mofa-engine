@@ -22,7 +22,7 @@ use tokio::task::{AbortHandle, JoinHandle};
 
 use crate::backends::{
     LiterLLMProvider, LocalAsrProvider, LocalImageGenProvider, LocalTtsProvider,
-    LocalVideoGenProvider, OllamaProvider, OpenAiCompatProvider,
+    LocalVideoGenProvider, OllamaProvider, OpenAiCompatProvider, SystemTtsProvider,
 };
 use crate::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerRegistry, CircuitState};
 use crate::config::{EngineConfig, PreflightConfig, TimeoutConfig};
@@ -326,6 +326,37 @@ impl Engine {
                 priority: pc.priority,
                 provider,
             });
+        }
+
+        // Zero-config local voice: when a real config is present but declares no TTS
+        // backend, auto-register the OS-native voice (macOS `say` / Linux `espeak`)
+        // as a low-priority fallback. This gives local-first audio scenarios (S1/S4/
+        // S6) a working voice with nothing to install, while any configured TTS —
+        // having a lower priority number — still wins the route. An empty config is
+        // left untouched (no providers in, no providers out).
+        let has_configured_provider = config.providers.iter().any(|pc| pc.enabled);
+        let declares_tts = config.providers.iter().any(|pc| {
+            pc.enabled
+                && pc.models.iter().any(|m| {
+                    mofa_kernel::Capability::from_str_loose(&m.capability)
+                        == Some(mofa_kernel::Capability::Tts)
+                })
+        });
+        if has_configured_provider && !declares_tts {
+            let system_tts = SystemTtsProvider::new(config.artifacts.dir.clone());
+            if system_tts.is_available() {
+                tracing::info!(
+                    "no TTS backend configured; registering built-in system voice as fallback"
+                );
+                providers.push(RegisteredProvider {
+                    name: crate::backends::system_tts::SYSTEM_TTS_NAME.to_string(),
+                    kind: ProviderKind::LocalTts,
+                    // A large priority number is the least-preferred tier, so a
+                    // configured voice always outranks this fallback.
+                    priority: 99,
+                    provider: Arc::new(system_tts),
+                });
+            }
         }
 
         // Canonicalize the input-path allowlist up front; unresolvable roots are
@@ -2144,8 +2175,8 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use crate::config::{
-        EngineConfig, ListenConfig, MemoryConfig, PreflightConfig, ProviderConfig, SecurityConfig,
-        TimeoutConfig,
+        EngineConfig, ListenConfig, MemoryConfig, ModelDef, PreflightConfig, ProviderConfig,
+        SecurityConfig, TimeoutConfig,
     };
 
     const MB: u64 = 1024 * 1024;
@@ -2454,6 +2485,48 @@ mod tests {
         let engine = Engine::new(minimal_config()).await;
         let result = engine.invoke(chat_request(None)).await;
         assert!(matches!(result, Err(EngineError::NoCapableModel(_))));
+    }
+
+    #[tokio::test]
+    async fn system_voice_backs_a_tts_less_config() {
+        // A config with one enabled, non-TTS provider gains the built-in system
+        // voice as a fallback wherever the OS provides one (macOS `say` / Linux
+        // `espeak`). `true` stands in as a harmless, network-free provider command.
+        let mut config = minimal_config();
+        config.providers = vec![ProviderConfig {
+            name: "img".into(),
+            kind: "local_image_gen".into(),
+            command: Some("true".into()),
+            enabled: true,
+            models: vec![ModelDef {
+                name: "sd".into(),
+                capability: "image_gen".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        let engine = Engine::new(config).await;
+        engine.refresh_resources().await;
+
+        let voice_available =
+            crate::backends::system_tts::SystemTtsProvider::new(None).is_available();
+        let injected = engine
+            .capabilities()
+            .await
+            .iter()
+            .any(|c| c.id == "system-tts/system");
+        assert_eq!(injected, voice_available);
+
+        // An empty config is left untouched: no providers in, no voice out.
+        let empty = Engine::new(minimal_config()).await;
+        empty.refresh_resources().await;
+        assert!(
+            empty
+                .capabilities()
+                .await
+                .iter()
+                .all(|c| c.id != "system-tts/system")
+        );
     }
 
     #[tokio::test]

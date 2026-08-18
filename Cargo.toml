@@ -6,6 +6,7 @@ members = [
     "mofa-engine-sdk",
     "mofa-engine-app",
     "mofa-podcast",
+    "mofa-explainer",
 ]
 
 [workspace.package]

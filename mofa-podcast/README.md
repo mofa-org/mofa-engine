@@ -28,19 +28,16 @@ narration. Each stage prints where it routed and what it cost.
 
 ## How offline TTS works
 
-The engine's `local_tts` backend shells out to a TTS command. Rather than making
-you install one, on macOS this app auto-provisions a tiny wrapper around the
-built-in `say` command (transcoded to mp3 via `lame`/`ffmpeg`) and points a
-generated config at it. Both the wrapper and config live under
-`~/Library/Caches/mofa-podcast/`. Pass `--config` to use your own engine config
-(e.g. a real Crane/Kokoro voice) instead.
+Narration needs no setup: the engine auto-registers the OS-native voice (macOS
+`say`, Linux `espeak`) as a built-in `system-tts` backend whenever a config
+declares no TTS. This app therefore ships only a minimal Ollama config (under
+`~/Library/Caches/mofa-podcast/`) and lets the engine supply the voice. `mp3` is
+produced when `lame`/`ffmpeg` is present, otherwise the episode is written as
+`.wav`. Pass `--config` to use your own engine config (e.g. a Crane/Kokoro voice)
+and `--voice` to pick a system voice.
 
-On non-macOS, configure a `local_tts` backend (see `config.example.toml`) or pass
-`--config`; chat still runs, but TTS needs a backend.
+## Framework findings (fixed)
 
-## Framework findings
-
-Building this app surfaced two engine gaps (tracked in `SESSION.md`): the engine
-ships no zero-config local TTS, and `local_tts` doesn't pass `voice`/`speed`/
-`format` params through to the command. Both are worked around here and are engine
-TODOs — this app exists partly to drive those improvements.
+Building this app drove two engine fixes (see `SESSION.md`): a built-in zero-config
+system voice, and `params.voice`/`format` passthrough to the voice backend. This
+app now relies on those fixes rather than working around them — no wrapper script.

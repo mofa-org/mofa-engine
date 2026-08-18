@@ -500,10 +500,10 @@ pub struct InferenceRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<Reasoning>,
     /// Per-request spend ceiling in USD. A candidate whose *estimated* cost
-    /// exceeds this is skipped during routing (and recorded in `failed_chain`),
-    /// so spend stays bounded and cheaper/local models win. Free and local
-    /// models estimate to `$0` and are always affordable; `0.0` therefore means
-    /// "free/local only". `None` = no ceiling.
+    /// exceeds this is skipped during candidate selection (and recorded in
+    /// `failed_chain`), so spend stays bounded and cheaper/local models win. Free
+    /// and local models estimate to `$0` and are always affordable; `0.0`
+    /// therefore means "free/local only". `None` = no ceiling.
     ///
     /// This is a **soft** ceiling: it is enforced against a pre-flight token
     /// *estimate*, so a model that generates more than estimated can still exceed

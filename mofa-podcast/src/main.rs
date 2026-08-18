@@ -9,19 +9,16 @@
 //! **real, playable `.mp3`** (`Tts`) — all local-first, so on a laptop with Ollama
 //! it runs fully offline at `$0`.
 //!
-//! ## Why this app exists (driving the framework)
+//! ## Driving the framework
 //!
-//! Building a real app surfaces what the engine is missing. Two gaps this app hit,
-//! and how it works around them for now (both are engine TODOs, not app quirks):
+//! Building this app surfaced two engine gaps, both now fixed in the engine (this
+//! app relies on the fixes rather than working around them):
 //!
-//!   1. **No zero-config local TTS.** The engine's `local_tts` backend shells out
-//!      to a command that must already be installed (Crane/Kokoro). So on macOS we
-//!      auto-provision a `say`-based adapter (see [`provision_offline_config`]) to
-//!      give the app a working voice with nothing to download. The engine should
-//!      ship a built-in local TTS so this isn't necessary.
-//!   2. **`local_tts` ignores voice/speed/format.** The adapter only substitutes
-//!      `{text}`/`{text_file}`/`{output}`, so a request's `params.voice` can't reach
-//!      the command. We use a fixed voice until the engine passes these through.
+//!   1. **Zero-config local TTS** — the engine auto-registers the OS-native voice
+//!      (macOS `say` / Linux `espeak`) when a config declares no TTS backend, so no
+//!      external voice needs installing and this app ships no wrapper script.
+//!   2. **Per-request voice/format** — `params.voice`/`params.format` now flow
+//!      through to the voice backend, so `--voice` selects a real voice.
 
 use std::path::{Path, PathBuf};
 
@@ -48,6 +45,11 @@ struct Cli {
     /// Override the chat model (e.g. `ollama/llama3.2`). Default: routed local-first.
     #[arg(long)]
     model: Option<String>,
+
+    /// Narration voice. On the macOS default backend this is a `say` voice
+    /// (`say -v '?'` lists them, e.g. "Samantha", "Daniel").
+    #[arg(long)]
+    voice: Option<String>,
 
     /// Target script length, in words.
     #[arg(long, default_value_t = 180)]
@@ -179,7 +181,14 @@ async fn run(cli: Cli) -> Result<(), String> {
             ..Default::default()
         }],
         prefer,
-        params: serde_json::json!({ "format": "mp3" }),
+        // `voice`/`format` reach the voice backend via the engine's TTS params.
+        // The built-in system voice honors `format=mp3` when an encoder (lame or
+        // ffmpeg) is present, otherwise it returns wav — so we reconcile the output
+        // extension to whatever was actually produced (below) to avoid mislabeling.
+        params: serde_json::json!({
+            "format": "mp3",
+            "voice": cli.voice.clone().unwrap_or_default(),
+        }),
         ..Default::default()
     };
     let tts_resp = engine
@@ -190,11 +199,19 @@ async fn run(cli: Cli) -> Result<(), String> {
         .file
         .ok_or("the TTS backend returned no audio file")?;
 
-    // The engine writes into its artifact directory; move it to the requested path
-    // so the user gets `episode.mp3` where they asked for it.
-    std::fs::rename(&produced, &cli.out)
-        .or_else(|_| std::fs::copy(&produced, &cli.out).map(|_| ()))
-        .map_err(|e| format!("could not place audio at {}: {e}", cli.out.display()))?;
+    // The engine writes into its artifact directory; move it to the requested path.
+    // If the backend couldn't produce the requested container, name the output for
+    // what it actually is (e.g. `episode.wav`) rather than mislabel it `.mp3`.
+    let produced_ext = Path::new(&produced).extension().and_then(|e| e.to_str());
+    let out = match produced_ext {
+        Some(ext) if Some(ext) != cli.out.extension().and_then(|e| e.to_str()) => {
+            cli.out.with_extension(ext)
+        }
+        _ => cli.out.clone(),
+    };
+    std::fs::rename(&produced, &out)
+        .or_else(|_| std::fs::copy(&produced, &out).map(|_| ()))
+        .map_err(|e| format!("could not place audio at {}: {e}", out.display()))?;
 
     println!(
         "  {} in {}ms · {}\n",
@@ -202,7 +219,7 @@ async fn run(cli: Cli) -> Result<(), String> {
         tts_resp.duration_ms,
         cost_label(tts_resp.cost_usd),
     );
-    println!("🎧 episode ready → {}", cli.out.display());
+    println!("🎧 episode ready → {}", out.display());
     Ok(())
 }
 
@@ -318,118 +335,28 @@ fn strip_blocks(input: &str, tag: &str) -> String {
 // Offline TTS provisioning (macOS `say` → mp3)
 // ==============================================================================
 
-/// Write a self-contained engine config that makes the app work offline with
-/// nothing to install: local Ollama for chat, and a macOS `say`-based `local_tts`
-/// adapter for a real voice. Returns the config path, or `None` on non-macOS (the
-/// engine then falls back to auto-detection and TTS may be unavailable).
-///
-/// This lives in the app, not the engine, on purpose: it is the workaround for the
-/// "no zero-config local TTS" gap, and keeping it here makes that gap visible.
+/// Write a minimal offline engine config: local Ollama for chat. TTS needs no
+/// setup — the engine auto-registers the OS-native voice (macOS `say` / Linux
+/// `espeak`) as a fallback whenever a config declares no TTS backend, so this
+/// config deliberately declares none. Returns the config path.
 fn provision_offline_config() -> Result<Option<PathBuf>, String> {
-    if !cfg!(target_os = "macos") {
-        eprintln!(
-            "note: offline TTS auto-setup is macOS-only. Configure a `local_tts` \
-             backend (see config.example.toml) or pass --config; chat will still run."
-        );
-        return Ok(None);
-    }
-
     let dir = dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("mofa-podcast");
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
 
-    // The TTS wrapper: `say` produces AIFF, which we transcode to mp3 with lame
-    // (falling back to ffmpeg). Both are common on a dev Mac; if neither is present
-    // the wrapper exits non-zero and the engine surfaces a clean TTS error.
-    let wrapper = dir.join("say-tts.sh");
-    std::fs::write(&wrapper, SAY_TTS_WRAPPER)
-        .map_err(|e| format!("writing {}: {e}", wrapper.display()))?;
-    make_executable(&wrapper)?;
-
-    // The config: Ollama (auto-discovers pulled chat models) + the say adapter.
     let config = dir.join("config.toml");
-    let toml = format!(
-        r#"# Auto-generated by mofa-podcast for offline, zero-setup runs.
+    let toml = r#"# Auto-generated by mofa-podcast for offline, zero-setup runs.
+# Chat is local Ollama; TTS is the engine's built-in system voice (no config).
 [[providers]]
 name = "ollama"
 kind = "ollama"
 base_url = "http://127.0.0.1:11434"
 priority = 1
 cost_tier = "free"
-
-[[providers]]
-name = "say-tts"
-kind = "local_tts"
-base_url = ""
-command = "{wrapper}"
-args = ["--text-file", "{{text_file}}", "--output", "{{output}}"]
-output_format = "mp3"
-priority = 1
-enabled = true
-
-  [[providers.models]]
-  name = "say"
-  capability = "tts"
-  memory_mb = 64
-"#,
-        wrapper = wrapper.display(),
-    );
+"#;
     std::fs::write(&config, toml).map_err(|e| format!("writing {}: {e}", config.display()))?;
     Ok(Some(config))
-}
-
-/// The `say`→mp3 wrapper script, written verbatim to the cache dir. It reads the
-/// engine's `{text_file}` and writes mp3 to `{output}`.
-const SAY_TTS_WRAPPER: &str = r#"#!/usr/bin/env bash
-# say-tts.sh — a zero-download local TTS for mofa-podcast.
-# Usage: say-tts.sh --text-file <path> --output <path.mp3>
-set -euo pipefail
-
-text_file=""
-output=""
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --text-file) text_file="$2"; shift 2 ;;
-    --output)    output="$2";    shift 2 ;;
-    *)           shift ;;
-  esac
-done
-
-if [ -z "$text_file" ] || [ -z "$output" ]; then
-  echo "say-tts: missing --text-file or --output" >&2
-  exit 2
-fi
-
-work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
-aiff="$work/speech.aiff"
-
-say -f "$text_file" -o "$aiff"
-
-if command -v lame >/dev/null 2>&1; then
-  lame --quiet "$aiff" "$output"
-elif command -v ffmpeg >/dev/null 2>&1; then
-  ffmpeg -y -loglevel error -i "$aiff" "$output"
-else
-  echo "say-tts: need 'lame' or 'ffmpeg' to make mp3 (brew install lame)" >&2
-  exit 3
-fi
-"#;
-
-#[cfg(unix)]
-fn make_executable(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(path)
-        .map_err(|e| format!("stat {}: {e}", path.display()))?
-        .permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(path, perms).map_err(|e| format!("chmod {}: {e}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn make_executable(_path: &Path) -> Result<(), String> {
-    Ok(())
 }
 
 // ==============================================================================

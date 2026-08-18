@@ -505,7 +505,12 @@ impl AppState {
         let rx = state.engine.subscribe_events();
         let stream = BroadcastStream::new(rx).filter_map(|result| match result {
             Ok(event) => {
-                let data = serde_json::to_string(&event).unwrap_or_default();
+                // Mirror the invoke-stream handler: an event that somehow fails to
+                // serialize becomes a well-formed error frame, never an empty
+                // (invalid) `data:` frame.
+                let data = serde_json::to_string(&event).unwrap_or_else(|_| {
+                    r#"{"type":"error","message":"failed to serialize engine event"}"#.to_string()
+                });
                 Some(Ok(Event::default().data(data)))
             }
             Err(_) => None,
