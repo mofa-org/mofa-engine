@@ -21,8 +21,9 @@ use tokio::sync::{Mutex as AsyncMutex, Semaphore, broadcast, mpsc};
 use tokio::task::{AbortHandle, JoinHandle};
 
 use crate::backends::{
-    LiterLLMProvider, LocalAsrProvider, LocalImageGenProvider, LocalTtsProvider,
-    LocalVideoGenProvider, OllamaProvider, OpenAiCompatProvider, SystemTtsProvider,
+    CloudVideoGenProvider, LiterLLMProvider, LocalAsrProvider, LocalImageGenProvider,
+    LocalTtsProvider, LocalVideoGenProvider, OllamaProvider, OpenAiCompatProvider,
+    SystemTtsProvider,
 };
 use crate::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerRegistry, CircuitState};
 use crate::config::{EngineConfig, PreflightConfig, TimeoutConfig};
@@ -312,6 +313,14 @@ impl Engine {
                         pc.models.clone(),
                     ))
                 }
+                ProviderKind::CloudVideoGen => Arc::new(CloudVideoGenProvider::new(
+                    &pc.name,
+                    &pc.base_url,
+                    pc.api_key.clone(),
+                    pc.models.clone(),
+                    cost_tier,
+                    config.artifacts.dir.clone(),
+                )?),
                 _ => {
                     return Err(EngineError::Config(format!(
                         "provider '{}' uses unsupported provider kind",
@@ -2527,6 +2536,41 @@ mod tests {
                 .iter()
                 .all(|c| c.id != "system-tts/system")
         );
+    }
+
+    #[tokio::test]
+    async fn cloud_video_gen_config_exposes_a_video_capability() {
+        // A `cloud_video_gen` provider (Seedance / Ark) wires through config → the
+        // backend factory → discovery, exposing a first-class `video_gen`
+        // capability. A dummy key keeps it network-free: `health()` and `discover()`
+        // for this backend never touch the wire, so the card is `Configured`
+        // without a live API.
+        let mut config = minimal_config();
+        config.providers = vec![ProviderConfig {
+            name: "seedance".into(),
+            kind: "cloud_video_gen".into(),
+            api_key: Some("test-key".into()),
+            cost_tier: "high".into(),
+            enabled: true,
+            models: vec![ModelDef {
+                name: "doubao-seedance-1-0-pro".into(),
+                capability: "video_gen".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        let engine = Engine::new(config).await;
+        engine.refresh_resources().await;
+
+        let card = engine
+            .capabilities()
+            .await
+            .into_iter()
+            .find(|c| c.provider == "seedance")
+            .expect("the configured cloud video provider is discovered");
+        assert_eq!(card.capability, mofa_kernel::Capability::VideoGen);
+        // Cloud model: remote residency, not counted against local memory.
+        assert_eq!(card.residency, ModelResidency::Remote);
     }
 
     #[tokio::test]

@@ -13,6 +13,7 @@ is the whole pitch. The rest map to PRD product scenarios.
 |---|---|---|
 | `quickstart.rs` | — (5-minute entry) | boot + discover backends + one `Chat` call, printing **routed provider · local/cloud · latency · cost** |
 | `explainer_video.rs` | **S4** Explainer Video (flagship) | `Chat`→`ImageGen`→`Tts`→`Asr` orchestration + **hard quality gate** (ffprobe duration + slideshow-risk + VLM seam) — "no gate, no output" |
+| `video_gen.rs` | **S4** Text-to-Video | `VideoGen` at the API level via **Seedance** (Volcengine Ark task API: submit→poll→download) — one contract call returns a managed `mp4`; degrades to a typed error offline |
 | `code_review.rs` | **S2** Code/PR Review | `reasoning.effort` (tier routing) + **streamed thought chain** (`Reasoning` vs `Text` chunks) + `max_cost_usd` budget ceiling + token/cost |
 | `doc_ai.rs` | **S3** Document/Screenshot AI | `Vlm` understanding, multimodal `Message.images`, `detail` billing tier |
 | `meeting_brief.rs` | **S1** Meeting → Minutes + Brief | local-first `Asr → Chat → Tts` pipeline, `prefer=local` + `data_class=confidential`, `hint_next` warmup |

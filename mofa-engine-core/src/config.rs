@@ -754,6 +754,7 @@ impl ProviderConfig {
             "local_asr" => Ok(ProviderKind::LocalAsr),
             "local_image_gen" => Ok(ProviderKind::LocalImageGen),
             "local_video_gen" => Ok(ProviderKind::LocalVideoGen),
+            "cloud_video_gen" => Ok(ProviderKind::CloudVideoGen),
             "liter_llm" => Ok(ProviderKind::LiterLlm),
             other => Err(EngineError::Config(format!(
                 "unknown provider kind '{}' for provider '{}'",

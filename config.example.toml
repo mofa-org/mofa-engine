@@ -242,8 +242,8 @@ enabled = false          # opt-in: set true once the command is installed
 
 # Local video-generation process-adapter backend. Runs a local text-to-video CLI
 # (e.g. an AnimateDiff / Stable-Video-Diffusion or Wan-style wrapper) once per
-# clip and returns the produced file (S4). liter-llm has no video endpoint, so
-# this local adapter is the whole video path — verify output with the quality
+# clip and returns the produced file (S4). This is the on-device video path; the
+# cloud_video_gen backend below is the API path. Verify output with the quality
 # gate before presenting it as finished. Placeholders:
 #   {prompt} {negative_prompt} {width} {height} {seconds} {fps} {output}
 # [[providers]]
@@ -264,6 +264,31 @@ enabled = false          # opt-in: set true once the command is installed
 #   name = "svd"
 #   capability = "video_gen"
 #   memory_mb = 8192
+
+# Cloud video-generation backend — the *API-level* video path (S4). Speaks the
+# Volcengine Ark / BytePlus "content generation tasks" contract that ByteDance's
+# Seedance models use: the engine submits a task, polls it to completion, then
+# downloads the finished clip as a managed artifact — all behind the same
+# `video_gen` capability as the local adapter, so routing and `prefer` work the
+# same way (this is a *cloud* backend, so `prefer = "local"` skips it).
+#
+# The API key is read from this field or the ARK_API_KEY environment variable;
+# with no key the provider registers but reports itself unavailable, so a keyless
+# config still boots. Per-request knobs go in `params`: `ratio` ("16:9"),
+# `resolution` ("1080p"), `duration`/`seconds`, `fps`, `seed`, and `image_url`
+# (for image-to-video); they become Seedance text-command suffixes.
+# [[providers]]
+# name = "seedance"
+# kind = "cloud_video_gen"
+# base_url = ""            # default: Volcengine Ark (cn); set the BytePlus URL for intl,
+#                          # e.g. "https://ark.ap-southeast.bytepluses.com/api/v3"
+# api_key = "env:ARK_API_KEY"
+# cost_tier = "high"
+# priority = 3
+# enabled = false          # opt-in: set true once a key is configured
+#   [[providers.models]]
+#   name = "doubao-seedance-1-0-pro-250528"   # the Seedance model id
+#   capability = "video_gen"
 
 # Local embedding model via Ollama (RAG enabler, S3). Ollama auto-discovers pulled
 # models; a model whose name contains `embed` (e.g. `nomic-embed-text`,

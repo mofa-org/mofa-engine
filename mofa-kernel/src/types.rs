@@ -75,6 +75,9 @@ pub enum ProviderKind {
     /// Local process-adapter video-generation backend (e.g. an AnimateDiff / SVD
     /// or Wan-style CLI).
     LocalVideoGen,
+    /// Cloud video-generation API (the Volcengine Ark / BytePlus task contract
+    /// that ByteDance's Seedance models speak): submit → poll → download.
+    CloudVideoGen,
     /// Multi-vendor cloud gateway via the `liter-llm` crate (143+ providers,
     /// unified OpenAI-style contract).
     LiterLlm,
