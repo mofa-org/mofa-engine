@@ -29,22 +29,16 @@ echo -e "${BOLD}${BLUE}=========================================================
 echo -e "${BOLD}${CYAN}   MoFA Engine — Multimodal Orchestration for Artifacts${RESET}"
 echo -e "${BOLD}${BLUE}==================================================================${RESET}\n"
 
-# Mode: Demo Runner
+# Mode: Doctor Diagnostic
+if [ "$1" == "--doctor" ] || [ "$1" == "-doc" ]; then
+    python3 mofa-fm/mofa_doctor.py
+    exit 0
+fi
+
+# Mode: Golden Path Demo Runner
 if [ "$1" == "--demo" ] || [ "$1" == "-d" ]; then
-    echo -e "${YELLOW}Running all 7 Scenario Demos (Standalone Artifact Generation)...${RESET}\n"
-    python3 examples/01_provider_race.py --mock
-    python3 examples/multimodal_chat_s1.py --mock
-    python3 examples/speech_to_text_s2.py --mock
-    python3 examples/code_review.py --mock
-    python3 examples/doc_ai.py --mock
-    python3 examples/meeting_brief.py --mock
-    python3 mofa-fm/article_to_podcast.py --mock
-    python3 examples/explainer_video.py --mock
-    
-    echo -e "\n${GREEN}==================================================================${RESET}"
-    echo -e "${GREEN}ALL SCENARIO ARTIFACTS GENERATED IN: ${BOLD}$ROOT_DIR/output/${RESET}"
-    echo -e "${GREEN}==================================================================${RESET}"
-    ls -lh output/
+    echo -e "${CYAN}Launching MoFA 30-Second Multimodal Golden Path Demo...${RESET}\n"
+    python3 examples/quickstart_demo.py
     exit 0
 fi
 
