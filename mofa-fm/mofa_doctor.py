@@ -113,8 +113,30 @@ def run_doctor() -> int:
         print(f"  {YELLOW}[WARN]{RESET} Speech-to-Text (ASR)  : {YELLOW}Not Found{RESET} (S1 will fall back to pre-recorded sample transcript)")
         fixes.append("pip install openai-whisper       # Enable local speech recognition for Scenario S1")
 
-    # ── 5. System Tools & Utilities ──────────────────────────────────
-    print(f"\n{BOLD}2. System Tools & Media Engines{RESET}")
+    # ── 5. Cloud AI Providers (Dual-Track) ───────────────────────────
+    print(f"\n{BOLD}2. Cloud AI Providers & Hybrid Acceleration{RESET}")
+    has_gemini = bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
+    has_openai = bool(os.environ.get("OPENAI_API_KEY"))
+    has_deepseek = bool(os.environ.get("DEEPSEEK_API_KEY"))
+    has_fireworks = bool(os.environ.get("FIREWORKS_API_KEY"))
+
+    if has_gemini:
+        print(f"  {GREEN}[OK]{RESET}   Google Gemini AI      : {GREEN}Configured{RESET} (Gemini 2.5 Flash Chat & Native TTS active)")
+    else:
+        print(f"  {CYAN}[INFO]{RESET} Google Gemini AI      : {CYAN}Unset{RESET} (export GEMINI_API_KEY for free-tier cloud burst)")
+
+    if has_openai:
+        print(f"  {GREEN}[OK]{RESET}   OpenAI Cloud          : {GREEN}Configured{RESET} (GPT-4o & Whisper cloud fallback active)")
+    else:
+        print(f"  {CYAN}[INFO]{RESET} OpenAI Cloud          : {CYAN}Unset{RESET} (export OPENAI_API_KEY for GPT-4o)")
+
+    if has_deepseek:
+        print(f"  {GREEN}[OK]{RESET}   DeepSeek Reasoning    : {GREEN}Configured{RESET} (DeepSeek-R1 deep thinking active)")
+    if has_fireworks:
+        print(f"  {GREEN}[OK]{RESET}   Fireworks AI          : {GREEN}Configured{RESET} (Serverless open models active)")
+
+    # ── 6. System Tools & Utilities ──────────────────────────────────
+    print(f"\n{BOLD}3. System Tools & Media Engines{RESET}")
     python_ver = sys.version.split()[0]
     print(f"  {GREEN}[OK]{RESET}   Python Runtime        : Found v{python_ver}")
 
@@ -124,8 +146,8 @@ def run_doctor() -> int:
         print(f"  {YELLOW}[WARN]{RESET} FFmpeg Video Engine   : {YELLOW}Not Found{RESET} (Needed for S4 Explainer Video composition)")
         fixes.append("brew install ffmpeg              # Video composition engine for S4")
 
-    # ── 6. Scenario Readiness Matrix ─────────────────────────────────
-    print(f"\n{BOLD}3. Scenario Readiness Matrix{RESET}")
+    # ── 7. Scenario Readiness Matrix ─────────────────────────────────
+    print(f"\n{BOLD}4. Scenario Readiness Matrix{RESET}")
     scenarios = [
         ("S1 Meeting Brief", has_chat_model and (has_whisper or True), "ASR -> Chat Minutes -> TTS Audio"),
         ("S2 Code Review", has_chat_model, "High-effort reasoning thought stream on Git diff"),
