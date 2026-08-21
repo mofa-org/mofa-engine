@@ -29,6 +29,9 @@ pub fn estimate_cost_usd(
         ("openai", m) if m.contains("gpt-4o") => (0.0025, 0.0100),
         ("openai", m) if m.contains("gpt-4") => (0.0300, 0.0600),
         ("openai", m) if m.contains("gpt-3.5") => (0.0005, 0.0015),
+        (p, m) if p.contains("gemini") && m.contains("flash") => (0.000075, 0.000300),
+        (p, m) if p.contains("gemini") && m.contains("pro") => (0.001250, 0.005000),
+        (p, m) if p.contains("gemini") || m.contains("gemini") => (0.000100, 0.000400),
         (p, m) if p == "deepseek" || m.contains("deepseek") => (0.00055, 0.00219),
         (p, m) if p == "anthropic" || m.contains("claude") => (0.0030, 0.0150),
         (p, m) if p == "dashscope" || m.contains("qwen") => (0.0028, 0.0084),
@@ -65,5 +68,11 @@ mod tests {
     fn deepseek_cost_calculation() {
         let cost = estimate_cost_usd("deepseek", "deepseek-r1", 1000, 1000, false);
         assert!((cost - 0.00274).abs() < 1e-5);
+    }
+
+    #[test]
+    fn gemini_flash_cost_calculation() {
+        let cost = estimate_cost_usd("gemini", "gemini-2.5-flash", 1000, 1000, false);
+        assert!((cost - 0.000375).abs() < 1e-6);
     }
 }

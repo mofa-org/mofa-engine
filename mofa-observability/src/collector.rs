@@ -404,7 +404,12 @@ impl MetricsState {
 
                 // Histogram: request duration
                 self.request_duration_seconds.observe(
-                    Labels::new().add("capability", e.capability.to_string()),
+                    Labels::new()
+                        .add("capability", e.capability.to_string())
+                        .add("provider", &e.backend)
+                        .add("locality", locality)
+                        .add("model", &e.model_id)
+                        .add("status", status),
                     e.duration_ms as f64 / 1000.0,
                 );
 
