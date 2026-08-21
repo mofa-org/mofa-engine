@@ -81,7 +81,7 @@ def main():
 
     # ── Step 2: TTS (Speech Synthesis) ───────────────────────────────
     print(f"\n{BOLD}[Step 2/3] TTS (Voice): Synthesizing spoken audio...{RESET}")
-    audio_path = out_dir / "quickstart_demo_speech.mp3"
+    audio_path = out_dir / "quickstart_demo_speech.wav"
     
     try:
         tts_res = engine.tts(chat_res.text, voice="en-narrator", prefer="local", hint_next="asr")
@@ -97,14 +97,7 @@ def main():
     except Exception as e:
         print(f"  {YELLOW}[FALLBACK]{RESET} TTS service offline ({e}); generating via macOS system voice...")
         if shutil.which("say"):
-            aiff_tmp = out_dir / "quickstart_demo_speech.aiff"
-            os.system(f"say -v Samantha \"{chat_res.text}\" -o {aiff_tmp}")
-            if shutil.which("ffmpeg"):
-                os.system(f"ffmpeg -y -i {aiff_tmp} {audio_path} >/dev/null 2>&1")
-                if aiff_tmp.exists():
-                    aiff_tmp.unlink()
-            else:
-                audio_path = aiff_tmp
+            os.system(f"say -v Samantha \"{chat_res.text}\" -o {audio_path}")
             print(f"  {GREEN}[OK]{RESET} Audio generated via system TTS: {BOLD}{audio_path}{RESET}")
 
     # ── Step 3: ASR (Transcribing Speech Back) ───────────────────────

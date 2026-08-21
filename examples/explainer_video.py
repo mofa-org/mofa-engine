@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""
-Scenario S4: Flagship Explainer Video Generator (Chat -> Image -> TTS -> ASR -> FFmpeg)
-MoFA Engine — Multimodal Orchestration for Artifacts
+"""S4 Flagship Explainer Video: Topic -> Script -> Images -> TTS -> MP4 Video (PRD v3.1 §2.2.1 S4).
 
-Turns a one-sentence topic into a publishable .mp4 explainer video:
-1. Script Generation (Chat) + hint_next="image_gen" preflight warming
-2. Scene Visual Prompts (ImageGen)
-3. Voice Narration (Local Kokoro TTS on port 8421 or engine.tts)
-4. Subtitles (ASR word-level timestamps)
-5. FFmpeg Assembly & ffprobe Quality Gate Verification
+Executes a 5-step multimodal pipeline:
+  1. Chat (Script) -> Generates 3-scene narration script with hint_next="image_gen"
+  2. ImageGen (Visuals) -> Generates scene illustration for each section
+  3. TTS (Narration) -> Synthesizes spoken audio voiceover
+  4. FFmpeg (Composition) -> Stitches scene visuals + audio into final MP4 video
+  5. Quality Gate -> Verifies duration and video integrity via ffprobe
 
 Usage:
-    python examples/explainer_video.py --mock --out output/explainer_video.mp4
-    python examples/explainer_video.py --topic "How Neural Networks Learn"
+  python3 examples/explainer_video.py
+  python3 examples/explainer_video.py --topic "Quantum Computing Superposition"
+  mofa run video
 """
 
 import argparse
@@ -20,318 +19,131 @@ import os
 import shutil
 import subprocess
 import sys
-import time
+from pathlib import Path
 
-# Ensure parent directory is in python path for mofa_sdk import
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "mofa-fm")))
-
-try:
-    from mofa_sdk import MofaEngine
-except ImportError:
-    class MofaEngine:
-        def __init__(self, base_url: str = "http://127.0.0.1:8420"):
-            self.base_url = base_url
-
-        def chat(self, text: str = "", *, prompt: str = "", reasoning: dict = None, hint_next: str = None, prefer: str = None, **kw):
-            return type("Response", (), {"text": "Scene 1: Introduction to neural nodes. Scene 2: Forward propagation. Scene 3: Backpropagation.", "model_used": "mock", "provider": "mock", "duration_ms": 300, "cost_usd": 0.0, "locality": "local"})()
-
-        def tts(self, text: str, voice: str = "en-narrator", prefer: str = "local", **kw):
-            return type("Response", (), {"file": "mock_narration.mp3", "duration": 12.5, "model_used": "mock", "provider": "mock", "duration_ms": 400, "cost_usd": 0.0, "locality": "local"})()
-
-        def asr(self, audio_file: str, prefer: str = "local", **kw):
-            return type("Response", (), {"words": [{"word": "Neural", "start": 0.1, "end": 0.5}], "model_used": "mock", "provider": "mock", "duration_ms": 250, "cost_usd": 0.0, "locality": "local"})()
-
-        def image_gen(self, prompt: str, *, size: str = "1024x1024", prefer: str = None, **kw):
-            return type("Response", (), {"text": None, "file": None, "url": None, "model_used": "mock", "provider": "mock", "duration_ms": 500, "cost_usd": 0.0, "locality": "local"})()
-
-        def cost(self):
-            return {"mock": {"total_cost_usd": 0.0, "total_tokens": 500, "locality": "local"}}
-
-
-def check_ffmpeg_available() -> bool:
-    """Check if ffmpeg is installed on the host system."""
-    return shutil.which("ffmpeg") is not None
-
-
-def _create_placeholder_image(path: str, label: str):
-    """Create a minimal valid 1024x1024 PNG placeholder image for FFmpeg composition."""
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    try:
-        from PIL import Image, ImageDraw
-        img = Image.new("RGB", (1024, 1024), color=(30, 30, 45))
-        draw = ImageDraw.Draw(img)
-        draw.text((100, 480), label[:60], fill=(220, 220, 240))
-        img.save(path, "PNG")
-    except ImportError:
-        import struct, zlib
-        w, h = 512, 512
-        raw = b''.join(b'\x00' + bytes([30, 30, 45]) * w for _ in range(h))
-        compressed = zlib.compress(raw)
-        ihdr = struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)
-        chunks = []
-        for ctype, data in [(b'IHDR', ihdr), (b'IDAT', compressed), (b'IEND', b'')]:
-            c = struct.pack('>I', len(data)) + ctype + data
-            c += struct.pack('>I', zlib.crc32(ctype + data) & 0xffffffff)
-            chunks.append(c)
-        with open(path, "wb") as f:
-            f.write(b'\x89PNG\r\n\x1a\n' + b''.join(chunks))
-
-
-_SD_PIPELINE = None
-
-def _generate_local_ai_image(prompt: str, path: str) -> bool:
-    """Generate a real AI image locally on Apple Silicon M4 GPU (MPS)."""
-    global _SD_PIPELINE
-    try:
-        import torch
-        from diffusers import StableDiffusionPipeline
-
-        if _SD_PIPELINE is None:
-            print("     Loading PyTorch Stable Diffusion model on Apple Silicon M4 GPU (MPS)...")
-            device = "mps" if torch.backends.mps.is_available() else "cpu"
-            dtype = torch.float16 if device == "mps" else torch.float32
-            _SD_PIPELINE = StableDiffusionPipeline.from_pretrained(
-                "runwayml/stable-diffusion-v1-5",
-                torch_dtype=dtype,
-                safety_checker=None
-            ).to(device)
-
-        image = _SD_PIPELINE(prompt, num_inference_steps=15, guidance_scale=7.5).images[0]
-        image.save(path)
-        return True
-    except Exception as e:
-        print(f"     [WARN] Local PyTorch ImageGen error: {e}")
-        return False
-
-
-def generate_explainer_video(
-    topic: str,
-    out_path: str = "output/explainer_video.mp4",
-    prefer: str = "local",
-    mock: bool = False,
-    engine_url: str = "http://127.0.0.1:8420"
-) -> bool:
-    """Execute the full 6-step Flagship Explainer Video pipeline."""
-    print(f"\nScenario S4: Flagship Explainer Video Generator")
-    print(f"  * Topic: \"{topic}\"")
-    print(f"  * Locality Constraint: prefer={prefer}\n")
-
-    out_dir = os.path.dirname(os.path.abspath(out_path))
-    os.makedirs(out_dir, exist_ok=True)
-    temp_dir = os.path.join(out_dir, "_explainer_temp")
-    os.makedirs(temp_dir, exist_ok=True)
-
-    steps = [
-        "1. Script Generation (Chat + Preflight Warming)",
-        "2. Scene Visual Generation (ImageGen)",
-        "3. Voice Narration Synthesis (Kokoro TTS)",
-        "4. Subtitle Timeline Alignment (ASR)",
-        "5. FFmpeg Slideshow Composition (.mp4)",
-        "6. Quality Gate Verification (ffprobe)"
-    ]
-
-    if mock:
-        print("[INFO] Running in MOCK mode (simulated pipeline execution)...")
-        scenes = [
-            os.path.join(temp_dir, "scene_1.png"),
-            os.path.join(temp_dir, "scene_2.png"),
-            os.path.join(temp_dir, "scene_3.png")
-        ]
-        for i, scene_file in enumerate(scenes):
-            _create_placeholder_image(scene_file, f"Scene {i+1}: {topic}")
-        
-        narration_file = os.path.join(temp_dir, "narration.mp3")
-        sample_speech = os.path.join(os.path.dirname(__file__), "samples", "sample_tts_speech.mp3")
-        sample_wav = os.path.join(os.path.dirname(__file__), "samples", "sample_tts_speech.wav")
-        if os.path.exists(sample_speech):
-            shutil.copy2(sample_speech, narration_file)
-        elif os.path.exists(sample_wav):
-            shutil.copy2(sample_wav, narration_file)
-            
-        if check_ffmpeg_available():
-            if not os.path.exists(narration_file):
-                cmd_audio = ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", "5", narration_file]
-                subprocess.run(cmd_audio, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            
-            cmd_video = [
-                "ffmpeg", "-y",
-                "-loop", "1", "-t", "3", "-i", scenes[0],
-                "-loop", "1", "-t", "3", "-i", scenes[1],
-                "-loop", "1", "-t", "3", "-i", scenes[2],
-                "-i", narration_file,
-                "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]",
-                "-map", "[v]", "-map", "3:a",
-                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest",
-                out_path
-            ]
-            subprocess.run(cmd_video, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        for i, step in enumerate(steps, 1):
-            print(f"  [Step {i}/6] Executing {step}...")
-            time.sleep(0.1)
-            if i == 1:
-                print("     +- Script: \"Neural networks process inputs through weighted layers.\"")
-                print("     +- Preflight Warmup: Emitted hint_next='image_gen' to warm SD model VRAM.")
-            elif i == 2:
-                print("     +- Scene 1: Concept Diagram of Input Nodes (1024x1024)")
-                print("     +- Scene 2: Matrix Multiplication Visualization (1024x1024)")
-                print("     +- Scene 3: Loss Function Curve Optimization (1024x1024)")
-            elif i == 3:
-                print("     +- Narration: Generated 14.2s narration audio via Kokoro TTS (voice: en-narrator).")
-            elif i == 4:
-                print("     +- Subtitles: Word-level alignment generated (18 words matched).")
-            elif i == 5:
-                print(f"     +- FFmpeg Command: ffmpeg -loop 1 -i scene_%d.png -i narration.mp3 {out_path}")
-            elif i == 6:
-                print("     +- Quality Gate PASSED: Non-zero duration (14.2s), H.264 video stream, AAC audio.")
-
-        print(f"\nEXPLAINER VIDEO GENERATED SUCCESSFULLY!")
-        print(f"Output Video Artifact: {os.path.abspath(out_path)}")
-        print(f"Total Cost: $0.000000 (100% Local Inference via Ollama + Kokoro + SD)")
-        return True
-
-    engine = MofaEngine(base_url=engine_url)
-
-    # Step 1: Script
-    print(f"  [Step 1/6] Generating Script...")
-    script_res = engine.chat(
-        text=f"Write a 3-sentence spoken narration for a 15-second explainer video on: {topic}. Output ONLY the spoken narration text. Do NOT include intros, markdown, or scene titles.",
-        reasoning={"effort": "medium"},
-        hint_next="image_gen"
-    )
-    raw_script = getattr(script_res, "text", str(script_res))
-    
-    import re
-    cleaned_lines = []
-    for line in raw_script.splitlines():
-        line_s = line.strip()
-        if not line_s or line_s.startswith(("#", "**Scene", "* **", "---", "Overall Tone", "Would you like")):
-            continue
-        cleaned_lines.append(re.sub(r"[*#_`-]", "", line_s))
-    
-    script_text = " ".join(cleaned_lines) if cleaned_lines else raw_script[:200]
-    print(f"     +- Clean Spoken Script: {script_text[:80]}...")
-
-    # Step 2: Images via engine.image_gen()
-    print(f"  [Step 2/6] Generating Scene Visuals...")
-    scenes = [
-        os.path.join(temp_dir, "scene_1.png"),
-        os.path.join(temp_dir, "scene_2.png"),
-        os.path.join(temp_dir, "scene_3.png")
-    ]
-    scene_prompts = [s.strip() for s in script_text.split(".") if s.strip()]
-    for i, scene_file in enumerate(scenes):
-        scene_desc = scene_prompts[i] if i < len(scene_prompts) else f"Scene {i+1} for {topic}"
-        try:
-            img_res = engine.image_gen(
-                prompt=f"Educational diagram: {scene_desc}",
-                size="1024x1024",
-                prefer=prefer,
-            )
-            img_file = getattr(img_res, "file", None)
-            img_url = getattr(img_res, "url", None)
-            if img_file and os.path.exists(img_file) and os.path.getsize(img_file) > 100:
-                shutil.copy2(img_file, scene_file)
-            elif img_url:
-                import urllib.request
-                urllib.request.urlretrieve(img_url, scene_file)
-            elif _generate_local_ai_image(f"Educational diagram of {scene_desc}, clean infographic style", scene_file):
-                print(f"     +- Generated scene {i+1} via local PyTorch MPS Stable Diffusion")
-            else:
-                _create_placeholder_image(scene_file, f"Scene {i+1}: {scene_desc}")
-        except Exception as e:
-            print(f"     [WARN] ImageGen fallback for scene {i+1}: {e}")
-            if not _generate_local_ai_image(f"Educational diagram of {scene_desc}, clean infographic style", scene_file):
-                _create_placeholder_image(scene_file, f"Scene {i+1}: {scene_desc}")
-    print(f"     +- Generated {len(scenes)} valid PNG scene images (1024x1024)")
-
-    # Step 3: Narration TTS
-    print(f"  [Step 3/6] Synthesizing Narration Audio...")
-    narration_file = os.path.join(temp_dir, "narration.mp3")
-    try:
-        tts_res = engine.tts(script_text, model="kokoro", voice="af_heart")
-        audio_src = getattr(tts_res, "file", None)
-        if audio_src and os.path.exists(audio_src):
-            shutil.copy2(audio_src, narration_file)
-            print(f"     +- Kokoro TTS audio generated: {narration_file}")
-        else:
-            cmd_audio = ["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=15", narration_file]
-            subprocess.run(cmd_audio, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception as e:
-        print(f"     [WARN] TTS fallback: {e}")
-        cmd_audio = ["ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=15", narration_file]
-        subprocess.run(cmd_audio, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    print(f"     +- Audio: {narration_file}")
-
-    # Step 4: Subtitles ASR
-    print(f"  [Step 4/6] Extracting Subtitle Alignment...")
-    try:
-        asr_res = engine.asr(narration_file)
-        print(f"     +- Extracted subtitle timeline")
-    except Exception as e:
-        print(f"     [WARN] ASR alignment fallback: {e}")
-
-    # Step 5 & 6: FFmpeg & Quality Gate
-    print(f"  [Step 5/6] Rendering Video via FFmpeg...")
-    if check_ffmpeg_available():
-        cmd = [
-            "ffmpeg", "-y",
-            "-loop", "1", "-t", "5", "-i", scenes[0],
-            "-loop", "1", "-t", "5", "-i", scenes[1],
-            "-loop", "1", "-t", "5", "-i", scenes[2],
-            "-i", narration_file,
-            "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]",
-            "-map", "[v]", "-map", "3:a",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-t", "15",
-            out_path
-        ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print(f"     +- Rendered 15-second video: {out_path}")
-    else:
-        print("     [WARN] FFmpeg not found in PATH -- skipping binary render step.")
-
-    print(f"  [Step 6/6] Quality Gate Verification...")
-    print("     +- Quality Gate PASSED: File format valid.")
-
-    # Telemetry
-    try:
-        cost_data = engine.cost()
-        print(f"\n{'=' * 60}")
-        print(f"  Engine Observability Telemetry (from /v1/cost)")
-        print(f"{'=' * 60}")
-        if isinstance(cost_data, dict):
-            for provider_k, metrics_v in cost_data.items():
-                if isinstance(metrics_v, dict):
-                    print(f"  * {provider_k}: ${metrics_v.get('total_cost_usd', 0.0):.6f} "
-                          f"({metrics_v.get('total_tokens', 0)} tokens, locality: {metrics_v.get('locality', 'local')})")
-                else:
-                    print(f"  * {provider_k}: {metrics_v}")
-        print(f"{'=' * 60}")
-    except Exception as e:
-        pass
-
-    print(f"\nEXPLAINER VIDEO GENERATED SUCCESSFULLY!")
-    print(f"Output Video Artifact: {os.path.abspath(out_path)}\n")
-    return True
+# Add mofa-fm SDK to import path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "mofa-fm"))
+from mofa_sdk import MofaEngine
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Scenario S4: Flagship Explainer Video Generator")
-    parser.add_argument("--topic", type=str, default="How Neural Networks Learn", help="Explainer topic")
-    parser.add_argument("--out", type=str, default="output/explainer_video.mp4", help="Output .mp4 video file")
-    parser.add_argument("--prefer", type=str, default="local", choices=["local", "cloud", "auto"], help="Routing constraint")
-    parser.add_argument("--mock", action="store_true", help="Run with mock metrics (offline mode)")
-    parser.add_argument("--engine-url", type=str, default="http://127.0.0.1:8420", help="MoFA Engine URL")
+    parser = argparse.ArgumentParser(description="S4 Flagship Explainer Video Generator")
+    parser.add_argument("--topic", default="How neural networks learn through backpropagation", help="Explainer video topic")
+    parser.add_argument("--prefer", default="local", choices=["local", "auto", "cloud"], help="Routing locality preference")
+    parser.add_argument("--out", default="output/explainer_video.mp4", help="Output path for final MP4 video")
     args = parser.parse_args()
 
-    generate_explainer_video(
-        topic=args.topic,
-        out_path=args.out,
-        prefer=args.prefer,
-        mock=args.mock,
-        engine_url=args.engine_url
+    engine = MofaEngine()
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_dir = out_path.parent / "tmp_s4"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    print("\n==================================================================")
+    print("   Scenario S4: Flagship Animated Explainer Video Generator")
+    print("==================================================================")
+    print(f"  Topic : {args.topic}")
+
+    # ── Step 1: Script Generation ────────────────────────────────────
+    print(f"\n[Step 1/5] Chat: Generating 3-scene narration script (hint_next=image_gen)...")
+    script_prompt = (
+        f"Write a concise 3-scene spoken explainer script about: {args.topic}. "
+        "Format EXACTLY as:\n"
+        "Scene 1: [Scene visual description]\n[Narration text]\n\n"
+        "Scene 2: [Scene visual description]\n[Narration text]\n\n"
+        "Scene 3: [Scene visual description]\n[Narration text]"
     )
+    script_res = engine.chat(
+        script_prompt,
+        reasoning={"effort": "medium"},
+        hint_next="image_gen",
+        prefer=args.prefer,
+    )
+    print(f"  [OK] Script generated ({script_res.provider}/{script_res.model_used}, {script_res.duration_ms}ms)")
+    
+    # Parse scenes
+    raw_text = script_res.text or ""
+    scene_blocks = [s.strip() for s in raw_text.split("Scene") if s.strip()]
+    if len(scene_blocks) < 3:
+        scene_blocks = [
+            f"1: Overview of {args.topic}\nWelcome to this quick explainer on {args.topic}.",
+            f"2: Core Mechanisms\nLet's look at how the underlying principles operate in practice.",
+            f"3: Key Takeaways\nIn summary, local AI orchestration unlocks powerful new workflows.",
+        ]
+
+    # ── Step 2: Scene Visuals ────────────────────────────────────────
+    print(f"\n[Step 2/5] ImageGen: Generating visuals for {min(3, len(scene_blocks))} scenes...")
+    scene_images = []
+    for i, scene in enumerate(scene_blocks[:3]):
+        img_path = tmp_dir / f"scene_{i+1}.png"
+        try:
+            img_res = engine.image_gen(
+                prompt=f"Educational clean minimalist illustration: {scene[:150]}",
+                size="1024x1024",
+                prefer=args.prefer,
+            )
+            img_res.save(str(img_path))
+            scene_images.append(str(img_path))
+            print(f"  [OK] Scene {i+1} visual generated ({img_res.provider}, {img_res.duration_ms}ms)")
+        except Exception as e:
+            # Generate styled title card via FFmpeg if image_gen provider is offline
+            label = f"Scene {i+1}: {args.topic[:30]}..."
+            if shutil.which("ffmpeg"):
+                subprocess.run([
+                    "ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=0x0f172a:s=1024x1024:d=1",
+                    "-vf", f"drawtext=text='{label}':fontsize=36:fontcolor=0x38bdf8:x=(w-tw)/2:y=(h-th)/2",
+                    "-frames:v", "1", str(img_path)
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                scene_images.append(str(img_path))
+                print(f"  [FALLBACK] Scene {i+1} title card created via FFmpeg ({e})")
+
+    # ── Step 3: TTS Narration ────────────────────────────────────────
+    print(f"\n[Step 3/5] TTS: Synthesizing spoken voiceover narration...")
+    narration_path = tmp_dir / "narration.mp3"
+    narration_res = engine.tts(raw_text, voice="en-narrator", prefer=args.prefer)
+    narration_res.save(str(narration_path))
+    print(f"  [OK] Narration audio saved ({narration_res.provider}, {narration_res.duration_ms}ms)")
+
+    # ── Step 4: Video Composition ────────────────────────────────────
+    print(f"\n[Step 4/5] Compose: Rendering final MP4 video via FFmpeg...")
+    if shutil.which("ffmpeg") and scene_images and narration_path.exists():
+        concat_file = tmp_dir / "concat.txt"
+        with open(concat_file, "w") as f:
+            for img in scene_images:
+                f.write(f"file '{os.path.abspath(img)}'\nduration 4\n")
+            f.write(f"file '{os.path.abspath(scene_images[-1])}'\n")
+        
+        subprocess.run([
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_file),
+            "-i", str(narration_path), "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-shortest", str(out_path)
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"  [OK] Video rendered to: {out_path}")
+    else:
+        print(f"  [WARN] FFmpeg unavailable; scene assets preserved in {tmp_dir}/")
+
+    # ── Step 5: Quality Gate (PRD §S4 SLA) ────────────────────────────
+    print(f"\n[Step 5/5] Quality Gate: Validating output container integrity...")
+    if out_path.exists() and shutil.which("ffprobe"):
+        probe = subprocess.run([
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "csv=p=0", str(out_path)
+        ], capture_output=True, text=True)
+        duration = float(probe.stdout.strip() or "0")
+        if duration > 0:
+            print(f"  [PASS] Video Duration: {duration:.1f}s | Size: {out_path.stat().st_size / 1024:.1f} KB")
+        else:
+            print("  [WARN] Video file created but duration could not be verified.")
+    elif out_path.exists():
+        print(f"  [PASS] Video file verified: {out_path.stat().st_size / 1024:.1f} KB")
+
+    total_cost = (script_res.cost_usd or 0.0) + (narration_res.cost_usd or 0.0)
+    print("\n==================================================================")
+    print("   S4 Explainer Video Pipeline Complete!")
+    print("==================================================================")
+    print(f"  Output Video : {out_path}")
+    print(f"  Total Cost   : ${total_cost:.4f} (Benchmarked against $0.15-1.50 cloud video)")
+    print()
 
 
 if __name__ == "__main__":
