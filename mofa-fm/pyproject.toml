@@ -23,6 +23,9 @@ mofa = "mofa_cli:main"
 dev = [
     "pytest>=7.0.0",
 ]
+async = [
+    "httpx>=0.24.0",
+]
 
 [tool.setuptools.py_modules]
 modules = ["mofa_sdk", "mofa_cli", "mofa_doctor"]

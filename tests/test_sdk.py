@@ -108,6 +108,50 @@ class TestMofaEngineSDK(unittest.TestCase):
         _, kwargs = self.engine.session.post.call_args
         self.assertEqual(kwargs["json"]["capabilities"], ["vlm", "tts"])
 
+    def test_embed(self):
+        """Test embed() method for vectorization (PRD §3.7)."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "text": "[0.12, -0.45, 0.78]",
+            "model_used": "nomic-embed-text",
+            "provider": "ollama",
+            "locality": "local",
+        }
+        self.engine.session.post.return_value = mock_resp
+
+        result = self.engine.embed("Hello embeddings", dimensions=384, prefer="local")
+        self.assertEqual(result.text, "[0.12, -0.45, 0.78]")
+        self.assertTrue(result.is_local)
+        _, kwargs = self.engine.session.post.call_args
+        self.assertEqual(kwargs["json"]["capability"], "embedding")
+        self.assertEqual(kwargs["json"]["params"]["dimensions"], 384)
+
+    def test_invoke_result_helpers(self):
+        """Test InvokeResult ergonomic properties and markdown conversion."""
+        res_local = InvokeResult(text="Local summary", provider="ollama", model_used="qwen2.5:7b", duration_ms=120, locality="local", cost_usd=0.0)
+        self.assertTrue(res_local.is_local)
+        self.assertGreater(res_local.savings_vs_cloud, 0.0)
+        md = res_local.to_markdown()
+        self.assertIn("Local summary", md)
+        self.assertIn("LOCAL", md)
+
+        res_cloud = InvokeResult(text="Cloud summary", provider="fireworks", model_used="llama-3.3-70b", duration_ms=450, locality="cloud", cost_usd=0.002)
+        self.assertFalse(res_cloud.is_local)
+        self.assertEqual(res_cloud.savings_vs_cloud, 0.0)
+
+    def test_pipeline_chaining(self):
+        """Test Pipeline builder chaining and automatic warmup propagation."""
+        from mofa_sdk import Pipeline
+        pipeline = Pipeline(self.engine)
+        pipeline.chat("Write a script about {topic}", hint_next="tts")
+        pipeline.tts(voice="en-narrator")
+
+        self.assertEqual(len(pipeline.steps), 2)
+        self.assertEqual(pipeline.steps[0].capability, "chat")
+        self.assertEqual(pipeline.steps[0].hint_next, "tts")
+        self.assertEqual(pipeline.steps[1].capability, "tts")
+
 
 if __name__ == "__main__":
     unittest.main()
+

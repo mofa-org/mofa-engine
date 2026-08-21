@@ -12,8 +12,9 @@ import os
 import base64
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Generator, Any, Union
+from typing import Dict, List, Optional, Generator, AsyncGenerator, Any, Union
 from pathlib import Path
 
 try:
@@ -201,7 +202,9 @@ class InvokeResult:
     @property
     def is_local(self) -> bool:
         """True if invocation was served on-device with zero egress cost."""
-        return self.locality == "local" or self.cost_usd == 0.0
+        if self.locality:
+            return self.locality.lower() == "local"
+        return self.provider.lower() in ("ollama", "funasr", "kokoro", "local-tts", "local-asr", "local-sd")
 
     @property
     def savings_vs_cloud(self) -> float:
@@ -255,7 +258,42 @@ class MofaEngine:
 
     def cost(self) -> dict:
         """Get accumulated cost and token usage metrics."""
-        return self.session.get(f"{self.base_url}/v1/cost", timeout=10).json()
+        try:
+            resp = self.session.get(f"{self.base_url}/v1/cost", timeout=5)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            pass
+
+        # Parse from Prometheus /metrics text format
+        total_cost = 0.0
+        local_reqs = 0
+        cloud_reqs = 0
+        try:
+            m_resp = self.session.get(f"{self.base_url}/metrics", timeout=5)
+            if m_resp.status_code == 200:
+                for line in m_resp.text.splitlines():
+                    if line.startswith("mofa_cost_usd_total"):
+                        parts = line.rsplit(None, 1)
+                        if len(parts) == 2:
+                            try:
+                                total_cost += float(parts[1])
+                            except ValueError:
+                                pass
+                    elif line.startswith("mofa_requests_total"):
+                        if 'locality="local"' in line:
+                            local_reqs += 1
+                        elif 'locality="cloud"' in line:
+                            cloud_reqs += 1
+        except Exception:
+            pass
+
+        return {
+            "total_cost_usd": total_cost,
+            "local_requests": local_reqs,
+            "cloud_requests": cloud_reqs,
+            "estimated_savings_usd": max(0.0, local_reqs * 0.003),
+        }
 
     # ─── Core Invoke ──────────────────────────────────────────────────
 
@@ -325,17 +363,22 @@ class MofaEngine:
         r.raise_for_status()
         d = r.json()
 
+        provider_name = d.get("provider", "unknown")
+        detected_locality = d.get("locality")
+        if not detected_locality:
+            detected_locality = "cloud" if provider_name.lower() in ("gemini", "openai", "deepseek", "anthropic", "fireworks") else "local"
+
         return InvokeResult(
             text=d.get("text"),
             file=d.get("file"),
             url=d.get("url"),
             model_used=d.get("model_used", d.get("model", "unknown")),
-            provider=d.get("provider", "unknown"),
+            provider=provider_name,
             duration_ms=d.get("duration_ms", 0),
             request_id=d.get("request_id", ""),
             tokens_used=d.get("tokens_used"),
             cost_usd=float(d.get("cost_usd") if d.get("cost_usd") is not None else 0.0),
-            locality=d.get("locality", "local"),
+            locality=detected_locality,
             words=d.get("words"),
         )
 
@@ -513,14 +556,33 @@ class MofaEngine:
             prefer: "local" for Crane/Kokoro, "cloud" for tts-1.
         """
         resolved_voice = VOICE_ALIASES.get(voice, voice)
-        return self.invoke(
-            capability="tts",
-            model=model,
-            text=text,
-            prefer=prefer,
-            hint_next=hint_next,
-            params={"voice": resolved_voice, "speed": speed},
-        )
+        try:
+            return self.invoke(
+                capability="tts",
+                model=model,
+                text=text,
+                prefer=prefer,
+                hint_next=hint_next,
+                params={"voice": resolved_voice, "speed": speed},
+            )
+        except Exception as e:
+            import tempfile
+            import subprocess
+            if shutil.which("say"):
+                t0 = time.time()
+                tmp_out = Path(tempfile.gettempdir()) / f"mofa_tts_{int(time.time()*1000)}.aiff"
+                subprocess.run(["say", "-o", str(tmp_out), text[:400]], check=False)
+                if tmp_out.exists():
+                    duration_ms = int((time.time() - t0) * 1000)
+                    return InvokeResult(
+                        file=str(tmp_out),
+                        model_used="system-voice",
+                        provider="macos-say",
+                        duration_ms=duration_ms,
+                        cost_usd=0.0,
+                        locality="local",
+                    )
+            raise e
 
     # ─── ASR (with file upload) ───────────────────────────────────────
 
@@ -732,6 +794,38 @@ class MofaEngine:
             params=params,
         )
 
+    # ─── Embedding / Vectorization (PRD §3.7) ─────────────────────────
+
+    def embed(
+        self,
+        texts: Union[str, List[str]],
+        *,
+        model: Optional[str] = None,
+        dimensions: Optional[int] = None,
+        prefer: Optional[str] = None,
+    ) -> InvokeResult:
+        """Generate text embeddings for semantic search, vector databases, and RAG (PRD §3.7).
+
+        Args:
+            texts: Single string or list of strings to generate embeddings for.
+            model: Specific embedding model override (e.g., 'nomic-embed-text', 'text-embedding-3-small').
+            dimensions: Desired output vector dimensions.
+            prefer: 'local' for on-device Ollama embeddings, 'cloud' for commercial provider.
+
+        Returns:
+            InvokeResult with JSON string containing vector embeddings and telemetry.
+        """
+        input_texts = [texts] if isinstance(texts, str) else texts
+        params: Dict[str, Any] = {"input": input_texts}
+        if dimensions:
+            params["dimensions"] = dimensions
+        return self.invoke(
+            capability="embedding",
+            model=model,
+            prefer=prefer,
+            params=params,
+        )
+
     # ─── Subscriptions & Events ───────────────────────────────────────
 
     def subscribe(
@@ -832,6 +926,11 @@ class Pipeline:
     def __init__(self, engine: Optional[MofaEngine] = None):
         self.engine = engine or MofaEngine()
         self._steps: List[PipelineStep] = []
+
+    @property
+    def steps(self) -> List[PipelineStep]:
+        """Return list of configured pipeline steps."""
+        return self._steps
 
     def chat(
         self,
@@ -989,3 +1088,536 @@ class Pipeline:
             final_artifact=last_file,
             final_text=last_text,
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Asynchronous Client — AsyncMofaEngine & AsyncPipeline (PRD §6.3)
+# ═══════════════════════════════════════════════════════════════════════
+
+try:
+    import httpx
+    HAS_HTTPX = True
+except ImportError:
+    HAS_HTTPX = False
+
+
+class AsyncMofaEngine:
+    """Asynchronous client for the MoFA Engine API Gateway (PRD §6.3).
+
+    Requires httpx (`pip install httpx` or `pip install mofa-sdk[async]`).
+    Designed for FastAPI, LangGraph, CrewAI, and high-concurrency async apps.
+
+    Usage:
+        async with AsyncMofaEngine() as engine:
+            result = await engine.chat("Hello!")
+            print(result.text)
+    """
+
+    def __init__(self, base_url: str = "http://127.0.0.1:8420"):
+        if not HAS_HTTPX:
+            raise ImportError(
+                "AsyncMofaEngine requires httpx. Install it via: pip install httpx"
+            )
+        self.base_url = base_url.rstrip("/")
+        self._client: Optional[httpx.AsyncClient] = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=300.0)
+        return self._client
+
+    async def __aenter__(self) -> "AsyncMofaEngine":
+        await self._get_client()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+
+    async def close(self):
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+
+    async def health(self) -> dict:
+        client = await self._get_client()
+        resp = await client.get(f"{self.base_url}/health")
+        resp.raise_for_status()
+        return resp.json()
+
+    async def status(self) -> dict:
+        client = await self._get_client()
+        resp = await client.get(f"{self.base_url}/v1/status")
+        resp.raise_for_status()
+        return resp.json()
+
+    async def capabilities(self) -> list:
+        client = await self._get_client()
+        resp = await client.get(f"{self.base_url}/v1/capabilities")
+        resp.raise_for_status()
+        return resp.json()
+
+    async def cost(self) -> dict:
+        client = await self._get_client()
+        try:
+            resp = await client.get(f"{self.base_url}/v1/cost")
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            pass
+
+        total_cost = 0.0
+        local_reqs = 0
+        cloud_reqs = 0
+        try:
+            m_resp = await client.get(f"{self.base_url}/metrics")
+            if m_resp.status_code == 200:
+                for line in m_resp.text.splitlines():
+                    if line.startswith("mofa_cost_usd_total"):
+                        parts = line.rsplit(None, 1)
+                        if len(parts) == 2:
+                            try:
+                                total_cost += float(parts[1])
+                            except ValueError:
+                                pass
+                    elif line.startswith("mofa_requests_total"):
+                        if 'locality="local"' in line:
+                            local_reqs += 1
+                        elif 'locality="cloud"' in line:
+                            cloud_reqs += 1
+        except Exception:
+            pass
+
+        return {
+            "total_cost_usd": total_cost,
+            "local_requests": local_reqs,
+            "cloud_requests": cloud_reqs,
+            "estimated_savings_usd": max(0.0, local_reqs * 0.003),
+        }
+
+    async def invoke(
+        self,
+        capability: str,
+        *,
+        model: Optional[str] = None,
+        messages: Optional[List[Dict[str, Any]]] = None,
+        text: Optional[str] = None,
+        input_file: Optional[str] = None,
+        params: Optional[Dict[str, Any]] = None,
+        hint_next: Optional[str] = None,
+        prefer: Optional[str] = None,
+        reasoning: Optional[Dict[str, Any]] = None,
+        response_format: Optional[str] = None,
+        app_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> InvokeResult:
+        body: Dict[str, Any] = {"capability": capability}
+        if model:
+            body["model"] = model
+        if messages:
+            body["messages"] = messages
+        elif text:
+            body["messages"] = [{"role": "user", "content": text}]
+        if input_file:
+            body["input_file"] = input_file
+        if params:
+            body["params"] = params
+        if hint_next:
+            body["hint_next"] = hint_next
+        if prefer:
+            body["prefer"] = prefer
+        if reasoning:
+            body["reasoning"] = reasoning
+        if response_format:
+            body["response_format"] = response_format
+        if app_id:
+            body["app_id"] = app_id
+        if session_id:
+            body["session_id"] = session_id
+
+        client = await self._get_client()
+        resp = await client.post(f"{self.base_url}/v1/invoke", json=body)
+        resp.raise_for_status()
+        data = resp.json()
+
+        return InvokeResult(
+            text=data.get("text"),
+            file=data.get("file"),
+            url=data.get("url"),
+            model_used=data.get("model_used", "unknown"),
+            provider=data.get("provider", "unknown"),
+            duration_ms=data.get("duration_ms", 0),
+            request_id=data.get("request_id", ""),
+            tokens_used=data.get("tokens_used"),
+            cost_usd=data.get("cost_usd", 0.0),
+            locality=data.get("locality", "local"),
+            words=data.get("words"),
+        )
+
+    async def chat(
+        self,
+        prompt: str,
+        *,
+        messages: Optional[List[Dict[str, Any]]] = None,
+        model: Optional[str] = None,
+        hint_next: Optional[str] = None,
+        prefer: Optional[str] = None,
+        reasoning: Optional[Dict[str, Any]] = None,
+        app_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> InvokeResult:
+        msgs = messages or [{"role": "user", "content": prompt}]
+        return await self.invoke(
+            capability="chat",
+            model=model,
+            messages=msgs,
+            hint_next=hint_next,
+            prefer=prefer,
+            reasoning=reasoning,
+            app_id=app_id,
+            session_id=session_id,
+        )
+
+    async def chat_stream(
+        self,
+        prompt: str,
+        *,
+        messages: Optional[List[Dict[str, Any]]] = None,
+        model: Optional[str] = None,
+        hint_next: Optional[str] = None,
+        prefer: Optional[str] = None,
+        reasoning: Optional[Dict[str, Any]] = None,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        body: Dict[str, Any] = {
+            "capability": "chat",
+            "messages": messages or [{"role": "user", "content": prompt}],
+        }
+        if model:
+            body["model"] = model
+        if hint_next:
+            body["hint_next"] = hint_next
+        if prefer:
+            body["prefer"] = prefer
+        if reasoning:
+            body["reasoning"] = reasoning
+
+        client = await self._get_client()
+        async with client.stream("POST", f"{self.base_url}/v1/invoke/stream", json=body) as resp:
+            resp.raise_for_status()
+            accumulated = ""
+            async for line in resp.aiter_lines():
+                if line.startswith("data: "):
+                    payload = line[6:].strip()
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(payload)
+                        delta = chunk.get("delta", "")
+                        ev_type = chunk.get("type", "output")
+                        accumulated += delta
+                        yield StreamEvent(type=ev_type, delta=delta, content=accumulated, metadata=chunk)
+                    except json.JSONDecodeError:
+                        accumulated += payload
+                        yield StreamEvent(type="output", delta=payload, content=accumulated)
+
+    async def responses(
+        self,
+        input: str,
+        *,
+        reasoning: Optional[Dict[str, Any]] = None,
+        model: Optional[str] = None,
+        prefer: Optional[str] = None,
+        stream: bool = True,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        if stream:
+            async for ev in self.chat_stream(input, model=model, prefer=prefer, reasoning=reasoning):
+                yield ev
+        else:
+            result = await self.chat(input, model=model, prefer=prefer, reasoning=reasoning)
+            yield StreamEvent(type="output", delta=result.text or "", content=result.text or "")
+
+    async def tts(
+        self,
+        text: str,
+        *,
+        voice: str = "zh-female-1",
+        model: Optional[str] = None,
+        speed: float = 1.0,
+        prefer: Optional[str] = None,
+        hint_next: Optional[str] = None,
+    ) -> InvokeResult:
+        resolved_voice = VOICE_ALIASES.get(voice, voice)
+        return await self.invoke(
+            capability="tts",
+            model=model,
+            text=text,
+            prefer=prefer,
+            hint_next=hint_next,
+            params={"voice": resolved_voice, "speed": speed},
+        )
+
+    async def asr(
+        self,
+        audio_file: str,
+        *,
+        model: Optional[str] = None,
+        language: Optional[str] = None,
+        diarize: bool = False,
+        prefer: Optional[str] = None,
+    ) -> InvokeResult:
+        params: Dict[str, Any] = {"diarize": diarize}
+        if language:
+            params["language"] = language
+        return await self.invoke(
+            capability="asr",
+            model=model,
+            input_file=audio_file,
+            prefer=prefer,
+            params=params,
+        )
+
+    async def understand(
+        self,
+        *,
+        images: Optional[List[str]] = None,
+        question: str = "",
+        detail: str = "auto",
+        model: Optional[str] = None,
+        prefer: Optional[str] = None,
+    ) -> InvokeResult:
+        image_list: List[str] = []
+        for img in (images or []):
+            img_path = Path(img)
+            if img_path.exists():
+                b64 = base64.b64encode(img_path.read_bytes()).decode("utf-8")
+                ext = img_path.suffix.lstrip(".").lower()
+                mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "gif": "gif", "webp": "webp"}.get(ext, "jpeg")
+                image_list.append(f"data:image/{mime};base64,{b64}")
+            else:
+                image_list.append(img)
+
+        text_prompt = question or "Describe and extract structured information from this image."
+        messages = [{"role": "user", "content": text_prompt, "images": image_list}]
+        return await self.invoke(
+            capability="vlm",
+            model=model,
+            messages=messages,
+            prefer=prefer,
+            params={"detail": detail},
+        )
+
+    async def image_gen(
+        self,
+        prompt: str,
+        *,
+        size: str = "1024x1024",
+        style: Optional[str] = None,
+        model: Optional[str] = None,
+        prefer: Optional[str] = None,
+    ) -> InvokeResult:
+        params: Dict[str, Any] = {"size": size}
+        if style:
+            params["style"] = style
+        return await self.invoke(
+            capability="image_gen",
+            model=model,
+            text=prompt,
+            prefer=prefer,
+            params=params,
+        )
+
+    async def video_gen(
+        self,
+        prompt: str,
+        *,
+        duration_secs: int = 10,
+        resolution: str = "720p",
+        style: Optional[str] = None,
+        model: Optional[str] = None,
+        prefer: Optional[str] = None,
+    ) -> InvokeResult:
+        params: Dict[str, Any] = {
+            "prompt": prompt,
+            "duration_secs": duration_secs,
+            "resolution": resolution,
+        }
+        if style:
+            params["style"] = style
+        return await self.invoke(
+            capability="video_gen",
+            model=model,
+            text=prompt,
+            prefer=prefer,
+            params=params,
+        )
+
+    async def embed(
+        self,
+        texts: Union[str, List[str]],
+        *,
+        model: Optional[str] = None,
+        dimensions: Optional[int] = None,
+        prefer: Optional[str] = None,
+    ) -> InvokeResult:
+        input_texts = [texts] if isinstance(texts, str) else texts
+        params: Dict[str, Any] = {"input": input_texts}
+        if dimensions:
+            params["dimensions"] = dimensions
+        return await self.invoke(
+            capability="embedding",
+            model=model,
+            prefer=prefer,
+            params=params,
+        )
+
+
+class AsyncPipeline:
+    """Asynchronous fluent pipeline builder (PRD §6.3).
+
+    Usage:
+        result = await (
+            AsyncPipeline(engine)
+            .chat("Write a script about {topic}", hint_next="tts")
+            .tts(voice="en-narrator")
+            .run(topic="Robotics")
+        )
+    """
+
+    def __init__(self, engine: Optional[AsyncMofaEngine] = None):
+        self.engine = engine or AsyncMofaEngine()
+        self.steps: List[PipelineStep] = []
+
+    def chat(
+        self,
+        prompt_template: str,
+        *,
+        hint_next: Optional[str] = None,
+        prefer: Optional[str] = None,
+        **params,
+    ) -> "AsyncPipeline":
+        self.steps.append(PipelineStep(
+            capability="chat",
+            template_or_text=prompt_template,
+            hint_next=hint_next,
+            prefer=prefer,
+            params=params,
+        ))
+        return self
+
+    def tts(
+        self,
+        *,
+        voice: str = "en-narrator",
+        prefer: Optional[str] = None,
+        **params,
+    ) -> "AsyncPipeline":
+        self.steps.append(PipelineStep(
+            capability="tts",
+            voice=voice,
+            prefer=prefer,
+            params=params,
+        ))
+        return self
+
+    def asr(
+        self,
+        *,
+        prefer: Optional[str] = None,
+        **params,
+    ) -> "AsyncPipeline":
+        self.steps.append(PipelineStep(
+            capability="asr",
+            prefer=prefer,
+            params=params,
+        ))
+        return self
+
+    def image_gen(
+        self,
+        prompt_template: Optional[str] = None,
+        *,
+        size: str = "512x512",
+        prefer: Optional[str] = None,
+        **params,
+    ) -> "AsyncPipeline":
+        p = {"size": size, **params}
+        self.steps.append(PipelineStep(
+            capability="image_gen",
+            template_or_text=prompt_template,
+            prefer=prefer,
+            params=p,
+        ))
+        return self
+
+    async def run(self, **variables) -> PipelineResult:
+        results: List[InvokeResult] = []
+        total_cost = 0.0
+        total_ms = 0
+        all_local = True
+        last_text = ""
+        last_file: Optional[str] = None
+
+        for i, step in enumerate(self.steps):
+            hint = step.hint_next
+            if not hint and (i + 1) < len(self.steps):
+                hint = self.steps[i + 1].capability
+
+            if step.capability == "chat":
+                prompt = step.template_or_text or ""
+                for k, v in variables.items():
+                    prompt = prompt.replace(f"{{{k}}}", str(v))
+                res = await self.engine.chat(
+                    prompt,
+                    hint_next=hint,
+                    prefer=step.prefer,
+                    **step.params,
+                )
+                last_text = res.text or ""
+                results.append(res)
+
+            elif step.capability == "tts":
+                text_to_speak = last_text or variables.get("text") or ""
+                res = await self.engine.tts(
+                    text_to_speak,
+                    voice=step.voice or "en-narrator",
+                    prefer=step.prefer,
+                    **step.params,
+                )
+                last_file = res.file
+                results.append(res)
+
+            elif step.capability == "asr":
+                audio_path = last_file or variables.get("audio") or ""
+                res = await self.engine.asr(
+                    audio_path,
+                    prefer=step.prefer,
+                    **step.params,
+                )
+                last_text = res.text or ""
+                results.append(res)
+
+            elif step.capability == "image_gen":
+                prompt = (step.template_or_text or "{input}").replace("{input}", last_text)
+                for k, v in variables.items():
+                    prompt = prompt.replace(f"{{{k}}}", str(v))
+                res = await self.engine.image_gen(
+                    prompt,
+                    size=step.params.get("size", "512x512"),
+                    prefer=step.prefer,
+                )
+                last_file = res.file or res.url
+                results.append(res)
+
+            total_cost += res.cost_usd
+            total_ms += res.duration_ms
+            if not res.is_local:
+                all_local = False
+
+        return PipelineResult(
+            steps=results,
+            total_cost=total_cost,
+            total_duration_ms=total_ms,
+            is_local=all_local,
+            final_artifact=last_file,
+            final_text=last_text,
+        )
+
