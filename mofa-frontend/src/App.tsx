@@ -9,6 +9,7 @@ import { CommandPalette } from './shell/CommandPalette';
 import { AnimatePresence, motion, MotionConfig } from 'framer-motion';
 import { useSettings } from './storage/useSettings';
 import { ObservabilityView } from './observability/ObservabilityView';
+import { ArtifactsGallery } from './studio/gallery/ArtifactsGallery';
 
 class ErrorBoundary extends React.Component<{children: React.ReactNode}, {hasError: boolean}> {
   constructor(props: {children: React.ReactNode}) {
@@ -42,7 +43,7 @@ class ErrorBoundary extends React.Component<{children: React.ReactNode}, {hasErr
 export default function App() {
   const { state } = useEngineConnection();
   const { settings } = useSettings();
-  const [currentView, setCurrentView] = useState<'studio' | 'observability'>('studio');
+  const [currentView, setCurrentView] = useState<'studio' | 'observability' | 'artifacts'>('studio');
 
   useEffect(() => {
     const handleNavigate = (e: any) => setCurrentView(e.detail);
@@ -60,13 +61,19 @@ export default function App() {
           className="h-screen w-full flex flex-col bg-background-primary text-text-primary relative overflow-hidden"
         >
           <TopBar currentView={currentView} />
-          {currentView === 'studio' ? (
+          {currentView === 'studio' && (
             <div className="flex-1 flex overflow-hidden max-w-[1400px] mx-auto w-full">
               <Studio />
               <MonitorSidebar />
             </div>
-          ) : (
+          )}
+          {currentView === 'observability' && (
             <ObservabilityView />
+          )}
+          {currentView === 'artifacts' && (
+            <div className="flex-1 flex overflow-hidden max-w-[1400px] mx-auto w-full">
+              <ArtifactsGallery />
+            </div>
           )}
           <HistoryDrawer />
           <CommandPalette />

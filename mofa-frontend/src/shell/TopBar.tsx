@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { Settings, History, Activity } from 'lucide-react';
+import { Settings, History, Activity, FolderOpen } from 'lucide-react';
 import { SettingsModal } from './SettingsModal';
 
 interface TopBarProps {
-  currentView?: 'studio' | 'observability';
+  currentView?: 'studio' | 'observability' | 'artifacts';
 }
 
 export function TopBar({ currentView = 'studio' }: TopBarProps) {
@@ -23,23 +23,30 @@ export function TopBar({ currentView = 'studio' }: TopBarProps) {
           <span className="font-medium text-lg tracking-tight text-text-primary">MoFA Engine</span>
         </div>
         
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
           <div className="hidden sm:flex items-center gap-1.5 px-2 py-1 rounded bg-background-hover border border-border-subtle text-[11px] font-mono text-text-dim cursor-pointer hover:text-text-secondary transition-colors" onClick={() => document.dispatchEvent(new KeyboardEvent('keydown', { metaKey: true, key: 'k' }))}>
             <span>⌘</span>
             <span>K</span>
           </div>
           <button
-            onClick={() => document.dispatchEvent(new CustomEvent('navigate', { detail: currentView === 'studio' ? 'observability' : 'studio' }))}
+            onClick={() => document.dispatchEvent(new CustomEvent('navigate', { detail: currentView === 'artifacts' ? 'studio' : 'artifacts' }))}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs transition-colors ${currentView === 'artifacts' ? 'bg-white/5 border-border-strong text-text-primary' : 'bg-background-hover border-border-subtle text-text-secondary hover:bg-white/5 hover:text-text-primary'}`}
+          >
+            <FolderOpen className="w-3.5 h-3.5" />
+            <span>Artifacts</span>
+          </button>
+          <button
+            onClick={() => document.dispatchEvent(new CustomEvent('navigate', { detail: currentView === 'observability' ? 'studio' : 'observability' }))}
             className={`flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs transition-colors ${currentView === 'observability' ? 'bg-white/5 border-border-strong text-text-primary' : 'bg-background-hover border-border-subtle text-text-secondary hover:bg-white/5 hover:text-text-primary'}`}
           >
-            <Activity className="w-4 h-4" />
+            <Activity className="w-3.5 h-3.5" />
             <span>Observability</span>
           </button>
           <button
             onClick={() => document.dispatchEvent(new CustomEvent('open-history'))}
             className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-background-hover border border-border-subtle text-xs text-text-secondary hover:bg-white/5 hover:text-text-primary transition-colors"
           >
-            <History className="w-4 h-4" />
+            <History className="w-3.5 h-3.5" />
             <span>History</span>
           </button>
           <div className="w-px h-4 bg-white/5" />
