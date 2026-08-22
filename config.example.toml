@@ -1,0 +1,316 @@
+# MoFA Engine example configuration.
+#
+# Copy to `config.toml` (current directory) or
+# `~/.config/mofa-engine/config.toml`. Any section may be omitted; defaults
+# shown below are applied. API keys support `${ENV_VAR}` substitution.
+#
+# Security-relevant environment variables (not TOML keys):
+#   MOFA_API_TOKEN          When set, every `/v1` route requires
+#                           `Authorization: Bearer <token>`. Strongly recommended
+#                           whenever `host` is not loopback.
+#   MOFA_CORS_ALLOW_ORIGINS Comma-separated origin allowlist for cross-origin
+#                           browser access to `/v1` (e.g.
+#                           "https://app.example.com"). Unset/empty = same-origin
+#                           only, which is the safe default.
+#   MOFA_LOG_FORMAT=json    Emit structured JSON logs (levels honor RUST_LOG).
+
+[listen]
+host = "127.0.0.1"   # loopback by default; remote access is opt-in
+port = 8420
+
+[memory]
+# Omit budget_mb to auto-detect (70% of system RAM).
+budget_mb = 12288
+idle_timeout_secs = 120   # unload a resident model after this many idle seconds
+
+[timeouts]
+request_secs = 240     # overall budget for one /v1/invoke, across all candidates
+queue_secs = 30        # max wait for a concurrency permit
+load_secs = 60         # max time to load/warm one model
+inference_secs = 180   # max time for one provider inference call
+discovery_secs = 8     # per-provider discovery probe
+health_secs = 5        # per-provider health probe
+
+[preflight]
+enabled = true              # master switch for predictive warming
+history_learning = true     # learn capability transition history
+speculative_warming = true  # warm models from hints/history/subscriptions
+confidence_threshold = 0.6  # min confidence (0.0-1.0) before a history prediction warms
+min_samples = 3             # min observed transitions before history is trusted
+subscription_ttl_secs = 3600
+
+[artifacts]
+# dir = "/tmp"            # where generated audio/artifacts are scanned (default: system temp)
+retention_secs = 3600     # delete engine-generated artifacts older than this; 0 disables
+
+[security]
+# Allowlist of directory roots that request `input_file` paths must fall under.
+# Empty (default) allows any local path — appropriate only on a trusted machine.
+# input_roots = ["/Users/me/mofa-workspace"]
+input_roots = []
+
+# Local Ollama (auto-discovered models). Priority is lower = preferred.
+[[providers]]
+name = "ollama"
+kind = "ollama"
+base_url = "http://127.0.0.1:11434"
+priority = 1
+cost_tier = "free"
+
+  # Ollama models are auto-discovered, so listing them is optional. Declare a
+  # model here only to annotate it — currently to give a *local* reasoning model
+  # a `reasoning_tier` (low/medium/high) so `reasoning.effort` routes to it.
+  # `name` must match the Ollama model name exactly (as `ollama list` shows it).
+  # Local reasoning tiers win over cloud ones of equal effort (local-first), so a
+  # high-effort code review can stay on-device.
+  [[providers.models]]
+  name = "deepseek-r1:8b"
+  capability = "chat"
+  reasoning_tier = "high"
+
+# Cloud OpenAI-compatible backend. Models are declared explicitly.
+[[providers]]
+name = "openai"
+kind = "openai_compatible"
+base_url = "https://api.openai.com/v1"
+api_key = "${OPENAI_API_KEY}"
+priority = 10
+cost_tier = "high"
+# Optional token pricing (USD per 1000 tokens) for cost tracking in /metrics and
+# per-response `cost_usd`. Omit or set 0 for free/local models.
+price_input_per_1k = 0.0025
+price_output_per_1k = 0.01
+
+  [[providers.models]]
+  name = "gpt-4o"
+  capability = "chat"
+  context_window = 128000
+
+  [[providers.models]]
+  name = "tts-1"
+  capability = "tts"
+
+  [[providers.models]]
+  name = "whisper-1"
+  capability = "asr"
+
+# Multi-vendor cloud gateway via the `liter-llm` crate (140+ vendors behind one
+# OpenAI-style contract). Each model `name` is a liter-llm `provider/model` id, so
+# one entry per vendor gives named + capability routing across them while MoFA keeps
+# routing, failover, and dual-track cost/token observability. Leave `api_key` empty
+# to let liter-llm read the vendor's env var (e.g. DEEPSEEK_API_KEY); set `base_url`
+# only to override the vendor default (e.g. a private gateway). Supports chat
+# (streaming) and image generation.
+[[providers]]
+name = "deepseek"
+kind = "liter_llm"
+base_url = ""            # empty → liter-llm uses the vendor default endpoint
+api_key = "${DEEPSEEK_API_KEY}"
+priority = 10
+cost_tier = "low"
+enabled = false          # opt-in: set true once the vendor key is available
+price_input_per_1k = 0.00027
+price_output_per_1k = 0.0011
+
+  # `reasoning_tier` lets `reasoning.effort` (low/medium/high) route to the
+  # matching model: a low-effort request prefers the cheap chat model, a
+  # high-effort one the stronger reasoner.
+  [[providers.models]]
+  name = "deepseek/deepseek-chat"
+  capability = "chat"
+  context_window = 65536
+  reasoning_tier = "low"
+
+  [[providers.models]]
+  name = "deepseek/deepseek-reasoner"
+  capability = "chat"
+  context_window = 65536
+  reasoning_tier = "high"
+
+# A second liter-llm entry for image generation. One entry per vendor: this key
+# authenticates its own models, and liter-llm formats each request per the model's
+# `provider/` prefix (e.g. `openai/dall-e-3` → OpenAI images API).
+# [[providers]]
+# name = "openai-images"
+# kind = "liter_llm"
+# base_url = ""
+# api_key = "${OPENAI_API_KEY}"
+# priority = 10
+# cost_tier = "high"
+#   [[providers.models]]
+#   name = "openai/dall-e-3"
+#   capability = "image_gen"
+
+# Built-in zero-config voice: when this config declares NO TTS backend, the engine
+# automatically registers the operating system's native voice (macOS `say`, Linux
+# `espeak-ng`/`espeak`) as a low-priority local fallback — so local audio scenarios
+# work with nothing installed. Any TTS backend you declare below outranks it. No
+# configuration is needed to use it; it appears as provider `system-tts`.
+
+# Local TTS process-adapter backend. Runs a local command once per synthesis and
+# returns the produced audio file. Recommended stack (S1/S6): Qwen3-TTS + Crane
+# as the primary voice, with Kokoro as a lighter fallback — configure both and
+# let priority pick Qwen3 first, failing over to Kokoro if it is unavailable.
+# Placeholders:
+#   {text}       input text passed as an argument
+#   {text_file}  path to a temp file holding the input text
+#   {output}     path the command must write audio to
+#   {voice}      voice name from params.voice (empty if unset)
+#   {speed}      speaking rate from params.speed (empty if unset)
+#   {format}     container from params.format; also sets the {output} extension
+#
+# Primary: Qwen3-TTS via a Crane wrapper CLI.
+# [[providers]]
+# name = "qwen3-tts"
+# kind = "local_tts"
+# base_url = ""
+# command = "crane-tts"    # a wrapper that runs Qwen3-TTS through Crane
+# args = ["--text-file", "{text_file}", "--out", "{output}"]
+# output_format = "wav"
+# priority = 1             # preferred over the Kokoro fallback below
+# enabled = false
+#   [[providers.models]]
+#   name = "qwen3-tts"
+#   capability = "tts"
+#   memory_mb = 2048
+#
+# Fallback: Kokoro (lighter, faster to load).
+[[providers]]
+name = "local-tts"
+kind = "local_tts"
+base_url = ""            # unused for local_tts, but the field is required
+command = "kokoro-tts"
+args = ["--text-file", "{text_file}", "--output", "{output}"]
+output_format = "wav"
+priority = 2             # fallback tier: used when the Qwen3 primary is down
+enabled = false          # opt-in: set true once the command is installed
+
+  [[providers.models]]
+  name = "kokoro"
+  capability = "tts"
+  memory_mb = 1024
+
+# Local ASR process-adapter backend. Runs a local command (a FunASR or
+# whisper.cpp-style CLI) once per transcription and returns the recognized text.
+# Enables on-device transcription of long/confidential audio (`prefer=local`).
+# Placeholders:
+#   {input}     path to the source audio file
+#   {output}    path the command must write the transcript to (omit to read stdout)
+#   {language}  language hint from params.language (default `auto`)
+[[providers]]
+name = "local-asr"
+kind = "local_asr"
+base_url = ""            # unused for local_asr, but the field is required
+command = "funasr"
+args = ["--input", "{input}", "--language", "{language}", "--output", "{output}"]
+# Appended only when a request sets params.diarize = true (S1 speaker separation);
+# placeholder-substituted like `args`. Leave unset if the CLI can't diarize.
+diarize_args = ["--diarize"]
+priority = 2
+enabled = false          # opt-in: set true once the command is installed
+
+  [[providers.models]]
+  name = "funasr"
+  capability = "asr"
+  memory_mb = 1024
+
+# Local image-generation process-adapter backend. Runs a local Stable Diffusion
+# CLI once per image and returns the produced file. Enables fully-offline scene
+# generation for the flagship S4 pipeline (`prefer=local`, cost ~= $0), failing
+# over to a cloud image backend (liter_llm) when unavailable. Placeholders:
+#   {prompt} {negative_prompt} {width} {height} {output}
+[[providers]]
+name = "local-sd"
+kind = "local_image_gen"
+base_url = ""            # unused for local_image_gen, but the field is required
+command = "sd"           # e.g. stable-diffusion.cpp's `sd`, or a wrapper script
+args = [
+  "--prompt", "{prompt}",
+  "--negative-prompt", "{negative_prompt}",
+  "--width", "{width}",
+  "--height", "{height}",
+  "--output", "{output}",
+]
+output_format = "png"
+priority = 2
+enabled = false          # opt-in: set true once the command is installed
+
+  [[providers.models]]
+  name = "sd"
+  capability = "image_gen"
+  memory_mb = 4096
+
+# Local video-generation process-adapter backend. Runs a local text-to-video CLI
+# (e.g. an AnimateDiff / Stable-Video-Diffusion or Wan-style wrapper) once per
+# clip and returns the produced file (S4). This is the on-device video path; the
+# cloud_video_gen backend below is the API path. Verify output with the quality
+# gate before presenting it as finished. Placeholders:
+#   {prompt} {negative_prompt} {width} {height} {seconds} {fps} {output}
+# [[providers]]
+# name = "local-video"
+# kind = "local_video_gen"
+# base_url = ""           # unused for local_video_gen, but the field is required
+# command = "svd"         # a text-to-video wrapper script
+# args = [
+#   "--prompt", "{prompt}",
+#   "--width", "{width}", "--height", "{height}",
+#   "--seconds", "{seconds}", "--fps", "{fps}",
+#   "--output", "{output}",
+# ]
+# output_format = "mp4"
+# priority = 2
+# enabled = false          # opt-in: set true once the command is installed
+#   [[providers.models]]
+#   name = "svd"
+#   capability = "video_gen"
+#   memory_mb = 8192
+
+# Cloud video-generation backend — the *API-level* video path (S4). Speaks the
+# Volcengine Ark / BytePlus "content generation tasks" contract that ByteDance's
+# Seedance models use: the engine submits a task, polls it to completion, then
+# downloads the finished clip as a managed artifact — all behind the same
+# `video_gen` capability as the local adapter, so routing and `prefer` work the
+# same way (this is a *cloud* backend, so `prefer = "local"` skips it).
+#
+# A `dialect` selects the vendor contract: "ark" (default) or "agnes" (the Agnes
+# AI gateway's `/videos` task API). The API key is read from this field or the
+# dialect's env var (ARK_API_KEY / AGNES_API_KEY); with no key the provider
+# registers but reports itself unavailable, so a keyless config still boots.
+# Per-request knobs go in `params`: `ratio` ("16:9"), `resolution` ("1080p"),
+# `duration`/`seconds`, `fps`, `seed`, `image_url` (for image-to-video), plus
+# `width`/`height`/`num_frames` for the Agnes dialect.
+# [[providers]]
+# name = "seedance"
+# kind = "cloud_video_gen"
+# dialect = "ark"          # or "agnes"
+# base_url = ""            # default per dialect; for Ark BytePlus (intl) use
+#                          # "https://ark.ap-southeast.bytepluses.com/api/v3"
+# api_key = "env:ARK_API_KEY"
+# cost_tier = "high"
+# priority = 3
+# enabled = false          # opt-in: set true once a key is configured
+#   [[providers.models]]
+#   name = "doubao-seedance-1-0-pro-250528"   # Ark: a Seedance model id
+#   capability = "video_gen"
+#
+# Agnes video variant (free gateway; same AGNES_API_KEY as chat/image):
+# [[providers]]
+# name = "agnes-video"
+# kind = "cloud_video_gen"
+# dialect = "agnes"
+# base_url = "https://apihub.agnes-ai.com/v1"
+# api_key = "env:AGNES_API_KEY"
+# cost_tier = "low"
+# priority = 3
+# enabled = false
+#   [[providers.models]]
+#   name = "agnes-video-v2.0"                  # or "agnes-video-2.5"
+#   capability = "video_gen"
+
+# Local embedding model via Ollama (RAG enabler, S3). Ollama auto-discovers pulled
+# models; a model whose name contains `embed` (e.g. `nomic-embed-text`,
+# `mxbai-embed-large`) is typed as an `embedding` capability automatically — just
+# `ollama pull nomic-embed-text`. Cloud embeddings work too: add an
+# `openai_compatible` or `liter_llm` model with `capability = "embedding"`
+# (e.g. `text-embedding-3-small`). Send input via `params.input` (a string or an
+# array) or the message contents; the response carries `embedding` vectors.

@@ -4,7 +4,7 @@
 //! No external dependencies — vanilla JS + CSS with glassmorphism design.
 
 /// The complete dashboard HTML page.
-pub const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
+pub(crate) const DASHBOARD_HTML: &str = r##"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -265,7 +265,9 @@ body {
 .cap-badge.chat { background: rgba(59, 130, 246, 0.15); color: var(--accent-blue); }
 .cap-badge.tts { background: rgba(139, 92, 246, 0.15); color: var(--accent-purple); }
 .cap-badge.asr { background: rgba(6, 182, 212, 0.15); color: var(--accent-cyan); }
+.cap-badge.vlm { background: rgba(59, 130, 246, 0.15); color: var(--accent-cyan); }
 .cap-badge.image_gen { background: rgba(245, 158, 11, 0.15); color: var(--accent-yellow); }
+.cap-badge.video_gen { background: rgba(239, 68, 68, 0.15); color: var(--accent-red); }
 .cap-badge.embedding { background: rgba(16, 185, 129, 0.15); color: var(--accent-green); }
 
 .model-provider {
@@ -500,6 +502,7 @@ body {
   <div class="header-meta">
     <span class="badge badge-uptime" id="uptime-badge">--</span>
     <span class="badge badge-version" id="version-badge">--</span>
+    <button class="badge" id="token-btn" onclick="setToken()" title="Set the API bearer token (required when the daemon runs with MOFA_API_TOKEN)" style="cursor:pointer;border:none;">&#128273; Token</button>
   </div>
 </div>
 
@@ -563,7 +566,9 @@ body {
           <option value="chat">Chat</option>
           <option value="tts">TTS</option>
           <option value="asr">ASR</option>
+          <option value="vlm">VLM</option>
           <option value="image_gen">Image Gen</option>
+          <option value="video_gen">Video Gen</option>
           <option value="embedding">Embedding</option>
         </select>
         <textarea id="try-input" placeholder="Type your message here..."></textarea>
@@ -605,6 +610,33 @@ body {
 <script>
 const logEntries = [];
 const MAX_LOG = 100;
+let apiToken = localStorage.getItem('mofa_token') || '';
+
+// Escape untrusted server-provided strings before interpolating them into
+// innerHTML, so a model or provider name can never inject markup or script into
+// the (unauthenticated) dashboard.
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[c]);
+}
+
+// Attach the bearer token (when set) so the dashboard works against a daemon
+// started with MOFA_API_TOKEN.
+function authFetch(url, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({}, opts.headers || {});
+  if (apiToken) opts.headers['Authorization'] = 'Bearer ' + apiToken;
+  return fetch(url, opts);
+}
+function setToken() {
+  const t = prompt('API bearer token (leave blank to clear):', apiToken);
+  if (t === null) return;
+  apiToken = t.trim();
+  if (apiToken) localStorage.setItem('mofa_token', apiToken);
+  else localStorage.removeItem('mofa_token');
+  location.reload();
+}
 
 function formatUptime(secs) {
   if (secs < 60) return secs + 's';
@@ -628,9 +660,9 @@ function statusClass(status) {
 async function refresh() {
   try {
     const [capsRes, statusRes, healthRes] = await Promise.all([
-      fetch('/v1/capabilities'),
-      fetch('/v1/status'),
-      fetch('/health'),
+      authFetch('/v1/capabilities'),
+      authFetch('/v1/status'),
+      authFetch('/health'),
     ]);
 
     const caps = await capsRes.json();
@@ -667,13 +699,13 @@ async function refresh() {
       grid.innerHTML = caps.map(m => `
         <div class="model-card" onclick='showModel(${JSON.stringify(m).replace(/'/g, "&#39;")})'>
           <div class="model-card-head">
-            <div class="model-name" title="${m.name}">${m.name}</div>
-            <div class="status-dot ${statusClass(m.status)}" title="${m.status}"></div>
+            <div class="model-name" title="${esc(m.name)}">${esc(m.name)}</div>
+            <div class="status-dot ${esc(statusClass(m.status))}" title="${esc(m.status)}"></div>
           </div>
           <div class="model-meta">
-            <span class="cap-badge ${m.capability}">${m.capability}</span>
+            <span class="cap-badge ${esc(m.capability)}">${esc(m.capability)}</span>
           </div>
-          <div class="model-provider">${m.provider} &middot; ${m.cost_tier}</div>
+          <div class="model-provider">${esc(m.provider)} &middot; ${esc(m.cost_tier)}</div>
         </div>
       `).join('');
     }
@@ -683,9 +715,9 @@ async function refresh() {
     if (status.provider_health && status.provider_health.length > 0) {
       provList.innerHTML = status.provider_health.map(p => `
         <div class="provider-item">
-          <span class="provider-name">${p.name}</span>
+          <span class="provider-name">${esc(p.name)}</span>
           <div class="provider-status">
-            <span class="circuit-label ${p.circuit_state}">${p.circuit_state}</span>
+            <span class="circuit-label ${esc(p.circuit_state)}">${esc(p.circuit_state)}</span>
             <div class="status-dot ${p.healthy ? 'hot' : 'failed'}"></div>
           </div>
         </div>
@@ -701,11 +733,11 @@ async function refresh() {
 function showModel(m) {
   document.getElementById('modal-title').textContent = m.name;
   document.getElementById('modal-body').innerHTML = `
-    <div class="modal-field"><label>ID</label><div class="val">${m.id}</div></div>
-    <div class="modal-field"><label>Provider</label><div class="val">${m.provider}</div></div>
-    <div class="modal-field"><label>Capability</label><div class="val">${m.capability}</div></div>
-    <div class="modal-field"><label>Status</label><div class="val">${m.status}</div></div>
-    <div class="modal-field"><label>Cost Tier</label><div class="val">${m.cost_tier}</div></div>
+    <div class="modal-field"><label>ID</label><div class="val">${esc(m.id)}</div></div>
+    <div class="modal-field"><label>Provider</label><div class="val">${esc(m.provider)}</div></div>
+    <div class="modal-field"><label>Capability</label><div class="val">${esc(m.capability)}</div></div>
+    <div class="modal-field"><label>Status</label><div class="val">${esc(m.status)}</div></div>
+    <div class="modal-field"><label>Cost Tier</label><div class="val">${esc(m.cost_tier)}</div></div>
     <div class="modal-field"><label>Context Window</label><div class="val">${m.context_window.toLocaleString()} tokens</div></div>
     <div class="modal-field"><label>Memory</label><div class="val">${formatBytes(m.memory_estimate_bytes)}</div></div>
   `;
@@ -735,7 +767,7 @@ async function tryInvoke() {
       capability: cap,
       messages: [{ role: 'user', content: input }],
     };
-    const res = await fetch('/v1/invoke', {
+    const res = await authFetch('/v1/invoke', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -770,16 +802,19 @@ function renderLog() {
   }
   list.innerHTML = logEntries.map(e => `
     <div class="log-entry">
-      <span class="log-time">${e.time}</span>
-      <span class="log-model">${e.model}</span>
+      <span class="log-time">${esc(e.time)}</span>
+      <span class="log-model">${esc(e.model)}</span>
       <span class="log-duration">${e.duration}ms</span>
       <span class="${e.ok ? 'log-status-ok' : 'log-status-err'}">${e.ok ? 'OK' : 'FAIL'}</span>
     </div>
   `).join('');
 }
 
-// SSE for live events
+// SSE for live events. `EventSource` cannot send an Authorization header, so
+// when a bearer token is configured the live event stream would be rejected;
+// the dashboard instead relies on the 2s polling loop below for fresh data.
 function connectSSE() {
+  if (apiToken) return;
   const es = new EventSource('/v1/events');
   es.onmessage = function(e) {
     try {

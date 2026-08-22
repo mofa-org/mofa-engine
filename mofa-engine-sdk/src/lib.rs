@@ -1,9 +1,20 @@
 //! # mofa-engine-sdk
 //!
-//! HTTP API server (Axum), SSE event streaming, and embedded dashboard
-//! for the MoFA Engine.
+//! The unified call layer for the MoFA Engine:
+//!
+//! - [`server`] — the versioned Axum HTTP API, SSE streaming, and dashboard.
+//! - [`client`] — a native Rust SDK with an embedded ([`client::EmbeddedEngine`])
+//!   and a daemon ([`client::DaemonClient`]) mode.
+//!
+//! The embedded facade is synchronous and intended as the UniFFI target for
+//! Python bindings; the daemon client speaks the same HTTP surface the server
+//! exposes.
 
-pub mod dashboard;
+pub mod client;
 pub mod server;
 
-pub use server::start_server;
+// Internal: the embedded dashboard HTML, served by `server`.
+pub(crate) mod dashboard;
+
+pub use client::{ClientError, DaemonClient, EmbeddedEngine};
+pub use server::Server;

@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::error::ErrorInfo;
+
 /// Capabilities that a model can provide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -64,6 +66,37 @@ pub enum ProviderKind {
     Ollama,
     /// Any OpenAI-compatible API.
     OpenAiCompatible,
+    /// Local process-adapter backend (e.g. an MLX/Kokoro or Piper TTS CLI).
+    LocalTts,
+    /// Local process-adapter ASR backend (e.g. a FunASR or whisper.cpp CLI).
+    LocalAsr,
+    /// Local process-adapter image-generation backend (e.g. a Stable Diffusion CLI).
+    LocalImageGen,
+    /// Local process-adapter video-generation backend (e.g. an AnimateDiff / SVD
+    /// or Wan-style CLI).
+    LocalVideoGen,
+    /// Cloud video-generation API (the Volcengine Ark / BytePlus task contract
+    /// that ByteDance's Seedance models speak): submit → poll → download.
+    CloudVideoGen,
+    /// Multi-vendor cloud gateway via the `liter-llm` crate (143+ providers,
+    /// unified OpenAI-style contract).
+    LiterLlm,
+}
+
+impl ProviderKind {
+    /// Whether this backend runs on the local machine (as opposed to a remote
+    /// API). Used by routing to prefer local models and by the memory manager
+    /// to account for on-device residency.
+    pub fn is_local(self) -> bool {
+        matches!(
+            self,
+            Self::Ollama
+                | Self::LocalTts
+                | Self::LocalAsr
+                | Self::LocalImageGen
+                | Self::LocalVideoGen
+        )
+    }
 }
 
 /// Backend health is independent from model residency.
@@ -255,6 +288,11 @@ pub struct ModelCard {
     pub context_window: u32,
     /// Estimated memory footprint in bytes.
     pub memory_estimate_bytes: u64,
+    /// Reasoning tier this model serves, when configured. Lets `reasoning.effort`
+    /// route `low | medium | high` to cheaper/stronger models (S2). `None` for
+    /// non-tiered models.
+    #[serde(default)]
+    pub reasoning_tier: Option<ReasoningEffort>,
 }
 
 impl ModelCard {
@@ -272,7 +310,7 @@ impl ModelCard {
         let execution = ExecutionState::default();
         let status = ModelStatus::from_state(availability, residency, &execution);
         Self {
-            id: canonical_model_id(&provider, &name),
+            id: ModelId::canonical(&provider, &name),
             name,
             provider,
             capability,
@@ -284,6 +322,7 @@ impl ModelCard {
             cost_tier,
             context_window: 4096,
             memory_estimate_bytes: 0,
+            reasoning_tier: None,
         }
     }
 
@@ -298,36 +337,51 @@ impl ModelCard {
     }
 }
 
-/// Build a canonical model identifier.
-pub fn canonical_model_id(provider: &str, model: &str) -> String {
-    format!("{provider}/{model}")
-}
+/// Namespace for canonical model-identifier operations.
+///
+/// Model identifiers have the canonical form `provider/model` (a legacy
+/// `provider::model` form is still accepted when parsing). Construction and
+/// parsing live here as associated functions on a zero-sized type so that all id
+/// handling has a single, discoverable home rather than scattered free functions.
+pub struct ModelId;
 
-/// Extract the provider segment from a canonical model identifier.
-/// Accepts both the canonical `provider/model` and legacy `provider::model` forms.
-pub fn model_id_provider(model_id: &str) -> Option<&str> {
-    model_id
-        .split_once('/')
-        .map(|(provider, _)| provider)
-        .or_else(|| model_id.split_once("::").map(|(provider, _)| provider))
-}
+impl ModelId {
+    /// Build a canonical `provider/model` identifier.
+    pub fn canonical(provider: &str, model: &str) -> String {
+        format!("{provider}/{model}")
+    }
 
-/// Extract the model-name segment from a canonical model identifier.
-pub fn model_id_name(model_id: &str) -> &str {
-    model_id
-        .split_once('/')
-        .map(|(_, model)| model)
-        .or_else(|| model_id.split_once("::").map(|(_, model)| model))
-        .unwrap_or(model_id)
+    /// Extract the provider segment, accepting the canonical `provider/model` and
+    /// the legacy `provider::model` forms.
+    pub fn provider(model_id: &str) -> Option<&str> {
+        model_id
+            .split_once('/')
+            .map(|(provider, _)| provider)
+            .or_else(|| model_id.split_once("::").map(|(provider, _)| provider))
+    }
+
+    /// Extract the model-name segment, falling back to the whole id when it
+    /// carries no provider prefix.
+    pub fn name(model_id: &str) -> &str {
+        model_id
+            .split_once('/')
+            .map(|(_, model)| model)
+            .or_else(|| model_id.split_once("::").map(|(_, model)| model))
+            .unwrap_or(model_id)
+    }
 }
 
 /// A single message in a conversation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Message {
     /// Role: "system", "user", "assistant".
     pub role: String,
-    /// Message content.
+    /// Message text content.
     pub content: String,
+    /// Image references for multimodal (VLM) requests — HTTP(S) URLs, `data:`
+    /// URLs, or local file paths. Empty for text-only messages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
 }
 
 /// Named-model fallback behavior.
@@ -341,6 +395,86 @@ pub enum FallbackPolicy {
     Disabled,
     /// Allow fallback even for named requests.
     AllowNamed,
+}
+
+/// Backend-locality preference for routing (privacy / data-residency guardrail).
+///
+/// Matches the PRD `prefer` request field: `auto | local | cloud`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Prefer {
+    /// Default seven-dimensional scoring: local models are preferred but a cloud
+    /// model can be selected or used as a fallback.
+    #[default]
+    Auto,
+    /// Hard constraint: only local models may serve the request. If none can, the
+    /// request fails rather than leaving the device (fail-not-fallback).
+    #[serde(alias = "local_only")]
+    Local,
+    /// Hard constraint: only cloud models may serve the request.
+    Cloud,
+}
+
+/// Extended-thinking effort for reasoning-capable models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    /// Minimal deliberation — cheapest, routes to the lightest tier.
+    Low,
+    /// Balanced deliberation (default).
+    #[default]
+    Medium,
+    /// Maximum deliberation — routes to the strongest reasoning tier.
+    High,
+}
+
+impl ReasoningEffort {
+    /// Parse a loose config/string value (`low`/`medium`/`high`, any case).
+    pub fn from_str_loose(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "low" => Some(Self::Low),
+            "medium" | "med" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
+}
+
+/// Data-sensitivity classification for a request (S5 privacy moat).
+///
+/// `Confidential` is a hard data-residency constraint: the request is pinned to
+/// local backends regardless of `prefer`, and fails rather than sending sensitive
+/// data to the cloud. Every request's effective locality is written to the audit
+/// log so data flow is traceable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DataClass {
+    /// No residency constraint (default).
+    #[default]
+    Public,
+    /// Organization-internal; no hard constraint, but audited.
+    Internal,
+    /// Sensitive: must never leave the device (implies local-only routing).
+    Confidential,
+}
+
+impl DataClass {
+    /// Whether this class forbids sending the request to a cloud backend.
+    pub fn requires_local(self) -> bool {
+        matches!(self, Self::Confidential)
+    }
+}
+
+/// Deep-thinking controls for a request (S2 Code/PR Review).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Reasoning {
+    /// How much thinking effort to spend; also used for tier routing.
+    #[serde(default)]
+    pub effort: ReasoningEffort,
+    /// Whether the thought chain should be surfaced (streamed as `reasoning`
+    /// increments and returned) rather than stripped from the output.
+    #[serde(default)]
+    pub include: bool,
 }
 
 /// A request to the engine for inference.
@@ -357,6 +491,28 @@ pub struct InferenceRequest {
     /// Named fallback policy.
     #[serde(default)]
     pub fallback_policy: FallbackPolicy,
+    /// Backend-locality preference / privacy guardrail (`auto | local | cloud`).
+    #[serde(default, alias = "locality")]
+    pub prefer: Prefer,
+    /// Data-sensitivity class. `confidential` pins the request to local backends
+    /// regardless of `prefer` (privacy moat).
+    #[serde(default)]
+    pub data_class: DataClass,
+    /// Deep-thinking controls (effort tier + thought-chain visibility). `None`
+    /// keeps standard behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<Reasoning>,
+    /// Per-request spend ceiling in USD. A candidate whose *estimated* cost
+    /// exceeds this is skipped during candidate selection (and recorded in
+    /// `failed_chain`), so spend stays bounded and cheaper/local models win. Free
+    /// and local models estimate to `$0` and are always affordable; `0.0`
+    /// therefore means "free/local only". `None` = no ceiling.
+    ///
+    /// This is a **soft** ceiling: it is enforced against a pre-flight token
+    /// *estimate*, so a model that generates more than estimated can still exceed
+    /// it. To bound actual spend, also cap generation via `params.max_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cost_usd: Option<f64>,
     /// Conversation messages.
     #[serde(default)]
     pub messages: Vec<Message>,
@@ -368,21 +524,93 @@ pub struct InferenceRequest {
     /// Hint about what capability will be needed next.
     pub hint_next: Option<String>,
     /// Unique request identifier.
-    #[serde(default = "generate_request_id")]
+    #[serde(default = "InferenceRequest::generate_request_id")]
     pub request_id: String,
 }
 
-fn generate_request_id() -> String {
-    Uuid::new_v4().to_string()
+impl Default for InferenceRequest {
+    fn default() -> Self {
+        Self {
+            capability: None,
+            model: None,
+            app_id: None,
+            session_id: None,
+            fallback_policy: FallbackPolicy::default(),
+            prefer: Prefer::default(),
+            data_class: DataClass::default(),
+            reasoning: None,
+            max_cost_usd: None,
+            messages: Vec::new(),
+            input_file: None,
+            params: serde_json::Value::Null,
+            hint_next: None,
+            request_id: Self::generate_request_id(),
+        }
+    }
+}
+
+impl InferenceRequest {
+    /// Generate a fresh unique request identifier. Also the serde default for
+    /// `request_id`, so a deserialized request without one still gets a unique id.
+    fn generate_request_id() -> String {
+        Uuid::new_v4().to_string()
+    }
+}
+
+/// A turn in the stateful Responses API (S2 multi-turn deep reasoning).
+///
+/// The engine stores each turn's full message history keyed by the returned
+/// [`ResponsesResponse::id`], so a caller continues a conversation by passing
+/// that id as `previous_response_id` on the next turn instead of resending the
+/// whole history. All routing knobs (capability, model, `prefer`, `reasoning`,
+/// `params`, …) come from the flattened [`InferenceRequest`], so a Responses
+/// turn routes exactly like a one-shot `invoke`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResponsesRequest {
+    /// Continue the conversation stored under this prior response id. `None`
+    /// starts a new conversation. An unknown id is a (non-retryable) error rather
+    /// than a silent fresh start, so a caller notices an expired/evicted chain.
+    #[serde(default)]
+    pub previous_response_id: Option<String>,
+    /// System instructions, applied only when *starting* a new conversation
+    /// (ignored when continuing, since the stored history already carries them).
+    #[serde(default)]
+    pub instructions: Option<String>,
+    /// Convenience shorthand for a single new user message this turn. Appended
+    /// after any explicit `messages`.
+    #[serde(default)]
+    pub input: Option<String>,
+    /// Routing knobs and any explicit `messages` for this turn, flattened so a
+    /// Responses request is a superset of an [`InferenceRequest`] on the wire.
+    #[serde(flatten)]
+    pub request: InferenceRequest,
+}
+
+/// Result of a [`ResponsesRequest`] turn.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResponsesResponse {
+    /// Id of *this* response. Pass it as `previous_response_id` to continue the
+    /// conversation from here.
+    pub id: String,
+    /// Total messages now stored in the conversation (including this turn's reply).
+    pub message_count: usize,
+    /// The underlying inference result (text, tokens, cost, provider, routing),
+    /// flattened so a Responses reply is a superset of an [`InferenceResponse`].
+    #[serde(flatten)]
+    pub response: InferenceResponse,
 }
 
 /// Response from an inference call.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InferenceResponse {
     /// Text output (for chat, ASR, etc.).
     pub text: Option<String>,
-    /// File output path (for TTS, image gen, etc.).
+    /// File output path (for TTS, image gen, video gen, etc.).
     pub file: Option<String>,
+    /// Embedding vectors (for the `embedding` capability): one row per input, in
+    /// input order. `None` for non-embedding responses so the field is omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<Vec<Vec<f32>>>,
     /// Which model actually handled the request.
     pub model_used: String,
     /// Which provider served it.
@@ -391,14 +619,106 @@ pub struct InferenceResponse {
     pub duration_ms: u64,
     /// Request correlation ID.
     pub request_id: String,
-    /// Token usage, if reported by provider.
+    /// Total token usage, if reported by provider.
     pub tokens_used: Option<u32>,
+    /// Prompt/input tokens, if reported by provider.
+    #[serde(default)]
+    pub prompt_tokens: Option<u32>,
+    /// Completion/output tokens, if reported by provider.
+    #[serde(default)]
+    pub completion_tokens: Option<u32>,
+    /// Estimated cost in USD, if a price is configured for the serving provider.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
     /// Whether the response came from a fallback candidate.
     #[serde(default)]
     pub fallback_used: bool,
     /// Machine-readable routing reason.
     pub routing_reason: Option<String>,
 }
+
+/// A single event in a streaming inference response.
+///
+/// The streaming interface is versioned and can operate in a *non-streaming
+/// compatibility mode*: a backend that cannot emit incremental tokens sends
+/// `Started`, one `Text` chunk carrying the full output, then `Completed`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StreamChunk {
+    /// Emitted once before any content; identifies the serving model.
+    Started {
+        /// Request correlation ID.
+        request_id: String,
+        /// Model actually serving the request.
+        model_used: String,
+        /// Provider serving the request.
+        provider: String,
+    },
+    /// An incremental piece of text output.
+    Text {
+        /// Text delta appended to the output so far.
+        delta: String,
+    },
+    /// An incremental piece of the model's thought chain (reasoning-capable
+    /// models). Kept distinct from `Text` so callers can display or audit the
+    /// thought chain separately from the final answer (S2).
+    Reasoning {
+        /// Thought-chain delta.
+        delta: String,
+    },
+    /// Terminal success event with aggregate metadata and any file output.
+    Completed {
+        /// Wall-clock duration in milliseconds.
+        duration_ms: u64,
+        /// Total token usage, if reported.
+        tokens_used: Option<u32>,
+        /// Prompt/input tokens, if reported.
+        #[serde(default)]
+        prompt_tokens: Option<u32>,
+        /// Completion/output tokens, if reported.
+        #[serde(default)]
+        completion_tokens: Option<u32>,
+        /// Estimated cost in USD, if a price is configured for the provider.
+        #[serde(default)]
+        cost_usd: Option<f64>,
+        /// File output path (for TTS, image gen, etc.).
+        file: Option<String>,
+        /// Whether a fallback candidate served the request.
+        fallback_used: bool,
+        /// Machine-readable routing reason.
+        routing_reason: Option<String>,
+    },
+    /// Terminal error event.
+    Error(ErrorInfo),
+}
+
+/// One incremental delta a provider pushes while streaming: either final-answer
+/// text or a piece of the model's thought chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamDelta {
+    /// A piece of the final answer.
+    Text(String),
+    /// A piece of the thought chain (reasoning-capable models).
+    Reasoning(String),
+}
+
+impl StreamDelta {
+    /// Borrow the delta text regardless of kind.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Text(s) | Self::Reasoning(s) => s,
+        }
+    }
+}
+
+/// Channel a provider uses to emit incremental deltas while streaming.
+///
+/// The engine owns the surrounding envelope (`Started`/`Completed`/`Error`);
+/// providers push [`StreamDelta`] items here and return the final aggregate
+/// response. `Text` deltas become `StreamChunk::Text`, `Reasoning` deltas become
+/// `StreamChunk::Reasoning`.
+pub type StreamSink = tokio::sync::mpsc::Sender<StreamDelta>;
 
 /// Result of a lifecycle operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -475,6 +795,27 @@ pub enum EngineEvent {
         used_bytes: u64,
         /// Total budget bytes.
         total_bytes: u64,
+    },
+    /// A model was evicted from local memory.
+    ModelEvicted {
+        /// Model identifier.
+        model_id: String,
+        /// Why it was evicted, e.g. `memory_pressure` or `idle_timeout`.
+        reason: String,
+    },
+    /// Predictive (Preflight) warming started for a model.
+    PreflightWarmStarted {
+        /// Model identifier being warmed.
+        model_id: String,
+        /// What triggered the warm: `hint`, `subscription`, or `history`.
+        source: String,
+    },
+    /// Predictive (Preflight) warming finished.
+    PreflightWarmCompleted {
+        /// Model identifier that was warmed.
+        model_id: String,
+        /// Whether the warm succeeded.
+        success: bool,
     },
     /// Provider health changed.
     ProviderHealthChanged {
@@ -566,9 +907,9 @@ mod tests {
 
     #[test]
     fn canonical_id_uses_slash() {
-        assert_eq!(canonical_model_id("ollama", "qwen"), "ollama/qwen");
-        assert_eq!(model_id_name("ollama/qwen"), "qwen");
-        assert_eq!(model_id_name("ollama::qwen"), "qwen");
+        assert_eq!(ModelId::canonical("ollama", "qwen"), "ollama/qwen");
+        assert_eq!(ModelId::name("ollama/qwen"), "qwen");
+        assert_eq!(ModelId::name("ollama::qwen"), "qwen");
     }
 
     #[test]
@@ -596,5 +937,60 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("model_status_changed"));
+    }
+
+    #[test]
+    fn message_images_are_backward_compatible() {
+        // A legacy text-only message (no `images`) still deserializes, and a
+        // text-only message serializes without an `images` field.
+        let m: Message = serde_json::from_str(r#"{"role":"user","content":"hi"}"#).unwrap();
+        assert!(m.images.is_empty());
+        assert!(!serde_json::to_string(&m).unwrap().contains("images"));
+
+        // A multimodal message round-trips its image references.
+        let mm: Message = serde_json::from_str(
+            r#"{"role":"user","content":"what is this?","images":["https://x/a.png"]}"#,
+        )
+        .unwrap();
+        assert_eq!(mm.images, vec!["https://x/a.png"]);
+    }
+
+    #[test]
+    fn prefer_and_reasoning_deserialize_from_contract() {
+        // PRD wire contract: `prefer: local` + `reasoning: { effort: high }`.
+        let req: InferenceRequest = serde_json::from_str(
+            r#"{"prefer":"local","reasoning":{"effort":"high","include":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(req.prefer, Prefer::Local);
+        let r = req.reasoning.unwrap();
+        assert_eq!(r.effort, ReasoningEffort::High);
+        assert!(r.include);
+        // Legacy alias still accepted.
+        let legacy: InferenceRequest =
+            serde_json::from_str(r#"{"locality":"local_only"}"#).unwrap();
+        assert_eq!(legacy.prefer, Prefer::Local);
+    }
+
+    #[test]
+    fn data_class_defaults_public_and_confidential_requires_local() {
+        let default: InferenceRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(default.data_class, DataClass::Public);
+        assert!(!default.data_class.requires_local());
+
+        let sensitive: InferenceRequest =
+            serde_json::from_str(r#"{"data_class":"confidential"}"#).unwrap();
+        assert_eq!(sensitive.data_class, DataClass::Confidential);
+        assert!(sensitive.data_class.requires_local());
+    }
+
+    #[test]
+    fn reasoning_stream_chunk_has_distinct_tag() {
+        let chunk = StreamChunk::Reasoning {
+            delta: "thinking".into(),
+        };
+        let json = serde_json::to_string(&chunk).unwrap();
+        assert!(json.contains(r#""type":"reasoning""#));
+        assert!(json.contains(r#""delta":"thinking""#));
     }
 }

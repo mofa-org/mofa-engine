@@ -1,0 +1,14 @@
+[package]
+name = "mofa-explainer"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Real app: turn a topic into a narrated, subtitled explainer video (.mp4) via the MoFA engine"
+
+[dependencies]
+mofa-engine-core = { workspace = true }
+mofa-kernel = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+dirs = { workspace = true }

@@ -8,6 +8,6 @@ pub mod error;
 pub mod traits;
 pub mod types;
 
-pub use error::{EngineError, ErrorCode, ErrorInfo};
+pub use error::{EngineError, ErrorCode, ErrorInfo, FailedAttempt};
 pub use traits::Provider;
 pub use types::*;
