@@ -1,11 +1,13 @@
-//! Cloud video-generation backend (Seedance / Volcengine Ark contract).
+//! Cloud video-generation backend (task-based APIs; see [`VideoDialect`]).
 //!
 //! This is the *API-level* video path the local process-adapter
 //! ([`LocalVideoGenProvider`](super::local_video_gen)) could not offer: a real
-//! text-to-video (and image-to-video) model reached over HTTP. It targets the
-//! Volcengine Ark / BytePlus "content generation tasks" contract, which is what
-//! ByteDance's **Seedance** models speak, so a scenario can render a genuine
-//! clip from a prompt without any local generator installed.
+//! text-to-video (and image-to-video) model reached over HTTP. Two vendor
+//! dialects are supported behind one backend: **Ark** (the Volcengine Ark /
+//! BytePlus "content generation tasks" contract that ByteDance's **Seedance**
+//! models speak) and **Agnes** (the Agnes AI gateway's `/videos` task API). So a
+//! scenario can render a genuine clip from a prompt without any local generator
+//! installed.
 //!
 //! ## Why this is a distinct backend
 //!
@@ -57,9 +59,9 @@ use crate::config::ModelDef;
 
 /// Default Ark endpoint (Volcengine, China). Operators pointing at BytePlus
 /// (international) or a private gateway override this via `base_url`.
-const DEFAULT_BASE_URL: &str = "https://ark.cn-beijing.volces.com/api/v3";
-/// Environment variable liter-llm-style key resolution falls back to.
-const API_KEY_ENV: &str = "ARK_API_KEY";
+const DEFAULT_ARK_BASE_URL: &str = "https://ark.cn-beijing.volces.com/api/v3";
+/// Default Agnes AI gateway endpoint.
+const DEFAULT_AGNES_BASE_URL: &str = "https://apihub.agnes-ai.com/v1";
 /// How often to poll a running task when the request does not say otherwise.
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// Upper bound on poll attempts. Generation is slow but not unbounded; the engine
@@ -67,10 +69,50 @@ const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// loop. This cap is a backstop so a stuck task cannot poll forever.
 const MAX_POLL_ATTEMPTS: u32 = 200;
 
-/// A provider that renders video through the Ark / Seedance task API.
+/// Which vendor's task-based video API this provider speaks. Both share the
+/// submit → poll → download shape but differ in endpoint paths, request body, and
+/// where the finished URL sits in the poll response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VideoDialect {
+    /// Volcengine Ark / BytePlus (ByteDance Seedance): `/contents/generations/tasks`,
+    /// prompt carried as a `content` array, URL at `content.video_url`.
+    Ark,
+    /// Agnes AI gateway: `/videos`, flat `{prompt,width,height,num_frames,frame_rate}`
+    /// body, URL at `metadata.url`.
+    Agnes,
+}
+
+impl VideoDialect {
+    /// Parse the config `dialect` string; unknown/empty defaults to [`Ark`].
+    fn from_str_loose(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "agnes" => Self::Agnes,
+            _ => Self::Ark,
+        }
+    }
+
+    /// The environment variable this dialect resolves a missing key from.
+    fn api_key_env(self) -> &'static str {
+        match self {
+            Self::Ark => "ARK_API_KEY",
+            Self::Agnes => "AGNES_API_KEY",
+        }
+    }
+
+    fn default_base_url(self) -> &'static str {
+        match self {
+            Self::Ark => DEFAULT_ARK_BASE_URL,
+            Self::Agnes => DEFAULT_AGNES_BASE_URL,
+        }
+    }
+}
+
+/// A provider that renders video through a task-based cloud API (see [`VideoDialect`]).
 pub(crate) struct CloudVideoGenProvider {
     /// Display name.
     name: String,
+    /// Which vendor dialect to speak.
+    dialect: VideoDialect,
     /// API root, e.g. `https://ark.cn-beijing.volces.com/api/v3`.
     base_url: String,
     /// Bearer token. Empty means "no credentials" → the provider reports itself
@@ -99,13 +141,15 @@ enum TaskState {
 }
 
 impl CloudVideoGenProvider {
-    /// Build a cloud video provider.
+    /// Build a cloud video provider for the given `dialect` (`"ark"` or `"agnes"`).
     ///
-    /// An empty `api_key` falls back to the [`API_KEY_ENV`] environment variable;
-    /// if that too is empty the provider is constructed but stays unavailable, so
-    /// a config that lists it without a key does not break engine startup.
+    /// An empty `api_key` falls back to the dialect's environment variable
+    /// ([`VideoDialect::api_key_env`]); if that too is empty the provider is
+    /// constructed but stays unavailable, so a config that lists it without a key
+    /// does not break engine startup.
     pub(crate) fn new(
         name: impl Into<String>,
+        dialect: &str,
         base_url: impl Into<String>,
         api_key: Option<String>,
         models: Vec<ModelDef>,
@@ -113,24 +157,26 @@ impl CloudVideoGenProvider {
         output_dir: Option<String>,
     ) -> Result<Self, EngineError> {
         let name = name.into();
+        let dialect = VideoDialect::from_str_loose(dialect);
         let base_url = {
             let b = base_url.into();
             if b.is_empty() {
-                DEFAULT_BASE_URL.to_string()
+                dialect.default_base_url().to_string()
             } else {
-                // Tolerate a trailing slash so `{base}/contents/...` never doubles it.
+                // Tolerate a trailing slash so `{base}/…` never doubles it.
                 b.trim_end_matches('/').to_string()
             }
         };
 
+        let key_env = dialect.api_key_env();
         let api_key = api_key
             .filter(|k| !k.is_empty())
-            .or_else(|| std::env::var(API_KEY_ENV).ok())
+            .or_else(|| std::env::var(key_env).ok())
             .unwrap_or_default();
         if api_key.is_empty() {
             tracing::warn!(
                 provider = %name,
-                "cloud video provider has no {API_KEY_ENV}; marked unavailable"
+                "cloud video provider has no {key_env}; marked unavailable"
             );
         }
 
@@ -147,6 +193,7 @@ impl CloudVideoGenProvider {
 
         Ok(Self {
             name,
+            dialect,
             base_url,
             api_key,
             models,
@@ -214,9 +261,52 @@ impl CloudVideoGenProvider {
         suffix
     }
 
-    /// Build the JSON task body. Adds an `image_url` content item when
-    /// `params.image_url` is set, selecting image-to-video.
+    /// Pixel dimensions for the Agnes body: an explicit `width`/`height`, a
+    /// `size` string (`"WxH"`), or a 3:2 720p-ish default the gateway will snap
+    /// to its nearest preset.
+    fn dimensions(params: &serde_json::Value) -> (u32, u32) {
+        if let (Some(w), Some(h)) = (
+            Self::positive_u32(params, "width"),
+            Self::positive_u32(params, "height"),
+        ) {
+            return (w, h);
+        }
+        if let Some((w, h)) = params
+            .get("size")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.split_once(['x', 'X']))
+            .and_then(|(w, h)| Some((w.trim().parse().ok()?, h.trim().parse().ok()?)))
+        {
+            return (w, h);
+        }
+        (1152, 768)
+    }
+
+    /// Read a strictly-positive `u32` from a params key, or `None`.
+    fn positive_u32(params: &serde_json::Value, key: &str) -> Option<u32> {
+        params
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .filter(|v| *v > 0)
+            .map(|v| v as u32)
+    }
+
+    /// Build the JSON task body for the given [`VideoDialect`].
     fn build_task_body(
+        dialect: VideoDialect,
+        model_name: &str,
+        prompt: &str,
+        params: &serde_json::Value,
+    ) -> serde_json::Value {
+        match dialect {
+            VideoDialect::Ark => Self::build_ark_body(model_name, prompt, params),
+            VideoDialect::Agnes => Self::build_agnes_body(model_name, prompt, params),
+        }
+    }
+
+    /// Ark/Seedance body: prompt (plus generation knobs as text-command suffixes)
+    /// carried in a `content` array. Adds an `image_url` item for image-to-video.
+    fn build_ark_body(
         model_name: &str,
         prompt: &str,
         params: &serde_json::Value,
@@ -232,6 +322,39 @@ impl CloudVideoGenProvider {
             }));
         }
         serde_json::json!({ "model": model_name, "content": content })
+    }
+
+    /// Agnes body: a flat object with explicit pixel dimensions and frame count.
+    /// The familiar `ratio`/`resolution`/`duration` knobs are translated into
+    /// `width`/`height`/`num_frames` (Agnes snaps to its nearest size preset).
+    fn build_agnes_body(
+        model_name: &str,
+        prompt: &str,
+        params: &serde_json::Value,
+    ) -> serde_json::Value {
+        let (width, height) = Self::dimensions(params);
+        let frame_rate = Self::positive_u32(params, "fps")
+            .or_else(|| Self::positive_u32(params, "frame_rate"))
+            .unwrap_or(24);
+        // Prefer an explicit num_frames; otherwise derive from duration × fps (+1,
+        // since generators count an inclusive final frame). Default ~5s.
+        let num_frames = Self::positive_u32(params, "num_frames").unwrap_or_else(|| {
+            let seconds = params
+                .get("duration")
+                .or_else(|| params.get("seconds"))
+                .and_then(serde_json::Value::as_u64)
+                .filter(|s| *s > 0)
+                .unwrap_or(5) as u32;
+            seconds * frame_rate + 1
+        });
+        serde_json::json!({
+            "model": model_name,
+            "prompt": prompt,
+            "width": width,
+            "height": height,
+            "num_frames": num_frames,
+            "frame_rate": frame_rate,
+        })
     }
 
     /// Extract the task id from a submit response.
@@ -255,23 +378,25 @@ impl CloudVideoGenProvider {
             .unwrap_or("")
             .to_ascii_lowercase();
         match status.as_str() {
-            "succeeded" | "success" | "done" => {
-                // The video URL nests under `content.video_url` in the Ark contract;
-                // accept a top-level `video_url` too for forward-compatibility.
+            "succeeded" | "success" | "done" | "completed" => {
+                // The finished URL sits at `content.video_url` (Ark), a top-level
+                // `video_url`, or `metadata.url` (Agnes) — accept any of them.
                 let url = body
                     .get("content")
                     .and_then(|c| c.get("video_url"))
                     .or_else(|| body.get("video_url"))
+                    .or_else(|| body.get("metadata").and_then(|m| m.get("url")))
                     .and_then(|v| v.as_str());
                 match url {
                     Some(u) if !u.is_empty() => TaskState::Succeeded(u.to_string()),
-                    _ => TaskState::Failed("task succeeded but returned no video_url".into()),
+                    _ => TaskState::Failed("task succeeded but returned no video URL".into()),
                 }
             }
             "failed" | "error" | "cancelled" | "canceled" => {
                 let reason = body
                     .get("error")
                     .and_then(|e| e.get("message"))
+                    .or_else(|| body.get("metadata").and_then(|m| m.get("message")))
                     .and_then(|v| v.as_str())
                     .unwrap_or("task failed without a reason");
                 TaskState::Failed(reason.to_string())
@@ -284,8 +409,16 @@ impl CloudVideoGenProvider {
     // HTTP orchestration (submit → poll → download)
     // ==========================================================================
 
+    /// Endpoint paths differ per dialect (Ark nests under `contents/generations`).
+    fn tasks_path(&self) -> &'static str {
+        match self.dialect {
+            VideoDialect::Ark => "contents/generations/tasks",
+            VideoDialect::Agnes => "videos",
+        }
+    }
+
     async fn submit_task(&self, body: &serde_json::Value) -> Result<String, EngineError> {
-        let url = format!("{}/contents/generations/tasks", self.base_url);
+        let url = format!("{}/{}", self.base_url, self.tasks_path());
         let resp = self
             .client
             .post(&url)
@@ -299,7 +432,7 @@ impl CloudVideoGenProvider {
     }
 
     async fn poll_task(&self, task_id: &str) -> Result<serde_json::Value, EngineError> {
-        let url = format!("{}/contents/generations/tasks/{task_id}", self.base_url);
+        let url = format!("{}/{}/{task_id}", self.base_url, self.tasks_path());
         let resp = self
             .client
             .get(&url)
@@ -368,7 +501,10 @@ impl CloudVideoGenProvider {
         start: Instant,
     ) -> Result<InferenceResponse, EngineError> {
         if !self.is_available() {
-            return Err(self.provider_error(format!("no {API_KEY_ENV} credentials configured")));
+            return Err(self.provider_error(format!(
+                "no {} credentials configured",
+                self.dialect.api_key_env()
+            )));
         }
 
         let prompt = request
@@ -385,7 +521,7 @@ impl CloudVideoGenProvider {
             .filter(|t| !t.trim().is_empty())
             .ok_or_else(|| EngineError::InvalidRequest("video_gen requires a prompt".into()))?;
 
-        let body = Self::build_task_body(model_name, &prompt, &request.params);
+        let body = Self::build_task_body(self.dialect, model_name, &prompt, &request.params);
         let task_id = self.submit_task(&body).await?;
         tracing::info!(provider = %self.name, %task_id, "submitted video generation task");
 
@@ -550,6 +686,7 @@ mod tests {
     fn provider(api_key: Option<String>) -> CloudVideoGenProvider {
         CloudVideoGenProvider::new(
             "ark",
+            "ark",
             "",
             api_key,
             video_models(),
@@ -573,17 +710,32 @@ mod tests {
     }
 
     #[test]
-    fn empty_base_url_defaults_to_ark_endpoint() {
-        let p = provider(Some("k".into()));
-        assert_eq!(p.base_url, DEFAULT_BASE_URL);
-        assert_eq!(p.kind(), ProviderKind::CloudVideoGen);
+    fn empty_base_url_defaults_per_dialect() {
+        let ark = provider(Some("k".into()));
+        assert_eq!(ark.base_url, DEFAULT_ARK_BASE_URL);
+        assert_eq!(ark.dialect, VideoDialect::Ark);
+        assert_eq!(ark.kind(), ProviderKind::CloudVideoGen);
         // Cloud: not counted as a local backend for routing/memory.
-        assert!(!p.kind().is_local());
+        assert!(!ark.kind().is_local());
+
+        let agnes = CloudVideoGenProvider::new(
+            "agnes-video",
+            "agnes",
+            "",
+            Some("k".into()),
+            video_models(),
+            CostTier::Low,
+            None,
+        )
+        .unwrap();
+        assert_eq!(agnes.base_url, DEFAULT_AGNES_BASE_URL);
+        assert_eq!(agnes.dialect, VideoDialect::Agnes);
     }
 
     #[test]
     fn trailing_slash_in_base_url_is_trimmed() {
         let p = CloudVideoGenProvider::new(
+            "ark",
             "ark",
             "https://example.com/api/v3/",
             Some("k".into()),
@@ -621,8 +773,9 @@ mod tests {
     }
 
     #[test]
-    fn build_task_body_text_only() {
+    fn ark_body_text_only() {
         let body = CloudVideoGenProvider::build_task_body(
+            VideoDialect::Ark,
             "seedance-1-0-pro",
             "a rocket launch",
             &serde_json::json!({ "ratio": "16:9" }),
@@ -635,8 +788,9 @@ mod tests {
     }
 
     #[test]
-    fn build_task_body_image_to_video_appends_image_item() {
+    fn ark_body_image_to_video_appends_image_item() {
         let body = CloudVideoGenProvider::build_task_body(
+            VideoDialect::Ark,
             "seedance-1-0-pro",
             "make it move",
             &serde_json::json!({ "image_url": "https://img/x.png" }),
@@ -645,6 +799,34 @@ mod tests {
         assert_eq!(content.len(), 2);
         assert_eq!(content[1]["type"], "image_url");
         assert_eq!(content[1]["image_url"]["url"], "https://img/x.png");
+    }
+
+    #[test]
+    fn agnes_body_is_flat_with_derived_frames() {
+        // duration 5 × fps 24 (+1) = 121 frames; explicit width/height pass through.
+        let body = CloudVideoGenProvider::build_task_body(
+            VideoDialect::Agnes,
+            "agnes-video-v2.0",
+            "a paper boat",
+            &serde_json::json!({ "width": 1152, "height": 768, "duration": 5, "fps": 24 }),
+        );
+        assert_eq!(body["model"], "agnes-video-v2.0");
+        assert_eq!(body["prompt"], "a paper boat");
+        assert_eq!(body["width"], 1152);
+        assert_eq!(body["height"], 768);
+        assert_eq!(body["frame_rate"], 24);
+        assert_eq!(body["num_frames"], 121);
+        // Defaults when nothing is specified.
+        let d = CloudVideoGenProvider::build_task_body(
+            VideoDialect::Agnes,
+            "agnes-video-v2.0",
+            "x",
+            &serde_json::Value::Null,
+        );
+        assert_eq!(d["width"], 1152);
+        assert_eq!(d["height"], 768);
+        assert_eq!(d["frame_rate"], 24);
+        assert_eq!(d["num_frames"], 121);
     }
 
     #[test]
@@ -690,12 +872,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_task_state_agnes_shape() {
+        // Agnes: `completed` status, URL nested under `metadata.url`.
+        assert_eq!(
+            CloudVideoGenProvider::parse_task_state(&serde_json::json!({
+                "status": "completed",
+                "metadata": { "url": "https://out/clip.mp4" }
+            })),
+            TaskState::Succeeded("https://out/clip.mp4".into())
+        );
+        // Agnes progress states keep polling.
+        assert_eq!(
+            CloudVideoGenProvider::parse_task_state(
+                &serde_json::json!({ "status": "in_progress", "progress": 30 })
+            ),
+            TaskState::Pending
+        );
+    }
+
     #[tokio::test]
     async fn keyless_provider_is_unavailable_and_refuses_to_generate() {
         // Ensure the env fallback can't accidentally make this available.
         // SAFETY: single-threaded test; no other thread reads the env concurrently.
         unsafe {
-            std::env::remove_var(API_KEY_ENV);
+            std::env::remove_var("ARK_API_KEY");
         }
         let p = provider(None);
         assert!(!p.is_available());

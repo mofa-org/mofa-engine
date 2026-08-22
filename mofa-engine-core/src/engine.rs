@@ -315,6 +315,7 @@ impl Engine {
                 }
                 ProviderKind::CloudVideoGen => Arc::new(CloudVideoGenProvider::new(
                     &pc.name,
+                    &pc.dialect,
                     &pc.base_url,
                     pc.api_key.clone(),
                     pc.models.clone(),

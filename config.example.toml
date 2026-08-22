@@ -272,22 +272,39 @@ enabled = false          # opt-in: set true once the command is installed
 # `video_gen` capability as the local adapter, so routing and `prefer` work the
 # same way (this is a *cloud* backend, so `prefer = "local"` skips it).
 #
-# The API key is read from this field or the ARK_API_KEY environment variable;
-# with no key the provider registers but reports itself unavailable, so a keyless
-# config still boots. Per-request knobs go in `params`: `ratio` ("16:9"),
-# `resolution` ("1080p"), `duration`/`seconds`, `fps`, `seed`, and `image_url`
-# (for image-to-video); they become Seedance text-command suffixes.
+# A `dialect` selects the vendor contract: "ark" (default) or "agnes" (the Agnes
+# AI gateway's `/videos` task API). The API key is read from this field or the
+# dialect's env var (ARK_API_KEY / AGNES_API_KEY); with no key the provider
+# registers but reports itself unavailable, so a keyless config still boots.
+# Per-request knobs go in `params`: `ratio` ("16:9"), `resolution` ("1080p"),
+# `duration`/`seconds`, `fps`, `seed`, `image_url` (for image-to-video), plus
+# `width`/`height`/`num_frames` for the Agnes dialect.
 # [[providers]]
 # name = "seedance"
 # kind = "cloud_video_gen"
-# base_url = ""            # default: Volcengine Ark (cn); set the BytePlus URL for intl,
-#                          # e.g. "https://ark.ap-southeast.bytepluses.com/api/v3"
+# dialect = "ark"          # or "agnes"
+# base_url = ""            # default per dialect; for Ark BytePlus (intl) use
+#                          # "https://ark.ap-southeast.bytepluses.com/api/v3"
 # api_key = "env:ARK_API_KEY"
 # cost_tier = "high"
 # priority = 3
 # enabled = false          # opt-in: set true once a key is configured
 #   [[providers.models]]
-#   name = "doubao-seedance-1-0-pro-250528"   # the Seedance model id
+#   name = "doubao-seedance-1-0-pro-250528"   # Ark: a Seedance model id
+#   capability = "video_gen"
+#
+# Agnes video variant (free gateway; same AGNES_API_KEY as chat/image):
+# [[providers]]
+# name = "agnes-video"
+# kind = "cloud_video_gen"
+# dialect = "agnes"
+# base_url = "https://apihub.agnes-ai.com/v1"
+# api_key = "env:AGNES_API_KEY"
+# cost_tier = "low"
+# priority = 3
+# enabled = false
+#   [[providers.models]]
+#   name = "agnes-video-v2.0"                  # or "agnes-video-2.5"
 #   capability = "video_gen"
 
 # Local embedding model via Ollama (RAG enabler, S3). Ollama auto-discovers pulled

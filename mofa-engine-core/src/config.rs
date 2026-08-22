@@ -318,6 +318,11 @@ pub struct ProviderConfig {
     /// Output audio container/extension for `local_tts` artifacts (default `wav`).
     #[serde(default)]
     pub output_format: Option<String>,
+    /// Vendor dialect for a `cloud_video_gen` backend: `"ark"` (default, the
+    /// Volcengine Ark / Seedance task API) or `"agnes"` (the Agnes AI gateway's
+    /// `/videos` task API). Ignored by other provider kinds.
+    #[serde(default)]
+    pub dialect: String,
     /// Directory for `local_tts` audio artifacts (default: the mofa-owned
     /// `mofa_artifacts` subdirectory of the system temp dir).
     #[serde(default)]
@@ -350,6 +355,7 @@ impl Default for ProviderConfig {
             command: None,
             args: Vec::new(),
             output_format: None,
+            dialect: String::new(),
             output_dir: None,
             diarize_args: Vec::new(),
             price_input_per_1k: 0.0,
@@ -735,9 +741,16 @@ impl ProviderConfig {
     /// passing any other string through unchanged. Lets a config keep secrets
     /// (e.g. `api_key = "${OPENAI_API_KEY}"`) out of the file itself.
     fn resolve_env_var(s: &str) -> Result<String, EngineError> {
-        if let Some(rest) = s.strip_prefix("${")
-            && let Some(var_name) = rest.strip_suffix('}')
-        {
+        // Two accepted indirection forms resolve to an environment variable:
+        //   - `${VAR}` (shell-style), and
+        //   - `env:VAR` (the terser form used throughout our example configs).
+        // Anything else is treated as a literal secret. A real API key never
+        // matches these prefixes, so this cannot accidentally shadow one.
+        let var_name = s
+            .strip_prefix("${")
+            .and_then(|rest| rest.strip_suffix('}'))
+            .or_else(|| s.strip_prefix("env:"));
+        if let Some(var_name) = var_name {
             return std::env::var(var_name).map_err(|_| {
                 EngineError::Config(format!("environment variable '{var_name}' is not set"))
             });
@@ -788,9 +801,23 @@ mod tests {
     }
 
     #[test]
+    fn resolve_env_var_colon_syntax() {
+        // The terser `env:VAR` form (used across our example configs) resolves the
+        // same way as `${VAR}`.
+        // SAFETY: this test runs single-threaded and restores the env var.
+        unsafe { std::env::set_var("TEST_MOFA_KEY2", "resolved-colon") };
+        assert_eq!(
+            ProviderConfig::resolve_env_var("env:TEST_MOFA_KEY2").unwrap(),
+            "resolved-colon"
+        );
+        unsafe { std::env::remove_var("TEST_MOFA_KEY2") };
+    }
+
+    #[test]
     fn unresolved_env_var_errors() {
         unsafe { std::env::remove_var("MISSING_MOFA_KEY") };
         assert!(ProviderConfig::resolve_env_var("${MISSING_MOFA_KEY}").is_err());
+        assert!(ProviderConfig::resolve_env_var("env:MISSING_MOFA_KEY").is_err());
     }
 
     #[test]

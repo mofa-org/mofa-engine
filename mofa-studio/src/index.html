@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MoFA Studio</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0d0f14; color: #e7e9ee;
+  }
+  header { padding: 28px 24px 12px; }
+  h1 { margin: 0; font-size: 22px; letter-spacing: .2px; }
+  h1 span { opacity: .55; font-weight: 400; }
+  .sub { opacity: .55; font-size: 13px; margin-top: 4px; }
+  main { max-width: 860px; margin: 0 auto; padding: 12px 24px 60px; }
+  .panel { background: #151924; border: 1px solid #232838; border-radius: 14px; padding: 18px; }
+  textarea {
+    width: 100%; min-height: 84px; resize: vertical; background: #0d0f14; color: inherit;
+    border: 1px solid #2a3145; border-radius: 10px; padding: 12px 14px; font: inherit;
+  }
+  .row { display: flex; gap: 10px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+  .modes { display: inline-flex; background: #0d0f14; border: 1px solid #2a3145; border-radius: 10px; overflow: hidden; }
+  .modes button { background: transparent; color: inherit; border: 0; padding: 9px 16px; cursor: pointer; font: inherit; }
+  .modes button.active { background: #3b5bdb; }
+  .go {
+    margin-left: auto; background: #3b5bdb; color: #fff; border: 0; border-radius: 10px;
+    padding: 10px 22px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  .go:disabled { opacity: .5; cursor: default; }
+  .caps { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0 0; }
+  .chip { font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid #2a3145; opacity: .85; }
+  .chip.on { border-color: #2f9e44; color: #8ce99a; }
+  .chip.off { border-color: #5c2b2b; color: #ff8787; }
+  .result { margin-top: 20px; }
+  .result img, .result video { max-width: 100%; border-radius: 12px; border: 1px solid #232838; display: block; }
+  .meta { font-size: 13px; opacity: .8; margin-top: 10px; display: flex; gap: 14px; flex-wrap: wrap; }
+  .meta .tag { padding: 2px 9px; border-radius: 999px; background: #1c2333; }
+  .tag.local { background: #143a1f; color: #8ce99a; }
+  .tag.cloud { background: #2a2036; color: #d0bfff; }
+  .err { margin-top: 18px; padding: 12px 14px; border-radius: 10px; background: #2a1a1a; border: 1px solid #5c2b2b; color: #ffc9c9; font-size: 14px; }
+  .spinner { margin-top: 20px; opacity: .7; }
+  code { background: #0d0f14; padding: 1px 6px; border-radius: 6px; border: 1px solid #2a3145; }
+</style>
+</head>
+<body>
+<header>
+  <h1>MoFA Studio <span>· create, on your terms</span></h1>
+  <div class="sub">Type a prompt → get a real image or video. Routed by the MoFA engine, with provider · cost · local/cloud shown for every generation.</div>
+</header>
+<main>
+  <div class="panel">
+    <textarea id="prompt" placeholder="A paper airplane glides over a sunlit desk, then banks toward the window. Cinematic, soft light."></textarea>
+    <div class="row">
+      <div class="modes" id="modes">
+        <button data-mode="image" class="active">Image</button>
+        <button data-mode="video">Video</button>
+      </div>
+      <button class="go" id="go">Generate</button>
+    </div>
+    <div class="caps" id="caps"></div>
+  </div>
+
+  <div id="out"></div>
+</main>
+
+<script>
+  let mode = "image";
+  const $ = (id) => document.getElementById(id);
+
+  // Reflect what the engine can actually serve right now, so the user knows
+  // before clicking whether a backend is wired up.
+  async function loadCaps() {
+    try {
+      const rows = await (await fetch("/api/capabilities")).json();
+      const want = ["chat", "image_gen", "video_gen"];
+      const have = {};
+      for (const r of rows) {
+        if (!have[r.capability] || r.available) have[r.capability] = r;
+      }
+      $("caps").innerHTML = want.map((cap) => {
+        const r = have[cap];
+        const on = r && r.available;
+        const where = r ? (r.local ? "local" : "cloud") : "—";
+        const label = cap.replace("_gen", "");
+        return `<span class="chip ${on ? "on" : "off"}">${label}: ${on ? (r.provider + " · " + where) : "not configured"}</span>`;
+      }).join("");
+    } catch (e) { /* leave chips empty if the call fails */ }
+  }
+
+  $("modes").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-mode]");
+    if (!b) return;
+    mode = b.dataset.mode;
+    for (const btn of $("modes").children) btn.classList.toggle("active", btn === b);
+  });
+
+  $("go").addEventListener("click", async () => {
+    const prompt = $("prompt").value.trim();
+    if (!prompt) return;
+    $("go").disabled = true;
+    $("out").innerHTML = `<div class="spinner">⏳ generating ${mode}… (video can take a minute)</div>`;
+    try {
+      const res = await fetch("/api/generate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt, mode }),
+      });
+      const data = await res.json();
+      if (data.ok && data.url) {
+        const media = mode === "video"
+          ? `<video src="${data.url}" controls autoplay loop></video>`
+          : `<img src="${data.url}" alt="generated" />`;
+        const where = data.local ? "local" : "cloud";
+        // No cost figure (null) or an explicit $0 both mean "no charge" here —
+        // local models and the free Agnes tier — so say so plainly.
+        const cost = (data.cost_usd == null || data.cost_usd === 0)
+          ? "free"
+          : "$" + data.cost_usd.toFixed(4);
+        // Show the generation time in seconds with a clear label.
+        const took = data.duration_ms == null
+          ? ""
+          : `took ${(data.duration_ms / 1000).toFixed(1)} s`;
+        $("out").innerHTML = `<div class="result panel">${media}
+          <div class="meta">
+            <span class="tag">${data.provider || "?"}</span>
+            <span class="tag ${where}">${where.toUpperCase()}</span>
+            <span>${cost}</span>
+            <span>${took}</span>
+          </div></div>`;
+      } else {
+        $("out").innerHTML = `<div class="err">${data.error || "generation failed"}<br>
+          <small>Tip: set <code>AGNES_API_KEY</code> (image) or <code>ARK_API_KEY</code> (video) and restart to enable real generation.</small></div>`;
+      }
+    } catch (e) {
+      $("out").innerHTML = `<div class="err">request failed: ${e}</div>`;
+    } finally {
+      $("go").disabled = false;
+    }
+  });
+
+  loadCaps();
+</script>
+</body>
+</html>
