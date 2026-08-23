@@ -436,6 +436,12 @@ impl Provider for OllamaProvider {
                     || lower.contains("vision")
                 {
                     Capability::Vlm
+                } else if lower.contains("flux")
+                    || lower.contains("diffusion")
+                    || lower.contains("sdxl")
+                    || lower.contains("image")
+                {
+                    Capability::ImageGen
                 } else {
                     Capability::Chat
                 };
@@ -483,6 +489,51 @@ impl Provider for OllamaProvider {
 
     async fn load(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
         let model_name = ModelId::name(model_id);
+        let lower = model_name.to_lowercase();
+
+        // Non-chat models (e.g. diffusion / flux) in Ollama do not support `/api/chat`.
+        if lower.contains("flux") || lower.contains("diffusion") || lower.contains("sdxl") {
+            return Ok(LifecycleResult {
+                model_id: ModelId::canonical(&self.name, model_name),
+                residency: ModelResidency::Loaded,
+                memory_bytes: None,
+                changed: false,
+            });
+        }
+
+        if lower.contains("embed") {
+            let body = serde_json::json!({
+                "model": model_name,
+                "input": " ",
+                "keep_alive": -1,
+            });
+            let url = format!("{}/api/embed", self.base_url);
+            let resp = self
+                .client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| EngineError::ProviderError {
+                    provider: self.name.clone(),
+                    detail: format!("load embed failed: {e}"),
+                })?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(EngineError::ProviderError {
+                    provider: self.name.clone(),
+                    detail: format!("load embed HTTP {status}: {text}"),
+                });
+            }
+            return Ok(LifecycleResult {
+                model_id: ModelId::canonical(&self.name, model_name),
+                residency: ModelResidency::Loaded,
+                memory_bytes: None,
+                changed: true,
+            });
+        }
+
         let body = OllamaChatRequest {
             model: model_name.to_string(),
             messages: vec![OllamaMessage {
@@ -525,6 +576,50 @@ impl Provider for OllamaProvider {
 
     async fn unload(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
         let model_name = ModelId::name(model_id);
+        let lower = model_name.to_lowercase();
+
+        if lower.contains("flux") || lower.contains("diffusion") || lower.contains("sdxl") {
+            return Ok(LifecycleResult {
+                model_id: ModelId::canonical(&self.name, model_name),
+                residency: ModelResidency::Unloaded,
+                memory_bytes: None,
+                changed: false,
+            });
+        }
+
+        if lower.contains("embed") {
+            let body = serde_json::json!({
+                "model": model_name,
+                "input": " ",
+                "keep_alive": 0,
+            });
+            let url = format!("{}/api/embed", self.base_url);
+            let resp = self
+                .client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| EngineError::ProviderError {
+                    provider: self.name.clone(),
+                    detail: format!("unload embed failed: {e}"),
+                })?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(EngineError::ProviderError {
+                    provider: self.name.clone(),
+                    detail: format!("unload embed HTTP {status}: {text}"),
+                });
+            }
+            return Ok(LifecycleResult {
+                model_id: ModelId::canonical(&self.name, model_name),
+                residency: ModelResidency::Unloaded,
+                memory_bytes: None,
+                changed: true,
+            });
+        }
+
         let body = OllamaChatRequest {
             model: model_name.to_string(),
             messages: vec![OllamaMessage {

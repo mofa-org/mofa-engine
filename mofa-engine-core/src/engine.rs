@@ -21,8 +21,9 @@ use tokio::sync::{Mutex as AsyncMutex, Semaphore, broadcast, mpsc};
 use tokio::task::{AbortHandle, JoinHandle};
 
 use crate::backends::{
-    LiterLLMProvider, LocalAsrProvider, LocalImageGenProvider, LocalTtsProvider,
-    LocalVideoGenProvider, OllamaProvider, OpenAiCompatProvider,
+    CloudVideoGenProvider, LiterLLMProvider, LocalAsrProvider, LocalImageGenProvider,
+    LocalTtsProvider, LocalVideoGenProvider, OllamaProvider, OpenAiCompatProvider,
+    SystemTtsProvider,
 };
 use crate::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerRegistry, CircuitState};
 use crate::config::{EngineConfig, PreflightConfig, TimeoutConfig};
@@ -312,6 +313,15 @@ impl Engine {
                         pc.models.clone(),
                     ))
                 }
+                ProviderKind::CloudVideoGen => Arc::new(CloudVideoGenProvider::new(
+                    &pc.name,
+                    &pc.dialect,
+                    &pc.base_url,
+                    pc.api_key.clone(),
+                    pc.models.clone(),
+                    cost_tier,
+                    config.artifacts.dir.clone(),
+                )?),
                 _ => {
                     return Err(EngineError::Config(format!(
                         "provider '{}' uses unsupported provider kind",
@@ -326,6 +336,37 @@ impl Engine {
                 priority: pc.priority,
                 provider,
             });
+        }
+
+        // Zero-config local voice: when a real config is present but declares no TTS
+        // backend, auto-register the OS-native voice (macOS `say` / Linux `espeak`)
+        // as a low-priority fallback. This gives local-first audio scenarios (S1/S4/
+        // S6) a working voice with nothing to install, while any configured TTS —
+        // having a lower priority number — still wins the route. An empty config is
+        // left untouched (no providers in, no providers out).
+        let has_configured_provider = config.providers.iter().any(|pc| pc.enabled);
+        let declares_tts = config.providers.iter().any(|pc| {
+            pc.enabled
+                && pc.models.iter().any(|m| {
+                    mofa_kernel::Capability::from_str_loose(&m.capability)
+                        == Some(mofa_kernel::Capability::Tts)
+                })
+        });
+        if has_configured_provider && !declares_tts {
+            let system_tts = SystemTtsProvider::new(config.artifacts.dir.clone());
+            if system_tts.is_available() {
+                tracing::info!(
+                    "no TTS backend configured; registering built-in system voice as fallback"
+                );
+                providers.push(RegisteredProvider {
+                    name: crate::backends::system_tts::SYSTEM_TTS_NAME.to_string(),
+                    kind: ProviderKind::LocalTts,
+                    // A large priority number is the least-preferred tier, so a
+                    // configured voice always outranks this fallback.
+                    priority: 99,
+                    provider: Arc::new(system_tts),
+                });
+            }
         }
 
         // Canonicalize the input-path allowlist up front; unresolvable roots are
@@ -443,46 +484,33 @@ impl Engine {
                     }
 
                     let count = cards.len();
-                    let mut freed = false;
                     for mut card in cards {
-                        // Reconcile with the engine's current view. Capture the
-                        // residency *and* the live execution counters so a
-                        // rediscovery that lands mid-request does not reset an
-                        // in-flight model's `active_requests` (which would corrupt
-                        // its Busy status and capacity score, and let a later
-                        // `end_execution` saturate to zero). `.map` drops the shard
-                        // guard immediately so the later insert cannot deadlock.
                         let previous = self
                             .models
                             .get(&card.id)
                             .map(|c| (c.residency, c.execution.active_requests));
                         if let Some((prev_residency, active_requests)) = previous {
-                            // Freshly discovered cards start with zero in-flight
-                            // requests; carry the live count forward. The new card's
-                            // `max_concurrency` is kept so config changes still apply.
                             card.execution.active_requests = active_requests;
                             match prev_residency {
-                                // A load is in flight; don't let discovery regress it.
                                 ModelResidency::Loading => {
                                     card.residency = ModelResidency::Loading;
                                 }
-                                // The backend reports the model is no longer resident,
-                                // so release the reservation we still held for it.
                                 ModelResidency::Loaded
                                     if !matches!(card.residency, ModelResidency::Loaded) =>
                                 {
                                     self.memory.deallocate(&card.id);
-                                    freed = true;
                                 }
                                 _ => {}
                             }
                         }
+                        if matches!(card.residency, ModelResidency::Loaded) && card.memory_estimate_bytes > 0 {
+                            self.memory.try_reserve(&card.id, card.memory_estimate_bytes);
+                            self.memory.touch(&card.id);
+                        }
                         card.refresh_status();
                         self.models.insert(card.id.clone(), card);
                     }
-                    if freed {
-                        self.emit_memory_changed();
-                    }
+                    self.emit_memory_changed();
                     let _ = self.event_tx.send(EngineEvent::DiscoveryCompleted {
                         provider: name.clone(),
                         models: count,
@@ -1691,6 +1719,10 @@ impl Engine {
 
     /// Register a capability subscription and immediately warm its models.
     ///
+    /// An explicit per-call `ttl` wins; when `None` is passed the configured
+    /// `preflight.subscription_ttl_secs` default bounds the subscription (0
+    /// disables expiry) so it cannot pin models warm forever.
+    ///
     /// Returns the new subscription id.
     pub fn subscribe(
         &self,
@@ -1699,6 +1731,10 @@ impl Engine {
         capabilities: Vec<Capability>,
         ttl: Option<Duration>,
     ) -> u64 {
+        let ttl = ttl.or_else(|| {
+            let secs = self.preflight_config.subscription_ttl_secs;
+            (secs > 0).then(|| Duration::from_secs(secs))
+        });
         let id = self.subscriptions.subscribe(
             app_id.clone(),
             session_id.clone(),
@@ -1779,17 +1815,40 @@ impl Engine {
         *self.artifact_task.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
     }
 
-    /// Reject a request whose `input_file` falls outside the configured
-    /// allowlist. A no-op when no roots are configured.
+    /// Reject a request whose local file inputs fall outside the configured
+    /// allowlist — `input_file` AND any `messages[].images` entry that names a
+    /// local path. http(s)/data: image URLs are not local paths and skip the
+    /// check. A no-op when no roots are configured.
     fn check_input_path(&self, req: &InferenceRequest) -> Result<(), EngineError> {
         if self.input_roots.is_empty() {
             return Ok(());
         }
-        let Some(path) = req.input_file.as_deref() else {
-            return Ok(());
-        };
+        if let Some(path) = req.input_file.as_deref() {
+            self.check_path_within_roots(path, "input_file")?;
+        }
+        // Image references are resolved by the backends with a raw filesystem
+        // read (ollama.rs base64-encodes them; liter_llm.rs then UPLOADS the
+        // contents to a cloud provider) — an unchecked path is a local-file
+        // read primitive that becomes data exfiltration, so they go through
+        // the exact same allowlist as `input_file` before any routing.
+        for message in &req.messages {
+            for image in &message.images {
+                if image.starts_with("http://")
+                    || image.starts_with("https://")
+                    || image.starts_with("data:")
+                {
+                    continue;
+                }
+                self.check_path_within_roots(image, "images[]")?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate one local path against the configured allowlist.
+    fn check_path_within_roots(&self, path: &str, field: &str) -> Result<(), EngineError> {
         let canonical = std::fs::canonicalize(path).map_err(|_| {
-            EngineError::InvalidRequest(format!("input_file '{path}' cannot be resolved"))
+            EngineError::InvalidRequest(format!("{field} '{path}' cannot be resolved"))
         })?;
         if self
             .input_roots
@@ -1799,7 +1858,7 @@ impl Engine {
             Ok(())
         } else {
             Err(EngineError::InvalidRequest(format!(
-                "input_file '{path}' is outside the allowed roots"
+                "{field} '{path}' is outside the allowed roots"
             )))
         }
     }
@@ -2138,8 +2197,8 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use crate::config::{
-        EngineConfig, ListenConfig, MemoryConfig, PreflightConfig, ProviderConfig, SecurityConfig,
-        TimeoutConfig,
+        EngineConfig, ListenConfig, MemoryConfig, ModelDef, PreflightConfig, ProviderConfig,
+        SecurityConfig, TimeoutConfig,
     };
 
     const MB: u64 = 1024 * 1024;
@@ -2449,6 +2508,83 @@ mod tests {
         let engine = Engine::new(minimal_config()).await;
         let result = engine.invoke(chat_request(None)).await;
         assert!(matches!(result, Err(EngineError::NoCapableModel(_))));
+    }
+
+    #[tokio::test]
+    async fn system_voice_backs_a_tts_less_config() {
+        // A config with one enabled, non-TTS provider gains the built-in system
+        // voice as a fallback wherever the OS provides one (macOS `say` / Linux
+        // `espeak`). `true` stands in as a harmless, network-free provider command.
+        let mut config = minimal_config();
+        config.providers = vec![ProviderConfig {
+            name: "img".into(),
+            kind: "local_image_gen".into(),
+            command: Some("true".into()),
+            enabled: true,
+            models: vec![ModelDef {
+                name: "sd".into(),
+                capability: "image_gen".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        let engine = Engine::new(config).await;
+        engine.refresh_resources().await;
+
+        let voice_available =
+            crate::backends::system_tts::SystemTtsProvider::new(None).is_available();
+        let injected = engine
+            .capabilities()
+            .await
+            .iter()
+            .any(|c| c.id == "system-tts/system");
+        assert_eq!(injected, voice_available);
+
+        // An empty config is left untouched: no providers in, no voice out.
+        let empty = Engine::new(minimal_config()).await;
+        empty.refresh_resources().await;
+        assert!(
+            empty
+                .capabilities()
+                .await
+                .iter()
+                .all(|c| c.id != "system-tts/system")
+        );
+    }
+
+    #[tokio::test]
+    async fn cloud_video_gen_config_exposes_a_video_capability() {
+        // A `cloud_video_gen` provider (Seedance / Ark) wires through config → the
+        // backend factory → discovery, exposing a first-class `video_gen`
+        // capability. A dummy key keeps it network-free: `health()` and `discover()`
+        // for this backend never touch the wire, so the card is `Configured`
+        // without a live API.
+        let mut config = minimal_config();
+        config.providers = vec![ProviderConfig {
+            name: "seedance".into(),
+            kind: "cloud_video_gen".into(),
+            api_key: Some("test-key".into()),
+            cost_tier: "high".into(),
+            enabled: true,
+            models: vec![ModelDef {
+                name: "doubao-seedance-1-0-pro".into(),
+                capability: "video_gen".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        let engine = Engine::new(config).await;
+        engine.refresh_resources().await;
+
+        let card = engine
+            .capabilities()
+            .await
+            .into_iter()
+            .find(|c| c.provider == "seedance")
+            .expect("the configured cloud video provider is discovered");
+        assert_eq!(card.capability, mofa_kernel::Capability::VideoGen);
+        // Cloud model: remote residency, not counted against local memory.
+        assert_eq!(card.residency, ModelResidency::Remote);
     }
 
     #[tokio::test]
@@ -3552,6 +3688,103 @@ mod tests {
             engine.invoke(ok).await,
             Err(EngineError::NoCapableModel(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn image_paths_outside_input_roots_are_rejected() {
+        // #4 review (security): `messages[].images` entries that name LOCAL
+        // FILES must pass the same `security.input_roots` validation as
+        // `input_file` — the ollama path base64-reads them and the liter-llm
+        // path uploads their contents to a cloud provider, so an unchecked
+        // path is a local-file-read primitive that becomes exfiltration.
+        let root = tempfile::tempdir().unwrap();
+        let allowed = root.path().join("frame.png");
+        std::fs::write(&allowed, b"x").unwrap();
+        let outside = std::env::temp_dir().join("mofa_outside_allowlist.png");
+        std::fs::write(&outside, b"x").unwrap();
+
+        let config = EngineConfig {
+            security: SecurityConfig {
+                input_roots: vec![root.path().to_string_lossy().to_string()],
+            },
+            ..minimal_config()
+        };
+        let engine = Engine::new(config).await;
+
+        let image_req = |image: String| {
+            let mut req = request(Capability::Vlm, None, FallbackPolicy::default());
+            req.messages = vec![Message {
+                role: "user".into(),
+                content: "describe this".into(),
+                images: vec![image],
+            }];
+            req
+        };
+
+        // A local image path outside the allowlist is rejected before routing.
+        assert!(matches!(
+            engine
+                .invoke(image_req(outside.to_string_lossy().to_string()))
+                .await,
+            Err(EngineError::InvalidRequest(_))
+        ));
+        // A path inside the allowlist passes the check (then fails later only
+        // because no VLM model is registered).
+        assert!(matches!(
+            engine
+                .invoke(image_req(allowed.to_string_lossy().to_string()))
+                .await,
+            Err(EngineError::NoCapableModel(_))
+        ));
+        // http(s) and data: URLs are not local paths — the allowlist does not
+        // apply to them.
+        for remote in ["https://example.com/a.png", "data:image/png;base64,AAAA"] {
+            assert!(
+                matches!(
+                    engine.invoke(image_req(remote.into())).await,
+                    Err(EngineError::NoCapableModel(_))
+                ),
+                "{remote} must not be treated as a local path"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn subscription_without_explicit_ttl_uses_config_default() {
+        // #4 review: `PreflightConfig::subscription_ttl_secs` must actually
+        // bound subscriptions — previously nothing read it, so a subscription
+        // that omitted the TTL pinned its models warm forever.
+        let config = EngineConfig {
+            preflight: PreflightConfig {
+                subscription_ttl_secs: 120,
+                ..PreflightConfig::default()
+            },
+            ..minimal_config()
+        };
+        let engine = Engine::new(config).await;
+
+        engine.subscribe(None, None, vec![Capability::Chat], None);
+        let info = engine.subscriptions();
+        assert_eq!(info.len(), 1);
+        let ttl = info[0]
+            .expires_in_secs
+            .expect("the configured default TTL must apply when none is given");
+        assert!(ttl > 110 && ttl <= 120, "ttl {ttl} should be ~120");
+
+        // An explicit per-call TTL still wins over the config default.
+        engine.subscribe(
+            None,
+            None,
+            vec![Capability::Tts],
+            Some(Duration::from_secs(5)),
+        );
+        let explicit = engine
+            .subscriptions()
+            .into_iter()
+            .find(|s| s.capabilities == vec![Capability::Tts])
+            .and_then(|s| s.expires_in_secs)
+            .expect("explicit TTL reported");
+        assert!(explicit <= 5, "explicit TTL must win, got {explicit}");
     }
 
     #[tokio::test]

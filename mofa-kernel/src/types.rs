@@ -75,6 +75,9 @@ pub enum ProviderKind {
     /// Local process-adapter video-generation backend (e.g. an AnimateDiff / SVD
     /// or Wan-style CLI).
     LocalVideoGen,
+    /// Cloud video-generation API (the Volcengine Ark / BytePlus task contract
+    /// that ByteDance's Seedance models speak): submit → poll → download.
+    CloudVideoGen,
     /// Multi-vendor cloud gateway via the `liter-llm` crate (143+ providers,
     /// unified OpenAI-style contract).
     LiterLlm,
@@ -381,6 +384,35 @@ pub struct Message {
     pub images: Vec<String>,
 }
 
+impl Message {
+    /// Create a new user message.
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: "user".into(),
+            content: content.into(),
+            images: Vec::new(),
+        }
+    }
+
+    /// Create a new system message.
+    pub fn system(content: impl Into<String>) -> Self {
+        Self {
+            role: "system".into(),
+            content: content.into(),
+            images: Vec::new(),
+        }
+    }
+
+    /// Create a new assistant message.
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self {
+            role: "assistant".into(),
+            content: content.into(),
+            images: Vec::new(),
+        }
+    }
+}
+
 /// Named-model fallback behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -500,10 +532,10 @@ pub struct InferenceRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<Reasoning>,
     /// Per-request spend ceiling in USD. A candidate whose *estimated* cost
-    /// exceeds this is skipped during routing (and recorded in `failed_chain`),
-    /// so spend stays bounded and cheaper/local models win. Free and local
-    /// models estimate to `$0` and are always affordable; `0.0` therefore means
-    /// "free/local only". `None` = no ceiling.
+    /// exceeds this is skipped during candidate selection (and recorded in
+    /// `failed_chain`), so spend stays bounded and cheaper/local models win. Free
+    /// and local models estimate to `$0` and are always affordable; `0.0`
+    /// therefore means "free/local only". `None` = no ceiling.
     ///
     /// This is a **soft** ceiling: it is enforced against a pre-flight token
     /// *estimate*, so a model that generates more than estimated can still exceed

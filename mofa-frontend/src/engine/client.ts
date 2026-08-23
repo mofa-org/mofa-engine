@@ -212,8 +212,9 @@ export class RealEngineClient implements IEngineClient {
           const raw = JSON.parse(event.data);
           const snakeType: string = raw.type || '';
           const pascalType = snakeType.replace(/(^|_)([a-z])/g, (_: string, __: string, c: string) => c.toUpperCase());
-          const { type: _, ...data } = raw;
-          const parsed: EngineEvent = { type: pascalType as any, data, timestamp: Date.now() };
+          const timestamp = typeof raw.timestamp_ms === 'number' ? raw.timestamp_ms : Date.now();
+          const { type: _, timestamp_ms: __, ...data } = raw;
+          const parsed: EngineEvent = { type: pascalType as any, data, timestamp };
           if (import.meta.env.DEV) console.log(`[SSE] Event received: ${pascalType}, handlers=${this.eventHandlers.size}`);
           // Fan out to all registered handlers
           this.eventHandlers.forEach(h => h(parsed));
@@ -242,7 +243,8 @@ export class RealEngineClient implements IEngineClient {
   }
   
   getAudioUrl(filename: string): string {
-    return `${this.baseUrl}/v1/files/${filename}`;
+    const cleanName = filename.includes('/') ? filename.split('/').pop() || filename : filename;
+    return `${this.baseUrl}/v1/files/${cleanName}`;
   }
 
   async fetchAudio(filename: string): Promise<Blob> {
