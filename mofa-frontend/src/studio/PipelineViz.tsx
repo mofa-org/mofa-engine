@@ -1,34 +1,48 @@
 import React from 'react';
 import { motion } from 'framer-motion';
-import { Check, AlertCircle, FileText, MessageSquareText, AudioLines, PlayCircle } from 'lucide-react';
+import { Check, AlertCircle, FileText, MessageSquareText, AudioLines, PlayCircle, Image, Video } from 'lucide-react';
 import { formatMs } from '../lib/utils';
 import { PipelinePhase } from './usePipeline';
 
 export function PipelineViz({ phase }: { phase: PipelinePhase }) {
   const isTranslating = phase.status === 'translating';
+  const isGeneratingImages = phase.status === 'generating_images';
   const isSynthesizing = phase.status === 'synthesizing';
-  const isChatDone = phase.status === 'translated' || phase.status === 'synthesizing' || phase.status === 'done' || (phase.status === 'error' && (phase as any).failedStep === 'tts');
+  const isRenderingVideo = phase.status === 'rendering_video';
+  const isChatDone = phase.status === 'translated' || isGeneratingImages || isSynthesizing || isRenderingVideo || phase.status === 'done' || (phase.status === 'error' && (phase as any).failedStep !== 'chat');
   
   const chatResult = (phase as any).chat;
+  const imageResult = (phase as any).image;
   const ttsResult = (phase as any).tts;
+  const videoResult = (phase as any).video;
+  
+  const scenarioId = (phase as any).scenarioId;
+  const isVideo = scenarioId === 's4-explainer';
 
   return (
     <div className="w-full max-w-3xl mx-auto mb-8 relative mt-4 shrink-0">
       {/* Track */}
       <div className="absolute top-7 left-[70px] right-[70px] h-[3px] bg-background-hover rounded-full overflow-hidden z-0">
         <motion.div 
-          className={`absolute inset-y-0 left-0 overflow-hidden ${phase.status === 'error' ? 'bg-accent-red' : phase.status === 'done' ? 'bg-accent-green' : isSynthesizing ? 'bg-accent-purple' : 'bg-accent-blue'}`}
+          className={`absolute inset-y-0 left-0 overflow-hidden ${phase.status === 'error' ? 'bg-accent-red' : phase.status === 'done' ? 'bg-accent-green' : (isSynthesizing || isRenderingVideo) ? 'bg-accent-purple' : 'bg-accent-blue'}`}
           initial={{ width: '0%' }}
           animate={{ 
-            width: phase.status === 'translating' ? '33.33%' : 
-                   (phase.status === 'synthesizing' || (phase.status === 'error' && (phase as any).failedStep === 'tts')) ? '66.66%' : 
-                   phase.status === 'done' ? '100%' : 
-                   (phase.status === 'error' && (phase as any).failedStep === 'chat') ? '33.33%' : '0%' 
+            width: isVideo
+              ? (phase.status === 'translating' ? '20%' : 
+                 (phase.status === 'error' && (phase as any).failedStep === 'chat') ? '20%' : 
+                 (phase.status === 'generating_images' || (phase.status === 'error' && (phase as any).failedStep === 'image')) ? '40%' : 
+                 (phase.status === 'synthesizing' || (phase.status === 'error' && (phase as any).failedStep === 'tts')) ? '60%' : 
+                 (phase.status === 'rendering_video' || (phase.status === 'error' && (phase as any).failedStep === 'video')) ? '80%' : 
+                 phase.status === 'done' ? '100%' : '0%')
+              : (phase.status === 'translating' ? '33.33%' : 
+                 (phase.status === 'synthesizing' || (phase.status === 'error' && (phase as any).failedStep === 'tts')) ? '66.66%' : 
+                 phase.status === 'done' ? '100%' : 
+                 (phase.status === 'error' && (phase as any).failedStep === 'chat') ? '33.33%' : '0%') 
           }}
           transition={{ duration: 0.8, ease: "easeInOut" }}
         >
           {/* Active Flow Animation */}
-          {(isTranslating || isSynthesizing) && (
+          {(isTranslating || isGeneratingImages || isSynthesizing || isRenderingVideo) && (
             <motion.div 
               className="absolute inset-y-0 w-32 bg-gradient-to-r from-transparent via-white/50 to-transparent"
               initial={{ left: '-128px' }}
@@ -49,24 +63,67 @@ export function PipelineViz({ phase }: { phase: PipelinePhase }) {
           result={null}
           icon={FileText}
         />
-        <PipelineNode 
-          title="Chat Generation" 
-          active={isTranslating} 
-          done={isChatDone} 
-          error={phase.status === 'error' && (phase as any).failedStep === 'chat'} 
-          accent="blue" 
-          result={chatResult}
-          icon={MessageSquareText}
-        />
-        <PipelineNode 
-          title="TTS Audio" 
-          active={isSynthesizing} 
-          done={phase.status === 'done'} 
-          error={phase.status === 'error' && (phase as any).failedStep === 'tts'} 
-          accent="purple" 
-          result={ttsResult}
-          icon={AudioLines}
-        />
+        {isVideo ? (
+          <>
+            <PipelineNode 
+              title="Script" 
+              active={isTranslating} 
+              done={isChatDone} 
+              error={phase.status === 'error' && (phase as any).failedStep === 'chat'} 
+              accent="blue" 
+              result={chatResult}
+              icon={MessageSquareText}
+            />
+            <PipelineNode 
+              title="Image Gen" 
+              active={phase.status === 'generating_images'} 
+              done={['synthesizing', 'rendering_video', 'done'].includes(phase.status) || (phase.status === 'error' && !['chat', 'image'].includes((phase as any).failedStep))} 
+              error={phase.status === 'error' && (phase as any).failedStep === 'image'} 
+              accent="blue" 
+              result={imageResult}
+              icon={Image}
+            />
+            <PipelineNode 
+              title="TTS Narration" 
+              active={phase.status === 'synthesizing'} 
+              done={['rendering_video', 'done'].includes(phase.status) || (phase.status === 'error' && (phase as any).failedStep === 'video')} 
+              error={phase.status === 'error' && (phase as any).failedStep === 'tts'} 
+              accent="purple" 
+              result={ttsResult}
+              icon={AudioLines}
+            />
+            <PipelineNode 
+              title="Video Render" 
+              active={phase.status === 'rendering_video'} 
+              done={phase.status === 'done'} 
+              error={phase.status === 'error' && (phase as any).failedStep === 'video'} 
+              accent="purple" 
+              result={videoResult}
+              icon={Video}
+            />
+          </>
+        ) : (
+          <>
+            <PipelineNode 
+              title="Chat Generation" 
+              active={isTranslating} 
+              done={isChatDone} 
+              error={phase.status === 'error' && (phase as any).failedStep === 'chat'} 
+              accent="blue" 
+              result={chatResult}
+              icon={MessageSquareText}
+            />
+            <PipelineNode 
+              title="TTS Audio" 
+              active={isSynthesizing} 
+              done={phase.status === 'done'} 
+              error={phase.status === 'error' && (phase as any).failedStep === 'tts'} 
+              accent="purple" 
+              result={ttsResult}
+              icon={AudioLines}
+            />
+          </>
+        )}
         <PipelineNode 
           title="Ready" 
           active={false} 

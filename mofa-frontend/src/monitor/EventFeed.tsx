@@ -7,10 +7,28 @@ import { motion, AnimatePresence } from 'framer-motion';
 export function EventFeed() {
   const [events, setEvents] = useState<(EngineEvent & { _id: string })[]>([]);
   const [traceIdFilter, setTraceIdFilter] = useState('');
+  const [now, setNow] = useState(Date.now());
+
+  // Real-time second ticker for live relative time
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     let counter = 0;
+    let lastMemBytes: number | null = null;
+
     const handleEvent = (evt: EngineEvent) => {
+      // Deduplicate identical consecutive MemoryChanged events
+      if (evt.type === 'MemoryChanged') {
+        const bytes = (evt.data as any)?.used_bytes;
+        if (bytes !== undefined && bytes === lastMemBytes) {
+          return;
+        }
+        lastMemBytes = bytes;
+      }
+
       setEvents(prev => {
         const newEvt = { ...evt, _id: `${evt.timestamp}-${counter++}` };
         const next = [newEvt, ...prev]; // Prepend for reverse chronological
@@ -41,7 +59,7 @@ export function EventFeed() {
       <div className="flex-1 overflow-y-auto overflow-x-hidden flex flex-col gap-2 p-2">
         <AnimatePresence initial={false}>
           {filteredEvents.map((evt) => (
-            <EventCard key={evt._id} evt={evt} />
+            <EventCard key={evt._id} evt={evt} now={now} />
           ))}
         </AnimatePresence>
         {events.length === 0 && (
@@ -54,8 +72,17 @@ export function EventFeed() {
   );
 }
 
-function EventCard({ evt }: { evt: EngineEvent }) {
+function formatRelativeTime(ts: number, now: number): string {
+  const diffSec = Math.max(0, Math.floor((now - ts) / 1000));
+  if (diffSec < 3) return 'just now';
+  if (diffSec < 60) return `${diffSec}s ago`;
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+  return new Date(ts).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function EventCard({ evt, now }: { evt: EngineEvent; now: number }) {
   const { icon, color, title, desc } = formatEvent(evt);
+  const timeStr = new Date(evt.timestamp).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
   
   return (
     <motion.div
@@ -71,8 +98,11 @@ function EventCard({ evt }: { evt: EngineEvent }) {
       <div className="flex-1 min-w-0">
         <div className="flex justify-between items-start gap-2 mb-0.5">
           <span className={`font-medium text-${color} truncate`}>{title}</span>
-          <span className="text-[10px] text-text-dim whitespace-nowrap shrink-0">
-            {new Date(evt.timestamp).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second:'2-digit' })}
+          <span 
+            className="text-[10px] font-mono text-text-dim whitespace-nowrap shrink-0 hover:text-text-secondary cursor-default"
+            title={`Event recorded at ${timeStr}`}
+          >
+            {formatRelativeTime(evt.timestamp, now)}
           </span>
         </div>
         <div className="text-text-secondary leading-snug">

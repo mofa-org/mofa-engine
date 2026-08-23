@@ -9,7 +9,7 @@ import { engine } from '../engine';
 import { Activity, LayoutDashboard, Cpu, Network, ExternalLink, Layers, DollarSign, ShieldCheck } from 'lucide-react';
 import { DataFlowAudit } from './DataFlowAudit';
 
-const GRAFANA_URL = import.meta.env.VITE_GRAFANA_URL || 'http://localhost:3000';
+const GRAFANA_URL = import.meta.env.VITE_GRAFANA_URL || 'http://localhost:3001';
 
 type TabId = 'dual-track' | 'audit' | 'overview' | 'memory' | 'routing' | 'cost';
 

@@ -21,7 +21,9 @@ export function TheaterView({ phase, onRetryTts, onReset }: TheaterViewProps) {
   const elapsed = useElapsed(startedAt, phase.status !== 'error' && phase.status !== 'done');
   
   const isSynthesizing = phase.status === 'synthesizing';
-  const isChatDone = phase.status === 'translated' || phase.status === 'synthesizing' || phase.status === 'done' || (phase.status === 'error' && phase.failedStep === 'tts');
+  const isGeneratingImages = phase.status === 'generating_images';
+  const isRenderingVideo = phase.status === 'rendering_video';
+  const isChatDone = phase.status === 'translated' || phase.status === 'generating_images' || phase.status === 'synthesizing' || phase.status === 'rendering_video' || phase.status === 'done' || (phase.status === 'error' && (phase.failedStep === 'tts' || phase.failedStep === 'image' || phase.failedStep === 'video'));
   
   const chatResult = (phase as any).chat;
 
@@ -39,7 +41,7 @@ export function TheaterView({ phase, onRetryTts, onReset }: TheaterViewProps) {
         aria-live={phase.status === 'error' ? 'assertive' : 'polite'}
       >
         <h2 className="text-[20px] font-semibold text-text-primary">
-          {phase.status === 'error' ? 'Generation failed' : isSynthesizing ? 'Synthesizing audio...' : 'Translating script...'}
+          {phase.status === 'error' ? 'Generation failed' : isRenderingVideo ? 'Rendering video...' : isGeneratingImages ? 'Generating images...' : isSynthesizing ? 'Synthesizing audio...' : 'Translating script...'}
         </h2>
         <div className="flex items-center gap-2 font-mono text-[15px]" aria-hidden="true">
           <span className="text-text-primary">{(elapsed / 1000).toFixed(1)}s</span>

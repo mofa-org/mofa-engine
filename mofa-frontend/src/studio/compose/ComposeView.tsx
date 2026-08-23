@@ -9,7 +9,7 @@ import { useDraft } from '../../storage/useHistory';
 import { OnboardingBanner } from './OnboardingBanner';
 
 interface ComposeViewProps {
-  onStart: (article: string, options: { systemPrompt: string; voice: string; locality?: 'local' | 'cloud' | 'auto'; model?: string | null }) => void;
+  onStart: (article: string, options: { systemPrompt: string; voice: string; locality?: 'local' | 'cloud' | 'auto'; model?: string | null; scenarioId?: string; scenarioName?: string; apiKey?: string }) => void;
 }
 
 interface ScenarioPreset {
@@ -26,17 +26,17 @@ interface ScenarioPreset {
 const SCENARIO_PRESETS: ScenarioPreset[] = [
   {
     id: 's6-podcast',
-    name: '🎙️ S6 Podcast Matrix',
+    name: 'S6 Podcast Matrix',
     badge: 'Flagship Audio',
-    pipeline: 'Article → Chat Rewrite (hint_next=tts) → Kokoro TTS Audio',
+    pipeline: 'English Article → Chinese Podcast Rewrite (hint_next=tts) → Xiaoxiao TTS',
     defaultText: "A new study reveals that artificial intelligence models are increasingly capable of writing highly optimized code, but struggle with contextual nuances in legacy systems. Researchers at MIT found a 40% increase in developer productivity when pairing AI with human review.",
-    systemPrompt: "Rewrite as a concise conversational podcast dialogue between two hosts. Keep under 250 characters.",
+    systemPrompt: "Translate and rewrite this English article into an engaging, natural conversational Chinese podcast dialogue between two hosts, under 200 characters. Output ONLY Chinese spoken dialogue (中文).",
     voice: 'Xiaoxiao',
     locality: 'local'
   },
   {
     id: 's4-explainer',
-    name: '🎬 S4 Explainer Video',
+    name: 'S4 Explainer Video',
     badge: 'Flagship Video',
     pipeline: 'Topic → Script → ImageGen Visuals → TTS Narration → MP4',
     defaultText: "Quantum computing leverages qubits in superposition to evaluate vast computational search spaces in parallel rather than sequentially.",
@@ -46,7 +46,7 @@ const SCENARIO_PRESETS: ScenarioPreset[] = [
   },
   {
     id: 's2-review',
-    name: '📝 S2 Code Review',
+    name: 'S2 Code Review',
     badge: 'Deep Reasoning',
     pipeline: 'Git Diff → Responses API (effort=high) → Thought Chain → Report',
     defaultText: "diff --git a/auth/jwt.py b/auth/jwt.py\n@@ -12,2 +12,2 @@\n-    claims['exp'] = datetime.utcnow() + timedelta(hours=1)\n+    # TODO: Temporarily disable expiry for testing\n+    pass",
@@ -56,13 +56,43 @@ const SCENARIO_PRESETS: ScenarioPreset[] = [
   },
   {
     id: 's1-meeting',
-    name: '📋 S1 Meeting Minutes',
+    name: 'S1 Meeting Minutes',
     badge: 'Enterprise Audio',
     pipeline: 'Meeting Audio → ASR Transcribe → LLM Minutes + Action Items → 30s Audio Brief',
     defaultText: "Speaker 1 (Alice): 'We must lock enterprise data to local models by Friday.'\nSpeaker 2 (Bob): 'Kokoro TTS achieves 85ms latency on Apple Silicon.'\nSpeaker 3 (Carol): 'Zero data egress verified under prefer=local.'",
-    systemPrompt: "Extract executive meeting minutes with Decisions, Action Items, and Risks.",
+    systemPrompt: "Extract executive meeting minutes with Decisions, Action Items, and Risks. Conclude with '## Executive Audio Brief' containing 2-3 concise spoken sentences (under 60 words, clean plain text without asterisks or markdown symbols) for a 30-second executive audio brief.",
     voice: 'Nova',
     locality: 'local'
+  },
+  {
+    id: 's5-privacy',
+    name: 'S5 Privacy Moat',
+    badge: 'Air-Gapped Local',
+    pipeline: 'Confidential Query → 100% Local Inference (prefer=local) → Zero Data Egress',
+    defaultText: "Analyze this proprietary internal financial ledger: Q3 Operating Margin: 34.2%, Total R&D Outlay: $4.2M, Projected Cash Runway: 18 months. Verify key operational metrics.",
+    systemPrompt: "You are an air-gapped corporate intelligence assistant. Analyze the confidential data and provide an executive breakdown. Never exfiltrate data.",
+    voice: 'Echo',
+    locality: 'local'
+  },
+  {
+    id: 's3-doc-ai',
+    name: 'S3 Document AI',
+    badge: 'Vision VLM',
+    pipeline: 'Document / Receipt Image → VLM Multimodal Extraction → Structured JSON',
+    defaultText: "Extract total amount, merchant name, date, line items, and tax in valid JSON format from this document.",
+    systemPrompt: "You are an expert Document AI assistant. Analyze the document and return strictly valid structured JSON without commentary.",
+    voice: 'Alloy',
+    locality: 'local'
+  },
+  {
+    id: 's7-race',
+    name: 'S7 Provider Race',
+    badge: 'Dual-Track Benchmark',
+    pipeline: 'Benchmark Prompt → Concurrent Multi-Provider Race → Latency & Cost Matrix',
+    defaultText: "Explain quantum entanglement in exactly 2 concise sentences.",
+    systemPrompt: "Provide a clear, accurate, 2-sentence response for multi-provider benchmarking.",
+    voice: 'Alloy',
+    locality: 'auto'
   }
 ];
 
@@ -74,6 +104,7 @@ export function ComposeView({ onStart }: ComposeViewProps) {
   const [providerOption, setProviderOption] = useState<'local' | 'cloud'>('local');
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [systemPrompt, setSystemPrompt] = useState(SCENARIO_PRESETS[0].systemPrompt);
+  const [apiKey, setApiKey] = useState('');
   
   const { state: engineState } = useEngineConnection();
 
@@ -94,8 +125,17 @@ export function ComposeView({ onStart }: ComposeViewProps) {
   const handleGenerate = () => {
     if (!article.trim() || engineState !== 'connected') return;
     const locality = providerOption === 'cloud' ? 'cloud' : 'local';
-    const model = providerOption === 'cloud' ? 'fireworks/accounts/fireworks/models/deepseek-v4-flash' : null;
-    onStart(article, { systemPrompt, voice, locality, model });
+    const model = providerOption === 'cloud' ? 'gemini/gemini-2.5-flash' : null;
+    const activePreset = SCENARIO_PRESETS.find(p => p.id === selectedScenario);
+    onStart(article, { 
+      systemPrompt, 
+      voice, 
+      locality, 
+      model,
+      scenarioId: selectedScenario,
+      scenarioName: activePreset?.name,
+      apiKey
+    });
   };
   
   const isButtonDisabled = !article.trim() || engineState !== 'connected';
@@ -119,7 +159,7 @@ export function ComposeView({ onStart }: ComposeViewProps) {
       {/* Scenario Preset Selector Cards */}
       <div className="mb-4">
         <div className="text-[12px] font-semibold uppercase tracking-wider text-text-dim mb-2 px-1">Select Delivery Scenario:</div>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 mb-2">
           {SCENARIO_PRESETS.map(preset => {
             const isSelected = selectedScenario === preset.id;
             return (
@@ -181,7 +221,7 @@ export function ComposeView({ onStart }: ComposeViewProps) {
             className="appearance-none bg-background-hover border border-border-strong rounded-[var(--radius-small)] pl-8 pr-8 py-2 text-[13px] text-text-primary focus:outline-none focus:border-accent-blue font-medium"
           >
             <option value="local">Local Hardware (Ollama)</option>
-            <option value="cloud">Cloud Financial (Fireworks AI)</option>
+            <option value="cloud">Cloud Burst (Google Gemini)</option>
           </select>
           <Cpu className="w-4 h-4 text-accent-blue absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
           <ChevronDown className="w-4 h-4 text-text-secondary absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -204,11 +244,28 @@ export function ComposeView({ onStart }: ComposeViewProps) {
         
         {/* Language Selector */}
         <div className="relative">
-          <select disabled className="appearance-none bg-background-hover border border-border-strong rounded-[var(--radius-small)] pl-8 pr-8 py-2 text-[13px] text-text-secondary opacity-70 cursor-not-allowed">
-            <option>Chinese</option>
-            <option disabled>Spanish (soon)</option>
+          <select 
+            value={voice === 'Alloy' || voice === 'Echo' || voice === 'Nova' ? 'en' : 'zh'}
+            onChange={e => {
+              const lang = e.target.value;
+              if (lang === 'zh') {
+                setVoice('Xiaoxiao');
+                if (selectedScenario === 's6-podcast') {
+                  setSystemPrompt("Translate and rewrite this English article into an engaging, natural conversational Chinese podcast dialogue between two hosts, under 200 characters. Output ONLY Chinese spoken dialogue (中文).");
+                }
+              } else {
+                setVoice('Alloy');
+                if (selectedScenario === 's6-podcast') {
+                  setSystemPrompt("Rewrite this article into a concise, engaging English conversational podcast dialogue between two hosts. Keep under 250 characters. Output ONLY spoken words.");
+                }
+              }
+            }}
+            className="appearance-none bg-background-hover border border-border-strong rounded-[var(--radius-small)] pl-8 pr-8 py-2 text-[13px] text-text-primary focus:outline-none focus:border-accent-blue font-medium"
+          >
+            <option value="zh">Chinese (中文)</option>
+            <option value="en">English</option>
           </select>
-          <Languages className="w-4 h-4 text-text-secondary absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+          <Languages className="w-4 h-4 text-accent-cyan absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
           <ChevronDown className="w-4 h-4 text-text-secondary absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
         </div>
         
@@ -219,6 +276,20 @@ export function ComposeView({ onStart }: ComposeViewProps) {
           Advanced <ChevronDown className={`w-4 h-4 transition-transform ${showAdvanced ? 'rotate-180' : ''}`} />
         </button>
       </div>
+
+      {providerOption === 'cloud' && (
+        <div className="flex items-center gap-3 mb-6">
+          <label className="text-[13px] text-text-secondary whitespace-nowrap">Gemini API Key</label>
+          <input
+            type="password"
+            value={apiKey}
+            onChange={e => setApiKey(e.target.value)}
+            placeholder="AIza..."
+            className="flex-1 bg-background-secondary border border-border-strong rounded-[var(--radius-small)] px-3 py-2 text-[13px] font-mono text-text-primary focus:outline-none focus:border-accent-blue placeholder:text-text-dim"
+          />
+          <span className="text-[11px] text-text-dim">Stored locally only</span>
+        </div>
+      )}
 
       {showAdvanced && (
         <motion.div 
@@ -244,10 +315,17 @@ export function ComposeView({ onStart }: ComposeViewProps) {
           title={!article.trim() ? "Paste an article first" : engineState !== 'connected' ? "Engine is offline" : ""}
         >
           <Play className="w-4 h-4" />
-          Generate Podcast
+          {selectedScenario === 's6-podcast' ? 'Generate Podcast' :
+           selectedScenario === 's4-explainer' ? 'Generate Video' :
+           selectedScenario === 's2-review' || selectedScenario === 's2-code-review' ? 'Generate Review' :
+           selectedScenario === 's1-meeting' ? 'Generate Brief' :
+           selectedScenario === 's5-privacy' ? 'Analyze Confidentially' :
+           selectedScenario === 's3-doc-ai' ? 'Extract Document JSON' :
+           selectedScenario === 's7-race' ? 'Run Provider Race' :
+           'Generate Content'}
         </Button>
         <span className="text-[13px] text-text-dim">
-          {providerOption === 'cloud' ? '☁️ Fireworks AI DeepSeek Cloud · Live USD Billing' : '~18 seconds · fully local · Cmd ↵'}
+          {providerOption === 'cloud' ? '☁️ Google Gemini 2.5 Flash · Cloud Burst' : '~18 seconds · fully local · Cmd ↵'}
         </span>
       </div>
       </div>

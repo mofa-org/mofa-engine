@@ -47,7 +47,7 @@ export function Studio() {
           <ComposeView key="compose" onStart={start} />
         )}
         
-        {(phase.status === 'translating' || phase.status === 'translated' || phase.status === 'synthesizing' || phase.status === 'error') && (
+        {(phase.status === 'translating' || phase.status === 'translated' || phase.status === 'generating_images' || phase.status === 'synthesizing' || phase.status === 'rendering_video' || phase.status === 'error') && (
           <TheaterView key="theater" phase={phase} onRetryTts={retryTts} onReset={reset} />
         )}
         

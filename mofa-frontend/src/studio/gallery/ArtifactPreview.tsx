@@ -1,6 +1,7 @@
 import React from 'react';
 import { X, Download, Play, FileText, Music, Video, FileJson } from 'lucide-react';
 import { ArtifactItem } from './ArtifactCard';
+import { engine } from '../../engine';
 
 interface ArtifactPreviewProps {
   artifact: ArtifactItem | null;
@@ -9,6 +10,8 @@ interface ArtifactPreviewProps {
 
 export function ArtifactPreview({ artifact, onClose }: ArtifactPreviewProps) {
   if (!artifact) return null;
+
+  const fileUrl = artifact.previewUrl || engine.getAudioUrl(artifact.name);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-black/60 backdrop-blur-sm">
@@ -44,7 +47,7 @@ export function ArtifactPreview({ artifact, onClose }: ArtifactPreviewProps) {
               </div>
               <audio
                 controls
-                src={artifact.previewUrl || `/v1/artifacts/${artifact.name}`}
+                src={fileUrl}
                 className="w-full max-w-md mt-4"
               >
                 Your browser does not support the audio element.
@@ -57,7 +60,7 @@ export function ArtifactPreview({ artifact, onClose }: ArtifactPreviewProps) {
             <div className="flex flex-col items-center justify-center">
               <video
                 controls
-                src={artifact.previewUrl || `/v1/artifacts/${artifact.name}`}
+                src={fileUrl}
                 className="w-full max-h-[50vh] rounded-xl bg-black"
               >
                 Your browser does not support the video element.
@@ -77,7 +80,7 @@ export function ArtifactPreview({ artifact, onClose }: ArtifactPreviewProps) {
         <div className="flex items-center justify-between px-6 py-3 border-t border-border-subtle bg-background-primary/30 text-xs text-text-dim">
           <span>{artifact.scenario} · {artifact.size}</span>
           <a
-            href={artifact.previewUrl || `/v1/artifacts/${artifact.name}`}
+            href={fileUrl}
             download={artifact.name}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-accent-cyan/10 hover:bg-accent-cyan/20 border border-accent-cyan/30 text-accent-cyan rounded-lg transition-colors font-medium text-xs"
           >

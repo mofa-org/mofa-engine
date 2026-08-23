@@ -25,9 +25,9 @@ export function ModelEfficiencyTable({ capabilities = [] }: ModelEfficiencyTable
           status: 'hot',
         },
         {
-          id: 'accounts/fireworks/models/deepseek-v4-flash',
-          name: 'DeepSeek v4 Flash',
-          provider: 'Fireworks AI',
+          id: 'gemini/gemini-2.5-flash',
+          name: 'Gemini 2.5 Flash',
+          provider: 'Google Gemini',
           cost_tier: 'low',
           status: 'hot',
         },

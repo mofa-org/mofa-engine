@@ -13,5 +13,11 @@ export default defineConfig({
     hmr: process.env.DISABLE_HMR !== 'true',
     host: '0.0.0.0',
     port: 3000,
+    proxy: {
+      '/v1': {
+        target: 'http://127.0.0.1:8420',
+        changeOrigin: true,
+      },
+    },
   },
 });

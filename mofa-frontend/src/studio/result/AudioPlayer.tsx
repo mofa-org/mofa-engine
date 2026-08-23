@@ -174,13 +174,6 @@ export function AudioPlayer({ filename, children }: AudioPlayerProps) {
           </Button>
         </div>
       </div>
-      
-      {/* Backup native HTML5 audio controls */}
-      <audio 
-        controls 
-        src={engine.getAudioUrl(filename)} 
-        className="w-full mt-4 h-8 opacity-80 filter invert grayscale hover:grayscale-0 transition-all rounded-md" 
-      />
     </Card>
   );
 }

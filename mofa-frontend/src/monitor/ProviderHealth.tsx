@@ -31,7 +31,7 @@ export function ProviderHealth() {
             </div>
             <div className="flex items-center gap-2">
               <span className={`text-[9px] font-mono px-1 py-0.5 rounded ${isClosed ? 'bg-accent-green/10 text-accent-green' : isHalfOpen ? 'bg-accent-yellow/10 text-accent-yellow' : 'bg-accent-red/10 text-accent-red'}`}>
-                {isClosed ? 'CLOSED' : isHalfOpen ? 'HALF_OPEN' : 'OPEN'}
+                {isClosed ? 'HEALTHY' : isHalfOpen ? 'HALF_OPEN' : 'OPEN'}
               </span>
             </div>
           </div>

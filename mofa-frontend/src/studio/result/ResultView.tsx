@@ -5,7 +5,7 @@ import { PipelinePhase } from '../usePipeline';
 import { Card } from '../../shared/Card';
 import { Badge } from '../../shared/Badge';
 import { formatMs } from '../../lib/utils';
-import { CheckCircle2, Zap, Shuffle } from 'lucide-react';
+import { CheckCircle2, Zap, Shuffle, Video, FolderOpen, ArrowRight } from 'lucide-react';
 import { PipelineViz } from '../PipelineViz';
 import { ThoughtChainView } from './ThoughtChainView';
 
@@ -20,6 +20,16 @@ export function ResultView({ phase, onReset: _onReset }: ResultViewProps) {
   const chat = (phase as any).chat;
   const tts = (phase as any).tts;
   const totalMs = (phase as any).totalMs;
+  const scenarioId = (phase as any).scenarioId || 's6-podcast';
+  const isVideo = scenarioId === 's4-explainer';
+
+  const title = isVideo
+    ? 'Your explainer video narration is ready'
+    : scenarioId === 's2-review'
+    ? 'Your code review is ready'
+    : scenarioId === 's1-meeting'
+    ? 'Your meeting brief is ready'
+    : 'Your podcast is ready';
 
   const reasoningChunks = chat?.reasoningChunks || (chat?.reasoningText ? [chat.reasoningText] : []);
   const reasoningTokenCount = chat?.reasoningTokenCount || (reasoningChunks.join('').split(/\s+/).length);
@@ -47,9 +57,75 @@ export function ResultView({ phase, onReset: _onReset }: ResultViewProps) {
           >
             <CheckCircle2 className="w-8 h-8 text-accent-green" />
           </motion.div>
-          <h2 className="text-[24px] font-semibold text-text-primary mb-2">Your podcast is ready</h2>
+          <h2 className="text-[24px] font-semibold text-text-primary mb-2">{title}</h2>
           <p className="text-[15px] font-mono text-text-dim mb-8">Generated in {((totalMs || 0) / 1000).toFixed(1)}s</p>
         </motion.div>
+
+        {isVideo && (
+          <div className="mb-6 space-y-4">
+            {/* Embedded Video Player */}
+            {(phase as any).video?.videoFilename && (
+              <div className="rounded-2xl overflow-hidden border border-purple-500/30 shadow-lg bg-black">
+                <video
+                  controls
+                  autoPlay
+                  className="w-full aspect-video"
+                  src={`http://127.0.0.1:8420/v1/files/${(phase as any).video.videoFilename.split('/').pop()}`}
+                >
+                  Your browser does not support the video tag.
+                </video>
+                <div className="p-3 bg-purple-500/10 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Video className="w-4 h-4 text-purple-400" />
+                    <span className="text-xs font-semibold text-text-primary">Explainer Video ({((phase as any).video?.durationMs || 0) / 1000}s render)</span>
+                  </div>
+                  <a
+                    href={`http://127.0.0.1:8420/v1/files/${(phase as any).video.videoFilename.split('/').pop()}`}
+                    download
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-500 text-white rounded-lg text-xs font-medium hover:bg-purple-600 transition-colors shadow-sm"
+                  >
+                    Download MP4 <ArrowRight className="w-3.5 h-3.5" />
+                  </a>
+                </div>
+              </div>
+            )}
+
+            {/* 3-Scene Visual Storyboard Grid */}
+            {((phase as any).image?.images || ((phase as any).image?.imageFilename ? [{ filename: (phase as any).image.imageFilename, title: 'Scene 1: Foundation', sceneNumber: 1 }] : [])).length > 0 && (
+              <div className="p-4 bg-background-secondary/80 border border-border-subtle rounded-2xl">
+                <div className="flex items-center justify-between mb-3 px-1">
+                  <span className="text-[12px] font-semibold uppercase tracking-wider text-text-secondary flex items-center gap-1.5">
+                    🎨 Visual Storyboard ({((phase as any).image?.images?.length || 1)} Scenes)
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {((phase as any).image?.images || [{ filename: (phase as any).image.imageFilename, title: 'Scene 1: Foundation', sceneNumber: 1 }]).map((img: any, idx: number) => (
+                    <a 
+                      key={idx} 
+                      href={`http://127.0.0.1:8420/v1/files/${img.filename.split('/').pop()}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="group aspect-video sm:aspect-square bg-background-hover border border-border-subtle rounded-xl overflow-hidden relative shadow-sm hover:border-purple-500/50 transition-all cursor-pointer block"
+                    >
+                      <img 
+                        src={`http://127.0.0.1:8420/v1/files/${img.filename.split('/').pop()}`} 
+                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" 
+                        alt={img.title} 
+                      />
+                      <div className="absolute top-2 left-2 px-1.5 py-0.5 bg-black/70 backdrop-blur-md rounded text-[9px] text-white font-mono border border-white/10">
+                        Scene {img.sceneNumber || (idx + 1)}/3
+                      </div>
+                      <div className="absolute inset-x-0 bottom-0 p-2 bg-gradient-to-t from-black/80 via-black/40 to-transparent">
+                        <p className="text-[10px] text-white font-medium truncate">{img.title}</p>
+                      </div>
+                    </a>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
 
         <div className="flex flex-col items-center mb-6 text-center">
           {/* Trace View: Keep pipeline graph visible on completion */}
