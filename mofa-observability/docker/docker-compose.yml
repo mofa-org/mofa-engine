@@ -1,10 +1,7 @@
 services:
-  mock-harness:
-    build:
-      context: ../../
-      dockerfile: mofa-observability/docker/Dockerfile
-    ports:
-      - "9092:9092"
+  # mock-harness runs natively on the host via:
+  #   cargo run -p mofa-observability --example mock_harness
+  # Prometheus scrapes it at host.docker.internal:9092
 
   prometheus:
     image: prom/prometheus:latest
@@ -14,13 +11,11 @@ services:
       - "9091:9090"
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
-    depends_on:
-      - mock-harness
 
   grafana:
     image: grafana/grafana:latest
     ports:
-      - "3000:3000"
+      - "3001:3000"
     volumes:
       - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
       - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
@@ -28,5 +23,9 @@ services:
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
     depends_on:
       - prometheus

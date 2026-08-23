@@ -60,7 +60,7 @@ def run_doctor() -> int:
         print(f"  {GREEN}[OK]{RESET}   MoFA Engine Gateway   : {GREEN}Healthy{RESET} on port 8420 (uptime: {uptime}s)")
     else:
         print(f"  {RED}[ERROR]{RESET} MoFA Engine Gateway   : {RED}Offline{RESET} on http://127.0.0.1:8420")
-        fixes.append("./quickstart.sh                   # Starts the MoFA Engine Gateway daemon")
+        fixes.append("bash quickstart.sh                 # Starts the MoFA Engine Gateway daemon")
 
     # ── 2. Ollama Local LLM Service ──────────────────────────────────
     ollama_ok, ollama_data = check_url("http://127.0.0.1:11434/api/tags")

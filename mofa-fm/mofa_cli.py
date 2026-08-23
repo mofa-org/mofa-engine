@@ -69,22 +69,28 @@ def cmd_status(args):
         status = engine.status()
 
         print(f"\n{BOLD}{CYAN}MoFA Engine Status{RESET}\n")
+        uptime = health.get('uptime_secs', health.get('uptime_seconds', 0))
+        providers_count = status.get('providers', len(status.get('provider_health', [])))
         print(f"  Health    : {GREEN}{health.get('status', 'unknown')}{RESET}")
-        print(f"  Uptime    : {health.get('uptime_seconds', '?')}s")
-        print(f"  Providers : {status.get('providers_online', '?')} online")
+        print(f"  Version   : {health.get('version', '0.1.0')}")
+        print(f"  Uptime    : {uptime}s")
+        print(f"  Providers : {providers_count} configured")
 
         caps = engine.capabilities()
         if caps:
             print(f"\n  {BOLD}Active Capabilities:{RESET}")
             for cap in caps:
                 if isinstance(cap, dict):
-                    print(f"    +- {cap.get('capability', '?')} via {cap.get('provider', '?')}/{cap.get('model', '?')}")
+                    m_name = cap.get('name') or cap.get('model') or 'unknown'
+                    p_name = cap.get('provider', 'unknown')
+                    c_name = cap.get('capability', 'unknown')
+                    print(f"    +- {c_name:10s} via {p_name}/{m_name}")
                 else:
                     print(f"    +- {cap}")
         print()
     except Exception as e:
         print(f"\n  {YELLOW}[OFFLINE]{RESET} Cannot reach engine on :8420 ({e})")
-        print(f"  {CYAN}[TIP]{RESET}    Run: ./quickstart.sh\n")
+        print(f"  {CYAN}[TIP]{RESET}    Run: bash quickstart.sh\n")
         sys.exit(1)
 
 
@@ -95,18 +101,22 @@ def cmd_models(args):
         engine = MofaEngine()
         caps = engine.capabilities()
 
-        print(f"\n{BOLD}{CYAN}Discovered Models{RESET}\n")
+        print(f"\n{BOLD}{CYAN}Discovered Models & Capabilities{RESET}\n")
         if not caps:
             print(f"  {YELLOW}No models discovered.{RESET}")
-            print(f"  {CYAN}[TIP]{RESET} Pull a model: ollama pull qwen2.5:1.5b\n")
+            print(f"  {CYAN}[TIP]{RESET} Pull a model: ollama pull qwen2.5:7b\n")
             return
 
         for cap in caps:
             if isinstance(cap, dict):
-                locality = cap.get("residency", cap.get("locality", "?"))
-                badge = f"{GREEN}LOCAL{RESET}" if "local" in str(locality).lower() else f"{YELLOW}CLOUD{RESET}"
-                print(f"  [{badge}] {BOLD}{cap.get('model', '?')}{RESET}")
-                print(f"         Provider: {cap.get('provider', '?')} | Capability: {cap.get('capability', '?')}")
+                m_name = cap.get('name') or cap.get('model') or 'unknown'
+                p_name = cap.get('provider', 'unknown')
+                c_name = cap.get('capability', 'unknown')
+                cost = cap.get('cost_tier', 'free')
+                is_local = p_name in ['ollama', 'kokoro', 'funasr', 'local_tts', 'local_asr'] or cost == 'free'
+                badge = f"{GREEN}LOCAL{RESET}" if is_local else f"{YELLOW}CLOUD{RESET}"
+                print(f"  [{badge}] {BOLD}{p_name}/{m_name}{RESET}")
+                print(f"         Capability: {c_name} | Cost: {cost}")
             else:
                 print(f"  +- {cap}")
         print()
@@ -146,7 +156,7 @@ def cmd_chat(args):
         engine.health()
     except Exception as e:
         print(f"\n  {YELLOW}[OFFLINE]{RESET} Cannot reach engine ({e})")
-        print(f"  {CYAN}[TIP]{RESET}    Run: ./quickstart.sh\n")
+        print(f"  {CYAN}[TIP]{RESET}    Run: bash quickstart.sh\n")
         sys.exit(1)
 
     print(f"\n{BOLD}{CYAN}MoFA Interactive Chat{RESET}")

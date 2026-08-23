@@ -1,5 +1,7 @@
 target/
 .env
+.env.local
+.env.*.local
 *.swp
 __pycache__/
 node_modules/
@@ -23,5 +25,7 @@ output/
 !examples/samples/*.mp3
 !examples/samples/*.png
 !examples/samples/*.wav
+mofa_asr_upload_*.txt
+config.toml
 
 

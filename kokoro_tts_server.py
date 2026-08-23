@@ -62,7 +62,7 @@ def resolve_voice(raw_voice: str) -> str:
         return VOICE_MAP[raw]
     if any(raw.startswith(p) for p in ("af_", "am_", "bf_", "bm_", "ef_", "em_", "zf_", "zm_")):
         return raw
-    return f"af_{raw}"
+    return "af_alloy"
 
 
 def is_chinese_voice(voice_id: str) -> bool:

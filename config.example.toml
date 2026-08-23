@@ -141,6 +141,12 @@ price_output_per_1k = 0.0011
 #   name = "openai/dall-e-3"
 #   capability = "image_gen"
 
+# Built-in zero-config voice: when this config declares NO TTS backend, the engine
+# automatically registers the operating system's native voice (macOS `say`, Linux
+# `espeak-ng`/`espeak`) as a low-priority local fallback — so local audio scenarios
+# work with nothing installed. Any TTS backend you declare below outranks it. No
+# configuration is needed to use it; it appears as provider `system-tts`.
+
 # Local TTS process-adapter backend. Runs a local command once per synthesis and
 # returns the produced audio file. Recommended stack (S1/S6): Qwen3-TTS + Crane
 # as the primary voice, with Kokoro as a lighter fallback — configure both and
@@ -149,6 +155,9 @@ price_output_per_1k = 0.0011
 #   {text}       input text passed as an argument
 #   {text_file}  path to a temp file holding the input text
 #   {output}     path the command must write audio to
+#   {voice}      voice name from params.voice (empty if unset)
+#   {speed}      speaking rate from params.speed (empty if unset)
+#   {format}     container from params.format; also sets the {output} extension
 #
 # Primary: Qwen3-TTS via a Crane wrapper CLI.
 # [[providers]]
@@ -233,8 +242,8 @@ enabled = false          # opt-in: set true once the command is installed
 
 # Local video-generation process-adapter backend. Runs a local text-to-video CLI
 # (e.g. an AnimateDiff / Stable-Video-Diffusion or Wan-style wrapper) once per
-# clip and returns the produced file (S4). liter-llm has no video endpoint, so
-# this local adapter is the whole video path — verify output with the quality
+# clip and returns the produced file (S4). This is the on-device video path; the
+# cloud_video_gen backend below is the API path. Verify output with the quality
 # gate before presenting it as finished. Placeholders:
 #   {prompt} {negative_prompt} {width} {height} {seconds} {fps} {output}
 # [[providers]]
@@ -255,6 +264,48 @@ enabled = false          # opt-in: set true once the command is installed
 #   name = "svd"
 #   capability = "video_gen"
 #   memory_mb = 8192
+
+# Cloud video-generation backend — the *API-level* video path (S4). Speaks the
+# Volcengine Ark / BytePlus "content generation tasks" contract that ByteDance's
+# Seedance models use: the engine submits a task, polls it to completion, then
+# downloads the finished clip as a managed artifact — all behind the same
+# `video_gen` capability as the local adapter, so routing and `prefer` work the
+# same way (this is a *cloud* backend, so `prefer = "local"` skips it).
+#
+# A `dialect` selects the vendor contract: "ark" (default) or "agnes" (the Agnes
+# AI gateway's `/videos` task API). The API key is read from this field or the
+# dialect's env var (ARK_API_KEY / AGNES_API_KEY); with no key the provider
+# registers but reports itself unavailable, so a keyless config still boots.
+# Per-request knobs go in `params`: `ratio` ("16:9"), `resolution` ("1080p"),
+# `duration`/`seconds`, `fps`, `seed`, `image_url` (for image-to-video), plus
+# `width`/`height`/`num_frames` for the Agnes dialect.
+# [[providers]]
+# name = "seedance"
+# kind = "cloud_video_gen"
+# dialect = "ark"          # or "agnes"
+# base_url = ""            # default per dialect; for Ark BytePlus (intl) use
+#                          # "https://ark.ap-southeast.bytepluses.com/api/v3"
+# api_key = "env:ARK_API_KEY"
+# cost_tier = "high"
+# priority = 3
+# enabled = false          # opt-in: set true once a key is configured
+#   [[providers.models]]
+#   name = "doubao-seedance-1-0-pro-250528"   # Ark: a Seedance model id
+#   capability = "video_gen"
+#
+# Agnes video variant (free gateway; same AGNES_API_KEY as chat/image):
+# [[providers]]
+# name = "agnes-video"
+# kind = "cloud_video_gen"
+# dialect = "agnes"
+# base_url = "https://apihub.agnes-ai.com/v1"
+# api_key = "env:AGNES_API_KEY"
+# cost_tier = "low"
+# priority = 3
+# enabled = false
+#   [[providers.models]]
+#   name = "agnes-video-v2.0"                  # or "agnes-video-2.5"
+#   capability = "video_gen"
 
 # Local embedding model via Ollama (RAG enabler, S3). Ollama auto-discovers pulled
 # models; a model whose name contains `embed` (e.g. `nomic-embed-text`,

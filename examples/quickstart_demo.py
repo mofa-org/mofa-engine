@@ -50,7 +50,7 @@ def main():
         print(f"  {GREEN}[OK]{RESET} MoFA Gateway : {GREEN}Healthy{RESET} ({health.get('status', 'online')})")
     except Exception as e:
         print(f"  {YELLOW}[WARN]{RESET} MoFA Gateway offline on :8420 ({e})")
-        print(f"  {CYAN}[TIP]{RESET}  Start engine via \x27./quickstart.sh\x27 for full live routing.")
+        print(f"  {CYAN}[TIP]{RESET}  Start engine via 'bash quickstart.sh' for full live routing.")
 
     out_dir = Path("output")
     out_dir.mkdir(parents=True, exist_ok=True)

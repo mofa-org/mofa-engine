@@ -130,6 +130,19 @@ class InvokeResult:
         target.parent.mkdir(parents=True, exist_ok=True)
 
         if self.file and os.path.exists(self.file):
+            src_ext = Path(self.file).suffix.lower()
+            dst_ext = target.suffix.lower()
+            if src_ext != dst_ext and shutil.which("ffmpeg") and src_ext in [".wav", ".mp3", ".ogg", ".flac", ".m4a"] and dst_ext in [".wav", ".mp3", ".ogg", ".flac", ".m4a"]:
+                try:
+                    subprocess.run(
+                        ["ffmpeg", "-y", "-i", self.file, str(target)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=True
+                    )
+                    return str(target)
+                except Exception:
+                    pass
             shutil.copy(self.file, target)
             return str(target)
 

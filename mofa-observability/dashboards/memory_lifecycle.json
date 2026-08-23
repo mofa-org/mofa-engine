@@ -1,4 +1,5 @@
 {
+  "uid": "engine-memory",
   "title": "MoFA Memory & Lifecycle",
   "refresh": "10s",
   "schemaVersion": 39,
