@@ -2,201 +2,124 @@
 
 **Multimodal Orchestration for Artifacts**
 
-Your apps need AI — LLM, TTS, ASR, image gen — but you don't want to wire up six different SDKs, manage model loading, or worry about which provider is down today. MoFA Engine handles all of that. One endpoint, many models, smart routing.
+[![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg)](https://www.rust-lang.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Quickstart](https://img.shields.io/badge/Quickstart-5_Minutes-brightgreen.svg)](QUICKSTART.md)
+[![Why MoFA](https://img.shields.io/badge/Why_MoFA-Differentiators-blueviolet.svg)](docs/why-mofa.md)
 
-你的应用需要 AI 能力——LLM、TTS、语音识别、图像生成——但你不想接六套 SDK、管模型加载、操心哪家 API 又挂了。MoFA Engine 帮你搞定。一个接口，多个模型，智能路由。
+Your apps need AI — LLM, TTS, ASR, image generation, vision understanding — but you don't want to wire up six different SDKs, manage memory residency, or worry about cloud API bills. MoFA Engine is a high-performance, local-first inference orchestration gateway that turns prompts into production-ready artifacts.
 
-## What it does / 做什么
+---
 
-```
-Your App ──▶ MoFA Engine ──▶ Ollama (local)
-                          ──▶ OpenAI
-                          ──▶ DeepSeek
-                          ──▶ DashScope (Qwen)
-                          ──▶ NVIDIA NIM
-                          ──▶ Perplexity
-                          ──▶ Zhipu (GLM)
-                          ──▶ ... any OpenAI-compatible API
-```
+## 30-Second Instant Demo (Zero Config)
 
-- **Capability routing** — ask for "chat" or "tts", engine picks the best available model
-  按能力路由——你说"要 chat"或"要 tts"，引擎自动选最合适的模型
-- **Local first** — prefers your Ollama models over cloud APIs (free > paid)
-  本地优先——优先用你的 Ollama 模型，省钱
-- **Auto-failover** — if a provider goes down, requests fall through to the next one
-  自动降级——某个 provider 挂了，请求自动切到下一个
-- **Circuit breaker** — stops hammering a broken provider, auto-recovers
-  熔断保护——不会反复请求已挂的 provider，自动恢复
-- **Preflight** — hint what you need next, engine pre-warms the model
-  预加载——告诉引擎下一步要什么，提前热好模型
-
-## Quick start / 快速开始
+Run all 7 scenarios in standalone mode and generate real artifacts (`.mp4` video, `.mp3` podcasts, `.md` reports, `.json` data) in 5 seconds:
 
 ```bash
-# Build
-cargo build --release
-
-# Run — auto-detects Ollama + any API keys in your environment
-OPENAI_API_KEY=sk-... DEEPSEEK_API_KEY=sk-... ./target/release/mofa-engine
-
-# Or just run with Ollama (no API keys needed)
-./target/release/mofa-engine
+git clone https://github.com/mofa-org/mofa-engine.git
+cd mofa-engine
+bash quickstart.sh demo
 ```
 
-Engine starts at `http://localhost:8420`. Open it in a browser — there's a dashboard.
-
-引擎跑在 `http://localhost:8420`。浏览器打开就有管理面板。
-
-## API
-
-**Query capabilities / 查看能力**
+Check your generated files in `output/`:
 ```bash
-curl localhost:8420/v1/capabilities
+ls -lh output/
 ```
 
-**Run inference / 跑推理**
+---
+
+## 5-Minute Full Stack Quickstart
+
+### Native One-Command Launch:
 ```bash
-# Let the engine pick a model
-curl localhost:8420/v1/invoke -d '{
-  "capability": "chat",
-  "messages": [{"role": "user", "content": "Hello"}]
-}'
-
-# Or specify one
-curl localhost:8420/v1/invoke -d '{
-  "model": "deepseek-chat",
-  "messages": [{"role": "user", "content": "Hello"}]
-}'
-
-# TTS
-curl localhost:8420/v1/invoke -d '{
-  "capability": "tts",
-  "messages": [{"role": "user", "content": "Hello world"}]
-}'
-# → returns { "file": "/tmp/mofa_tts_xxx.mp3" }
+bash quickstart.sh
 ```
 
-**Hint next step / 提示下一步**
+### Docker Compose Launch:
 ```bash
-curl localhost:8420/v1/invoke -d '{
-  "capability": "chat",
-  "messages": [{"role": "user", "content": "Translate: hello"}],
-  "hint_next": "tts"
-}'
-# Engine pre-warms a TTS model while your LLM request runs
-# 引擎在跑 LLM 的同时预热 TTS 模型
+docker compose up -d
 ```
+
+- **Web Studio UI:** `http://localhost:3000` (Interactive S1–S7 Scenarios & Artifact Studio)
+- **Dual-Track Observability UI:** `http://localhost:3000` (Click **"Observability"** in top header)
+- **Grafana Production Dashboards:** `http://localhost:3001` (login: `admin` / `admin`)
+- **Prometheus Metrics Console:** `http://localhost:9091` / `http://127.0.0.1:8420/metrics`
+- **Engine API Gateway:** `http://127.0.0.1:8420`
+
+ **Read the complete [5-Minute Quickstart Guide](QUICKSTART.md)** for detailed instructions. 
+ **Read the [Configuration & Provider Guide](docs/configuration_guide.md)** to learn all TOML settings, provider types, and custom models. 
+ **Read [Why MoFA?](docs/why-mofa.md)** to understand our architecture versus LangChain, CrewAI, AutoGen, and LiteLLM.
+
+---
+
+## End-to-End Scenarios & Deliverable Artifacts
+
+Every scenario takes natural language input and outputs a verified deliverable file:
+
+| Scenario | Guide | Command | Output Artifact | Locality / Cost |
+|---|---|---|---|---|
+| **S4 Explainer Video** | [S4 Guide](docs/scenario_guides/S4_explainer_video.md) | `python3 examples/explainer_video.py "AI Revolution"` | `output/explainer_video.mp4` | Local SD + Kokoro ($0.00) |
+| **S6 Podcast Matrix** | [S6 Guide](docs/scenario_guides/S6_podcast_matrix.md) | `python3 mofa-fm/article_to_podcast.py` | `output/podcast_episode.mp3` | Local Ollama + Kokoro ($0.00) |
+| **S7 Provider Race** | [S7 Guide](docs/scenario_guides/S7_provider_race.md) | `python3 examples/01_provider_race.py` | `output/provider_comparison.md` | Benchmark Matrix ($0.00) |
+| **S1 Meeting Brief** | [S1 Guide](docs/scenario_guides/S1_meeting_brief.md) | `python3 examples/meeting_brief.py` | `output/meeting_minutes.md` + `.wav` | Local FunASR + Ollama ($0.00) |
+| **S2 AI Code Review** | [S2 Guide](docs/scenario_guides/S2_code_review.md) | `git diff \| python3 examples/code_review.py` | `output/review_report.md` | Local Distilled R1 ($0.00) |
+| **S3 Document AI** | [S3 Guide](docs/scenario_guides/S3_document_ai.md) | `python3 examples/doc_ai.py` | `output/extracted_receipt.json` | Local Qwen-VL ($0.00) |
+| **S5 Privacy Moat** | [S5 Guide](docs/scenario_guides/S5_privacy_moat.md) | `python3 examples/meeting_brief.py --prefer local` | `output/meeting_minutes.md` | Air-Gapped Local ($0.00) |
+
+---
+
+## Architecture
+
+```
+Your App / Web Studio ── MoFA Engine (Port 8420)
+ ├── Ollama (Local LLM / VLM: Free)
+ ├── Kokoro TTS (Local Voice: Free)
+ ├── FunASR / Whisper (Local Speech: Free)
+ ├── PyTorch MPS (Stable Diffusion v1.5: Free)
+ └── OpenAI / DeepSeek / Fireworks (Cloud Fallback)
+```
+
+- **7D Scoring Router:** Evaluates availability, locality, cost, priority, context window, and health.
+- **Predictive Preflight Warmup:** Emits `hint_next` to warm downstream models (e.g. warming TTS during chat streaming) to eliminate cold starts.
+- **Hard Privacy Moat (`prefer="local"`):** Guarantees zero cloud data egress for sensitive enterprise data.
+- **Dual-Track Observability:** Real-time side-by-side telemetry contrasting local GPU resource consumption with cloud token costs.
+
+---
 
 ## Python SDK
 
 ```python
 from mofa_sdk import MofaEngine
 
-engine = MofaEngine()  # localhost:8420
+engine = MofaEngine(base_url="http://127.0.0.1:8420")
 
-# Chat — engine picks the best model
-r = engine.chat("Translate this to Chinese: hello world")
-print(r.text)           # 你好世界
-print(r.provider)       # ollama
-print(r.duration_ms)    # 1200
+# 1. Chat with predictive preflight warmup
+r = engine.chat("Explain quantum computing in two sentences", hint_next="tts", prefer="local")
+print(r.text)
 
-# TTS
-r = engine.tts("你好世界")
-print(r.file)           # /tmp/mofa_tts_xxx.mp3
+# 2. Voice synthesis
+speech = engine.tts(r.text, voice="af_heart")
+print(speech.file) # -> /var/folders/.../mofa_tts_xxx.mp3
 
-# Explicit model
-r = engine.chat("Hello", model="gpt-4o-mini")
+# 3. Vision understanding
+doc = engine.understand(images=["receipt.png"], question="Extract invoice total and merchant name")
+print(doc.text)
 ```
 
-## Configuration / 配置
+---
 
-Zero-config works — the engine auto-detects Ollama at `localhost:11434` and reads API keys from environment variables:
-
-零配置即可运行——引擎自动检测本地 Ollama，并从环境变量读 API key：
-
-| Variable | Provider |
-|---|---|
-| *(always)* | Ollama (local) |
-| `OPENAI_API_KEY` | OpenAI |
-| `DEEPSEEK_API_KEY` | DeepSeek |
-| `DASHSCOPE_API_KEY` | DashScope (Qwen) |
-| `NVIDIA_API_KEY` | NVIDIA NIM |
-| `PERPLEXITY_API_KEY` | Perplexity |
-| `ZAI_API_KEY` | Zhipu (GLM) |
-
-For more control, create a `config.toml`:
-
-需要更细粒度的控制，可以写 `config.toml`：
-
-```toml
-[listen]
-host = "0.0.0.0"
-port = 8420
-
-[memory]
-budget_mb = 16384
-idle_timeout_secs = 120
-
-[[providers]]
-name = "ollama"
-kind = "ollama"
-base_url = "http://127.0.0.1:11434"
-priority = 1
-cost_tier = "free"
-
-[[providers]]
-name = "deepseek"
-kind = "openai_compatible"
-base_url = "https://api.deepseek.com"
-api_key = "${DEEPSEEK_API_KEY}"
-priority = 5
-cost_tier = "low"
-
-[[providers.models]]
-name = "deepseek-chat"
-capability = "chat"
-context_window = 64000
-```
-
-## How routing works / 路由逻辑
-
-The engine scores every model on four dimensions and picks the highest:
-
-引擎对每个模型做四维评分，选最高的：
-
-| Dimension | Weight | Logic |
-|---|---|---|
-| **Availability** | ×1000 | Hot > Warming > Cold; Busy/Failed = skip |
-| **Locality** | ×100 | Local (Ollama) > Cloud |
-| **Cost** | ×50 | Free > Low > Medium > High |
-| **Capability** | hard filter | Must match (chat ≠ tts) |
-
-If the selected model fails, the engine tries the next best from a *different* provider.
-
-选中的模型失败时，引擎自动从*另一个* provider 找备选。
-
-## Architecture / 架构
-
-```
-mofa-kernel       Trait definitions. No implementations.
-mofa-engine-core  Providers, router, memory manager, circuit breaker, preflight.
-mofa-engine-sdk   HTTP API (Axum), SSE events, web dashboard.
-mofa-engine-app   Binary entry point.
-```
-
-All OpenAI-compatible APIs share a single generic `OpenAiCompatProvider` — adding a new provider is just config, not code.
-
-所有 OpenAI 兼容 API 共享一个通用 `OpenAiCompatProvider`——加新 provider 只需改配置，不用写代码。
-
-## Tests / 测试
+## Tests & Quality Gate
 
 ```bash
-cargo test                          # 42 unit tests
-python3 tests/test_local_models.py  # 20 local model tests (needs Ollama)
-python3 tests/test_all_providers.py # 13 multi-provider tests (needs API keys)
-cd e2e && npx playwright test       # 7 browser tests for dashboard
+cargo test --release # 236 Rust unit and integration tests (0 failures)
+cargo clippy --all-targets -- -D warnings # 0 Clippy warnings
+cd mofa-frontend && npx eslint src/ # 0 frontend lint errors
+npx vite build # Production bundle in ~230ms
+bash quickstart.sh demo # All 7 end-to-end scenario verification
 ```
+
+---
 
 ## License
 
-MIT
+MIT License — see [LICENSE](LICENSE) for details.

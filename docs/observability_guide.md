@@ -22,33 +22,33 @@ Every metric carries **mandatory `provider` and `locality` labels**, enabling si
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│ mofa-engine-core  (Aayan's kernel)                      │
-│   emit EngineEvent::RequestCompleted { ... }            │
-│   emit EngineEvent::ModelLoaded { ... }                 │
-│   emit EngineEvent::MemoryChanged { ... }               │
+│ mofa-engine-core (Aayan's kernel) │
+│ emit EngineEvent::RequestCompleted { ... } │
+│ emit EngineEvent::ModelLoaded { ... } │
+│ emit EngineEvent::MemoryChanged { ... } │
 └──────────────────┬──────────────────────────────────────┘
-                   │ broadcast channel
-                   ▼
+ │ broadcast channel
+ 
 ┌─────────────────────────────────────────────────────────┐
-│ observability_bridge::run()  (mofa-engine-sdk)          │
-│   Translates kernel events → ObsEngineEvent             │
-│   Seeds memory/model gauges on startup                  │
+│ observability_bridge::run() (mofa-engine-sdk) │
+│ Translates kernel events → ObsEngineEvent │
+│ Seeds memory/model gauges on startup │
 └──────────────────┬──────────────────────────────────────┘
-                   │ bounded mpsc channel (2048)
-                   ▼
+ │ bounded mpsc channel (2048)
+ 
 ┌─────────────────────────────────────────────────────────┐
-│ MetricsCollector::run()  (mofa-observability)           │
-│   Maintains MetricsState: counters, histograms, gauges  │
-│   Pricing engine: estimate_cost_usd()                   │
-│   Label eviction (stale labels garbage-collected)       │
+│ MetricsCollector::run() (mofa-observability) │
+│ Maintains MetricsState: counters, histograms, gauges │
+│ Pricing engine: estimate_cost_usd() │
+│ Label eviction (stale labels garbage-collected) │
 └──────────────────┬──────────────────────────────────────┘
-                   │ Arc<RwLock<MetricsState>>
-                   ▼
+ │ Arc<RwLock<MetricsState>>
+ 
 ┌─────────────────────────────────────────────────────────┐
-│ GET /metrics  (Prometheus text exposition)               │
-│ GET /v1/events  (SSE real-time stream)                   │
-│ GET /v1/cost  (JSON cost summary)                        │
-│ GET /v1/status  (JSON model/memory state)                │
+│ GET /metrics (Prometheus text exposition) │
+│ GET /v1/events (SSE real-time stream) │
+│ GET /v1/cost (JSON cost summary) │
+│ GET /v1/status (JSON model/memory state) │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -115,9 +115,9 @@ The cost engine in [`mofa-observability/src/pricing.rs`](../mofa-observability/s
 **Example cost calculation:**
 ```
 GPT-4o request: 500 prompt tokens + 200 completion tokens
-  Prompt:     500 / 1000 × $0.0025 = $0.00125
-  Completion: 200 / 1000 × $0.0100 = $0.00200
-  Total:                             $0.00325
+ Prompt: 500 / 1000 × $0.0025 = $0.00125
+ Completion: 200 / 1000 × $0.0100 = $0.00200
+ Total: $0.00325
 ```
 
 ---
@@ -165,11 +165,11 @@ Add MoFA Engine to your `prometheus.yml`:
 
 ```yaml
 scrape_configs:
-  - job_name: 'mofa-engine'
-    scrape_interval: 15s
-    static_configs:
-      - targets: ['127.0.0.1:8420']
-    metrics_path: '/metrics'
+ - job_name: 'mofa-engine'
+ scrape_interval: 15s
+ static_configs:
+ - targets: ['127.0.0.1:8420']
+ metrics_path: '/metrics'
 ```
 
 ### 6.2 Key PromQL Queries
@@ -208,56 +208,56 @@ sum(mofa_warmup_hits_total) / (sum(mofa_warmup_hits_total) + sum(mofa_preflight_
 
 ```yaml
 groups:
-  - name: mofa-alerts
-    rules:
-      # Budget cap exceeded 85%
-      - alert: MofaCostBudgetHigh
-        expr: sum(mofa_estimated_cost_usd) > 0.85
-        for: 1m
-        labels:
-          severity: warning
-        annotations:
-          summary: "MoFA cloud cost approaching budget cap"
+ - name: mofa-alerts
+ rules:
+ # Budget cap exceeded 85%
+ - alert: MofaCostBudgetHigh
+ expr: sum(mofa_estimated_cost_usd) > 0.85
+ for: 1m
+ labels:
+ severity: warning
+ annotations:
+ summary: "MoFA cloud cost approaching budget cap"
 
-      # Provider circuit breaker open
-      - alert: MofaCircuitBreakerOpen
-        expr: mofa_circuit_breaker_state == 1
-        for: 30s
-        labels:
-          severity: critical
-        annotations:
-          summary: "Circuit breaker open for {{ $labels.provider }}"
+ # Provider circuit breaker open
+ - alert: MofaCircuitBreakerOpen
+ expr: mofa_circuit_breaker_state == 1
+ for: 30s
+ labels:
+ severity: critical
+ annotations:
+ summary: "Circuit breaker open for {{ $labels.provider }}"
 
-      # High error rate (>10% in 5m window)
-      - alert: MofaHighErrorRate
-        expr: >
-          sum(rate(mofa_requests_total{status=~"4..|5.."}[5m])) by (provider)
-          / sum(rate(mofa_requests_total[5m])) by (provider) > 0.10
-        for: 2m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Error rate >10% for {{ $labels.provider }}"
+ # High error rate (>10% in 5m window)
+ - alert: MofaHighErrorRate
+ expr: >
+ sum(rate(mofa_requests_total{status=~"4..|5.."}[5m])) by (provider)
+ / sum(rate(mofa_requests_total[5m])) by (provider) > 0.10
+ for: 2m
+ labels:
+ severity: warning
+ annotations:
+ summary: "Error rate >10% for {{ $labels.provider }}"
 
-      # Memory pressure (>90% of budget)
-      - alert: MofaMemoryPressure
-        expr: >
-          mofa_memory_usage_bytes{status="observed"}
-          / mofa_memory_usage_bytes{status="reserved"} > 0.90
-        for: 1m
-        labels:
-          severity: warning
-        annotations:
-          summary: "VRAM usage exceeding 90% of budget"
+ # Memory pressure (>90% of budget)
+ - alert: MofaMemoryPressure
+ expr: >
+ mofa_memory_usage_bytes{status="observed"}
+ / mofa_memory_usage_bytes{status="reserved"} > 0.90
+ for: 1m
+ labels:
+ severity: warning
+ annotations:
+ summary: "VRAM usage exceeding 90% of budget"
 
-      # Cold start spike (P95 > 10s)
-      - alert: MofaColdStartSlow
-        expr: histogram_quantile(0.95, rate(mofa_cold_start_seconds_bucket[15m])) > 10
-        for: 5m
-        labels:
-          severity: info
-        annotations:
-          summary: "Cold start P95 exceeding 10 seconds"
+ # Cold start spike (P95 > 10s)
+ - alert: MofaColdStartSlow
+ expr: histogram_quantile(0.95, rate(mofa_cold_start_seconds_bucket[15m])) > 10
+ for: 5m
+ labels:
+ severity: info
+ annotations:
+ summary: "Cold start P95 exceeding 10 seconds"
 ```
 
 ---
@@ -273,14 +273,14 @@ engine = MofaEngine()
 
 # Basic event stream
 for event in engine.events():
-    print(event["type"], event)
+ print(event["type"], event)
 
 # With disconnect recovery and filtering
 for event in engine.events(
-    last_event_id="evt-00042",
-    event_filter=["inference_complete", "model_loaded"]
+ last_event_id="evt-00042",
+ event_filter=["inference_complete", "model_loaded"]
 ):
-    print(event)
+ print(event)
 ```
 
 ### 7.2 Raw HTTP

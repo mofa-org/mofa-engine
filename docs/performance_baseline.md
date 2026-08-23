@@ -1,7 +1,7 @@
 # MoFA Engine — Performance Baseline Report
 
-**Date:** 2026-08-08 · **Branch:** `platform` @ `50290fd`  
-**PRD Reference:** §8.6 Quality Baseline  
+**Date:** 2026-08-08 · **Branch:** `platform` @ `50290fd` 
+**PRD Reference:** §8.6 Quality Baseline 
 
 ---
 
@@ -85,7 +85,7 @@ All local providers (Ollama, Kokoro, FunASR, local SD) incur **$0.00** compute c
 | Hybrid (cloud chat + local media) | **$0.15–$0.30** |
 | Full cloud (GPT-4o + DALL-E + tts-1 + whisper) | **$0.80–$1.50** |
 
-✅ **Meets PRD §8.6 target:** $0.15–$1.50 per explainer video.
+ **Meets PRD §8.6 target:** $0.15–$1.50 per explainer video.
 
 ---
 
@@ -93,11 +93,11 @@ All local providers (Ollama, Kokoro, FunASR, local SD) incur **$0.00** compute c
 
 | Gate | Tool | Status |
 |---|---|---|
-| Rust unit tests | `cargo test --workspace` | ✅ 179 passed, 0 failed, 2 ignored |
-| Code formatting | `cargo fmt --all --check` | ✅ Clean (exit 0) |
-| Release build | `cargo build --release` | ✅ Success |
-| Python SDK import | `from mofa_sdk import MofaEngine` | ✅ 15 methods |
-| E2E dashboard | `e2e/tests/dashboard.spec.ts` | ✅ Playwright suite present |
+| Rust unit tests | `cargo test --workspace` | 179 passed, 0 failed, 2 ignored |
+| Code formatting | `cargo fmt --all --check` | Clean (exit 0) |
+| Release build | `cargo build --release` | Success |
+| Python SDK import | `from mofa_sdk import MofaEngine` | 15 methods |
+| E2E dashboard | `e2e/tests/dashboard.spec.ts` | Playwright suite present |
 
 ---
 
@@ -144,10 +144,10 @@ mofa_cold_start_seconds_bucket{provider="ollama",locality="local",model="gemma3:
 
 | Metric | Target (PRD §8.6) | Actual | Status |
 |---|---|---|---|
-| Unit test coverage | >70% | 179 tests across 5 crates | ✅ |
-| Integration scenarios | S7/S4/S6/S2/S3/S1 | All 6 scripted & functional | ✅ |
-| Flagship video cost | $0.15–$1.50 | $0.00 (local) to $1.50 (cloud) | ✅ |
-| Local cold start | Documented | 3.2–5.8s (M4) | ✅ |
-| Cloud latency | Documented | 0.4–0.8s TTFT | ✅ |
-| Dual-track metrics | provider + locality tags | All 18 metrics tagged | ✅ |
-| Documentation | Complete | Observability guide + contracts + OpenAPI | ✅ |
+| Unit test coverage | >70% | 179 tests across 5 crates | |
+| Integration scenarios | S7/S4/S6/S2/S3/S1 | All 6 scripted & functional | |
+| Flagship video cost | $0.15–$1.50 | $0.00 (local) to $1.50 (cloud) | |
+| Local cold start | Documented | 3.2–5.8s (M4) | |
+| Cloud latency | Documented | 0.4–0.8s TTFT | |
+| Dual-track metrics | provider + locality tags | All 18 metrics tagged | |
+| Documentation | Complete | Observability guide + contracts + OpenAPI | |
