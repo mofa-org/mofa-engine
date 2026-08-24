@@ -114,6 +114,19 @@ def run_doctor() -> int:
         fixes.append("pip install openai-whisper       # Enable local speech recognition for Scenario S1")
 
     # ── 5. Cloud AI Providers (Dual-Track) ───────────────────────────
+    # Auto-load .env if present
+    env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env")
+    if os.path.exists(env_file):
+        try:
+            with open(env_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        os.environ.setdefault(k.strip(), v.strip().strip("\"'"))
+        except Exception:
+            pass
+
     print(f"\n{BOLD}2. Cloud AI Providers & Hybrid Acceleration{RESET}")
     has_gemini = bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
     has_openai = bool(os.environ.get("OPENAI_API_KEY"))
@@ -123,12 +136,12 @@ def run_doctor() -> int:
     if has_gemini:
         print(f"  {GREEN}[OK]{RESET}   Google Gemini AI      : {GREEN}Configured{RESET} (Gemini 2.5 Flash Chat & Native TTS active)")
     else:
-        print(f"  {CYAN}[INFO]{RESET} Google Gemini AI      : {CYAN}Unset{RESET} (export GEMINI_API_KEY for free-tier cloud burst)")
+        print(f"  {CYAN}[INFO]{RESET} Google Gemini AI      : {CYAN}Unset{RESET} (Get key: https://aistudio.google.com -> 'bash quickstart.sh keys')")
 
     if has_openai:
-        print(f"  {GREEN}[OK]{RESET}   OpenAI Cloud          : {GREEN}Configured{RESET} (GPT-4o & Whisper cloud fallback active)")
+        print(f"  {GREEN}[OK]{RESET}   OpenAI Cloud          : {GREEN}Configured{RESET} (GPT-4o & Whisper cloud active)")
     else:
-        print(f"  {CYAN}[INFO]{RESET} OpenAI Cloud          : {CYAN}Unset{RESET} (export OPENAI_API_KEY for GPT-4o)")
+        print(f"  {CYAN}[INFO]{RESET} OpenAI Cloud          : {CYAN}Unset{RESET} (Get key: https://platform.openai.com -> 'bash quickstart.sh keys')")
 
     if has_deepseek:
         print(f"  {GREEN}[OK]{RESET}   DeepSeek Reasoning    : {GREEN}Configured{RESET} (DeepSeek-R1 deep thinking active)")

@@ -8,15 +8,15 @@ set -e
 
 ENGINE_DIR="$HOME/mofa/mofa-engine"
 
-echo "🚀 Starting MoFA Full Stack..."
+echo "[LAUNCH] Starting MoFA Full Stack..."
 
 # 1. Observability (Grafana & Prometheus Docker)
-echo "1️⃣  Starting Observability (Grafana & Prometheus)..."
+echo "1⃣  Starting Observability (Grafana & Prometheus)..."
 cd "$ENGINE_DIR/mofa-observability/docker"
 docker-compose up -d
 
 # 2. Check/Start Ollama
-echo "2️⃣  Checking Ollama status..."
+echo "2⃣  Checking Ollama status..."
 if ! pgrep -x "ollama" > /dev/null; then
     echo "Starting Ollama serve in background..."
     ollama serve > /tmp/ollama.log 2>&1 &
@@ -26,7 +26,7 @@ else
 fi
 
 # 3. Start Kokoro TTS Server
-echo "3️⃣  Starting Kokoro TTS Server..."
+echo "3⃣  Starting Kokoro TTS Server..."
 cd "$ENGINE_DIR"
 if [ -d ".kokoro-venv" ]; then
     source .kokoro-venv/bin/activate
@@ -39,6 +39,6 @@ else
 fi
 
 # 4. Start MoFA Engine Core
-echo "4️⃣  Starting MoFA Engine Daemon (Port 8420)..."
+echo "4⃣  Starting MoFA Engine Daemon (Port 8420)..."
 cd "$ENGINE_DIR"
 cargo run --release -p mofa-engine -- -c mofa_hybrid.toml
