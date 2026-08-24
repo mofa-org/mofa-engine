@@ -34,6 +34,8 @@ const REQUEST_ID_HEADER: &str = "x-request-id";
 /// Maximum accepted request body size (16 MiB) — bounds base64/JSON payloads.
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
+use mofa_engine_core::config::EngineConfig;
+
 /// Shared application state.
 #[derive(Clone)]
 struct AppState {
@@ -41,6 +43,9 @@ struct AppState {
     started_at: std::time::Instant,
     /// Optional bearer token; when set, `/v1` routes require it.
     api_token: Option<Arc<String>>,
+    /// Where the loaded config lives; runtime provider additions append
+    /// here so they survive restarts.
+    config_path: Option<std::path::PathBuf>,
 }
 
 /// Start the HTTP server.
@@ -65,6 +70,7 @@ pub async fn start_server(
         engine,
         started_at: std::time::Instant::now(),
         api_token,
+        config_path: EngineConfig::resolved_path(),
     };
 
     let app = build_app(state);
@@ -98,6 +104,10 @@ fn build_app(state: AppState) -> Router {
         .route("/v1/subscriptions/{id}", delete(unsubscribe_handler))
         .route("/v1/events", get(events_handler))
         .route("/v1/discovery/refresh", post(refresh_handler))
+        .route(
+            "/v1/config/providers",
+            get(list_providers_handler).post(add_provider_handler),
+        )
         .route("/v1/models/load", post(load_model_handler))
         .route("/v1/models/unload", post(unload_model_handler))
         .route_layer(middleware::from_fn_with_state(
@@ -227,6 +237,106 @@ async fn status_handler(State(state): State<AppState>) -> Json<mofa_kernel::Engi
 async fn refresh_handler(State(state): State<AppState>) -> Json<mofa_kernel::EngineStatus> {
     state.engine.refresh_resources().await;
     Json(state.engine.status().await)
+}
+
+/// GET /v1/config/providers — masked listing for setup UIs, derived from
+/// live capability cards (provider names never expose keys).
+async fn list_providers_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let cards = state.engine.capabilities().await;
+    let mut by_provider: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for card in cards {
+        let provider = card
+            .id
+            .split_once('/')
+            .map(|(p, _)| p.to_string())
+            .unwrap_or_else(|| card.provider.clone());
+        by_provider.entry(provider).or_default().push(card.id);
+    }
+    let providers: Vec<serde_json::Value> = by_provider
+        .into_iter()
+        .map(|(name, models)| serde_json::json!({ "name": name, "models": models }))
+        .collect();
+    Json(serde_json::json!({ "providers": providers }))
+}
+
+/// POST /v1/config/providers — register a provider at runtime (BYOK setup).
+/// Persists the entry into the config file so it survives restarts.
+async fn add_provider_handler(
+    State(state): State<AppState>,
+    Json(pc): Json<mofa_engine_core::config::ProviderConfig>,
+) -> Response {
+    // Minimal validation: resolvable kind, non-empty name/key for cloud kinds.
+    if pc.name.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(mofa_kernel::ErrorInfo {
+                code: mofa_kernel::ErrorCode::InvalidRequest,
+                message: "provider name must not be empty".into(),
+                retryable: false,
+                source: None,
+            }),
+        )
+            .into_response();
+    }
+    if let Err(err) = pc.provider_kind() {
+        return (StatusCode::BAD_REQUEST, Json(err.info())).into_response();
+    }
+    if pc.kind == "openai_compatible" && pc.api_key.as_deref().unwrap_or("").trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(mofa_kernel::ErrorInfo {
+                code: mofa_kernel::ErrorCode::InvalidRequest,
+                message: "openai_compatible providers require an api_key".into(),
+                retryable: false,
+                source: None,
+            }),
+        )
+            .into_response();
+    }
+    // Persist first: a failing append must not leave runtime/config diverged.
+    if let Some(path) = &state.config_path {
+        let entry = format!(
+            "\n[[providers]]\nname = {:?}\nkind = {:?}\nbase_url = {:?}\napi_key = {:?}\npriority = {}\ncost_tier = {:?}\n",
+            pc.name,
+            pc.kind,
+            pc.base_url,
+            pc.api_key.clone().unwrap_or_default(),
+            pc.priority,
+            pc.cost_tier,
+        );
+        if let Err(e) = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, entry.as_bytes()))
+        {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(mofa_kernel::ErrorInfo {
+                    code: mofa_kernel::ErrorCode::Config,
+                    message: format!("failed to persist provider config: {e}"),
+                    retryable: false,
+                    source: None,
+                }),
+            )
+                .into_response();
+        }
+    }
+    match state.engine.add_provider_config(&pc) {
+        Ok(()) => {
+            state.engine.refresh_resources().await;
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({
+                    "name": pc.name,
+                    "persisted": state.config_path.is_some(),
+                })),
+            )
+                .into_response()
+        }
+        Err(err) => (StatusCode::BAD_REQUEST, Json(err.info())).into_response(),
+    }
 }
 
 /// Prometheus text-exposition metrics. Public (no auth) so scrapers can reach it.

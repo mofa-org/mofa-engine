@@ -346,6 +346,22 @@ pub struct ModelDef {
 }
 
 impl EngineConfig {
+    /// The config file the loader would use: explicit path > `./config.toml`
+    /// > `~/.config/mofa-engine/config.toml`. `None` when only env
+    /// auto-detection applies (nothing to persist into).
+    pub fn resolved_path() -> Option<std::path::PathBuf> {
+        if let Ok(explicit) = std::env::var("MOFA_ENGINE_CONFIG") {
+            if !explicit.is_empty() {
+                return Some(std::path::PathBuf::from(explicit));
+            }
+        }
+        let cwd = std::path::PathBuf::from("config.toml");
+        if cwd.exists() {
+            return Some(cwd);
+        }
+        dirs::config_dir().map(|d| d.join("mofa-engine").join("config.toml"))
+    }
+
     /// Load configuration from the first available source.
     ///
     /// Priority: explicit path > `./config.toml` > `~/.config/mofa-engine/config.toml` > env auto-detect.

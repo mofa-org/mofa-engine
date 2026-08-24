@@ -74,6 +74,8 @@ pub struct MemoryReport {
 pub struct Engine {
     /// Named providers.
     providers: Vec<RegisteredProvider>,
+    /// Providers registered after startup (provider-config API).
+    runtime_providers: std::sync::RwLock<Vec<RegisteredProvider>>,
     /// Cached model cards.
     models: DashMap<String, ModelCard>,
     /// Latest backend health by provider.
@@ -140,6 +142,78 @@ impl Engine {
     }
 
     /// Create and initialize a new engine from validated configuration.
+    /// Build a provider from its config entry. Shared by startup assembly
+    /// and the runtime provider-config API.
+    pub fn build_provider(
+        pc: &crate::config::ProviderConfig,
+        artifacts_dir: Option<&str>,
+    ) -> Result<Arc<dyn Provider>, EngineError> {
+        let kind = pc.provider_kind()?;
+        let cost_tier = CostTier::from_str_loose(&pc.cost_tier);
+        match kind {
+            ProviderKind::Ollama => Ok(Arc::new(OllamaProvider::new(&pc.name, &pc.base_url))),
+            ProviderKind::OpenAiCompatible => Ok(Arc::new(OpenAiCompatProvider::with_output_dir(
+                &pc.name,
+                &pc.base_url,
+                pc.api_key.clone().unwrap_or_default(),
+                pc.models.clone(),
+                cost_tier,
+                artifacts_dir.map(str::to_string),
+            ))),
+            ProviderKind::LocalTts => {
+                let command = pc.command.clone().ok_or_else(|| {
+                    EngineError::Config(format!(
+                        "provider '{}' (local_tts) requires a command",
+                        pc.name
+                    ))
+                })?;
+                Ok(Arc::new(LocalTtsProvider::new(
+                    &pc.name,
+                    command,
+                    pc.args.clone(),
+                    pc.output_format.clone(),
+                    pc.output_dir.clone(),
+                    pc.models.clone(),
+                )))
+            }
+            _ => Err(EngineError::Config(format!(
+                "provider '{}' uses unsupported provider kind",
+                pc.name
+            ))),
+        }
+    }
+
+    /// Register a provider at runtime (provider-config API). The provider
+    /// joins routing immediately; callers persist the config entry
+    /// separately so it survives restarts.
+    pub fn add_provider_config(
+        &self,
+        pc: &crate::config::ProviderConfig,
+    ) -> Result<(), EngineError> {
+        if !pc.enabled {
+            return Err(EngineError::InvalidRequest(format!(
+                "provider '{}' is disabled",
+                pc.name
+            )));
+        }
+        let kind = pc.provider_kind()?;
+        let provider = Self::build_provider(pc, None)?;
+        let mut runtime = self
+            .runtime_providers
+            .write()
+            .expect("runtime providers lock");
+        // Replace an existing runtime entry with the same name.
+        runtime.retain(|registered| registered.name != pc.name);
+        runtime.push(RegisteredProvider {
+            name: pc.name.clone(),
+            kind,
+            priority: pc.priority,
+            provider,
+        });
+        drop(runtime);
+        Ok(())
+    }
+
     pub async fn try_new(config: EngineConfig) -> Result<Arc<Self>, EngineError> {
         config.validate()?;
 
@@ -157,40 +231,8 @@ impl Engine {
             }
 
             let kind = pc.provider_kind()?;
-            let cost_tier = CostTier::from_str_loose(&pc.cost_tier);
-            let provider: Arc<dyn Provider> = match kind {
-                ProviderKind::Ollama => Arc::new(OllamaProvider::new(&pc.name, &pc.base_url)),
-                ProviderKind::OpenAiCompatible => Arc::new(OpenAiCompatProvider::with_output_dir(
-                    &pc.name,
-                    &pc.base_url,
-                    pc.api_key.clone().unwrap_or_default(),
-                    pc.models.clone(),
-                    cost_tier,
-                    config.artifacts.dir.clone(),
-                )),
-                ProviderKind::LocalTts => {
-                    let command = pc.command.clone().ok_or_else(|| {
-                        EngineError::Config(format!(
-                            "provider '{}' (local_tts) requires a command",
-                            pc.name
-                        ))
-                    })?;
-                    Arc::new(LocalTtsProvider::new(
-                        &pc.name,
-                        command,
-                        pc.args.clone(),
-                        pc.output_format.clone(),
-                        pc.output_dir.clone(),
-                        pc.models.clone(),
-                    ))
-                }
-                _ => {
-                    return Err(EngineError::Config(format!(
-                        "provider '{}' uses unsupported provider kind",
-                        pc.name
-                    )));
-                }
-            };
+            let provider: Arc<dyn Provider> =
+                Self::build_provider(pc, config.artifacts.dir.as_deref())?;
 
             providers.push(RegisteredProvider {
                 name: pc.name.clone(),
@@ -215,6 +257,7 @@ impl Engine {
 
         let engine = Arc::new(Self {
             providers,
+            runtime_providers: std::sync::RwLock::new(Vec::new()),
             models: DashMap::new(),
             backend_health: DashMap::new(),
             memory,
@@ -257,11 +300,10 @@ impl Engine {
     async fn discover_all(&self) {
         let discovery_timeout = self.timeouts.discovery();
         let handles = self
-            .providers
-            .iter()
-            .map(|registered| {
-                let name = registered.name.clone();
-                let provider = Arc::clone(&registered.provider);
+            .registered_snapshot()
+            .into_iter()
+            .map(|(name, _kind, _priority, provider)| {
+                let name = name.clone();
                 tokio::spawn(async move {
                     let result = tokio::time::timeout(discovery_timeout, provider.discover())
                         .await
@@ -1324,29 +1366,53 @@ impl Engine {
             .clone()
     }
 
+    /// All registered providers: startup config plus runtime additions.
+    fn registered_snapshot(&self) -> Vec<(String, ProviderKind, u8, Arc<dyn Provider>)> {
+        let mut out: Vec<(String, ProviderKind, u8, Arc<dyn Provider>)> = self
+            .providers
+            .iter()
+            .map(|r| (r.name.clone(), r.kind, r.priority, Arc::clone(&r.provider)))
+            .collect();
+        if let Ok(runtime) = self.runtime_providers.read() {
+            for r in runtime.iter() {
+                out.push((r.name.clone(), r.kind, r.priority, Arc::clone(&r.provider)));
+            }
+        }
+        out
+    }
+
     fn find_provider(&self, name: &str) -> Option<Arc<dyn Provider>> {
-        self.providers
+        if let Some(found) = self
+            .providers
+            .iter()
+            .find(|registered| registered.name == name)
+        {
+            return Some(Arc::clone(&found.provider));
+        }
+        self.runtime_providers
+            .read()
+            .ok()?
             .iter()
             .find(|registered| registered.name == name)
             .map(|registered| Arc::clone(&registered.provider))
     }
 
     fn routing_providers(&self) -> Vec<RoutingProvider> {
-        self.providers
-            .iter()
-            .map(|registered| {
+        self.registered_snapshot()
+            .into_iter()
+            .map(|(name, kind, priority, _)| {
                 let health = self
                     .backend_health
-                    .get(&registered.name)
+                    .get(&name)
                     .map(|h| *h)
                     .unwrap_or(BackendHealth::Unknown);
+                let circuit_open = self.circuit_breakers.state(&name) == CircuitState::Open;
                 RoutingProvider {
-                    name: registered.name.clone(),
-                    kind: registered.kind,
-                    priority: registered.priority,
+                    name,
+                    kind,
+                    priority,
                     health,
-                    circuit_open: self.circuit_breakers.state(&registered.name)
-                        == CircuitState::Open,
+                    circuit_open,
                 }
             })
             .collect()
@@ -1842,6 +1908,7 @@ mod tests {
             .collect();
         let engine = Arc::new(Engine {
             providers: registered,
+            runtime_providers: std::sync::RwLock::new(Vec::new()),
             models: DashMap::new(),
             backend_health: DashMap::new(),
             memory: MemoryManager::new(Some(budget_mb)),
@@ -2668,6 +2735,79 @@ mod tests {
             })
             .collect();
         assert_eq!(text, "ok");
+    }
+
+    #[tokio::test]
+    async fn runtime_provider_registration_serves_requests() {
+        use crate::config::{EngineConfig, ModelDef, ProviderConfig};
+
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({
+                    "choices": [{ "message": { "role": "assistant", "content": "来自运行时注册的回复" } }],
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let engine = build_engine(vec![], 1000, 0);
+        engine.refresh_resources().await;
+        assert_eq!(engine.capabilities().await.len(), 0);
+
+        let pc = ProviderConfig {
+            name: "runtime-mock".into(),
+            kind: "openai_compatible".into(),
+            base_url: format!("http://{addr}/v1"),
+            api_key: Some("sk-test".into()),
+            enabled: true,
+            priority: 5,
+            cost_tier: "low".into(),
+            models: vec![ModelDef {
+                name: "rt-model".into(),
+                capability: "chat".into(),
+                context_window: Some(4096),
+                memory_mb: None,
+            }],
+            command: None,
+            args: Vec::new(),
+            output_format: None,
+            output_dir: None,
+        };
+        engine
+            .add_provider_config(&pc)
+            .expect("runtime registration");
+        engine.refresh_resources().await;
+
+        // The runtime model is discoverable and routable.
+        let cards = engine.capabilities().await;
+        assert!(
+            cards.iter().any(|c| c.id == "runtime-mock/rt-model"),
+            "cards: {cards:?}"
+        );
+
+        let resp = engine
+            .invoke(mofa_kernel::InferenceRequest {
+                capability: Some(mofa_kernel::Capability::Chat),
+                model: Some("runtime-mock/rt-model".into()),
+                messages: vec![mofa_kernel::Message {
+                    role: "user".into(),
+                    content: "hi".into(),
+                    images: Vec::new(),
+                }],
+                params: serde_json::json!({}),
+                request_id: "req-rt".into(),
+                app_id: None,
+                session_id: None,
+                fallback_policy: Default::default(),
+                input_file: None,
+                hint_next: None,
+            })
+            .await
+            .expect("invoke routes to runtime provider");
+        assert_eq!(resp.text.as_deref(), Some("来自运行时注册的回复"));
     }
 
     #[tokio::test]
