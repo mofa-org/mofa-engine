@@ -206,6 +206,7 @@ impl LocalTtsProvider {
             fallback_used: false,
             routing_reason: None,
             reasoning: None,
+            files: Vec::new(),
         })
     }
 }

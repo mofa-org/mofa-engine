@@ -1816,6 +1816,7 @@ mod tests {
                 fallback_used: false,
                 routing_reason: None,
                 reasoning: None,
+                files: Vec::new(),
             })
         }
     }
@@ -2619,6 +2620,7 @@ mod tests {
                 fallback_used: false,
                 routing_reason: None,
                 reasoning: (!self.thinking.is_empty()).then(|| self.thinking.concat()),
+                files: Vec::new(),
             })
         }
         async fn stream(

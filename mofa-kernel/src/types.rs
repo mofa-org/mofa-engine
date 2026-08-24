@@ -415,6 +415,10 @@ pub struct InferenceResponse {
     /// when the serving model exposes a separate thinking trace.
     #[serde(default)]
     pub reasoning: Option<String>,
+    /// All artifact paths produced by one request (image gen with n>1).
+    /// `file` mirrors the first entry for single-artifact callers.
+    #[serde(default)]
+    pub files: Vec<String>,
 }
 
 /// A single event in a streaming inference response.

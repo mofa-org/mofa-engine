@@ -110,6 +110,32 @@ struct StreamOptions {
     include_usage: bool,
 }
 
+/// POST {base}/images/generations — the OpenAI image API shape.
+#[derive(Debug, Serialize)]
+struct ImageGenRequest {
+    model: String,
+    prompt: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    n: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImageGenResponse {
+    data: Option<Vec<ImageGenItem>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImageGenItem {
+    #[serde(default)]
+    b64_json: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct ChatMessage {
     role: String,
@@ -272,6 +298,7 @@ impl Provider for OpenAiCompatProvider {
             Capability::Chat => self.invoke_chat(model_name, request, start).await,
             Capability::Tts => self.invoke_tts(model_name, request, start).await,
             Capability::Asr => self.invoke_asr(model_name, request, start).await,
+            Capability::ImageGen => self.invoke_image_gen(model_name, request, start).await,
             other => Err(EngineError::UnsupportedOperation(format!(
                 "provider '{}' does not support {other}",
                 self.name
@@ -434,6 +461,150 @@ impl OpenAiCompatProvider {
             fallback_used: false,
             routing_reason: None,
             reasoning,
+            files: Vec::new(),
+        })
+    }
+
+    /// Generate images via the OpenAI images API. b64 payloads are written
+    /// straight to the artifacts dir; url payloads are downloaded first.
+    /// Every artifact path lands in `files` (the first also mirrors into
+    /// `file` for single-image callers).
+    async fn invoke_image_gen(
+        &self,
+        model_name: &str,
+        request: &InferenceRequest,
+        start: std::time::Instant,
+    ) -> Result<InferenceResponse, EngineError> {
+        let prompt = request
+            .messages
+            .first()
+            .map(|m| m.content.clone())
+            .or_else(|| {
+                request
+                    .params
+                    .get("prompt")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+            .ok_or_else(|| {
+                EngineError::InvalidRequest("image generation requires a prompt".into())
+            })?;
+
+        let n = request
+            .params
+            .get("n")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let size = request
+            .params
+            .get("size")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let body = ImageGenRequest {
+            model: model_name.to_string(),
+            prompt,
+            n,
+            size,
+            response_format: Some("b64_json".into()),
+        };
+
+        let url = format!("{}/images/generations", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: e.to_string(),
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("image gen HTTP {status}: {text}"),
+            });
+        }
+
+        let payload: ImageGenResponse =
+            resp.json().await.map_err(|e| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("image gen parse error: {e}"),
+            })?;
+
+        let items = payload.data.unwrap_or_default();
+        if items.is_empty() {
+            return Err(EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: "image gen returned no artifacts".into(),
+            });
+        }
+
+        let mut files: Vec<String> = Vec::with_capacity(items.len());
+        for (index, item) in items.into_iter().enumerate() {
+            let bytes = if let Some(b64) = item.b64_json {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD
+                    .decode(b64.as_bytes())
+                    .map_err(|e| EngineError::ProviderError {
+                        provider: self.name.clone(),
+                        detail: format!("invalid b64 image: {e}"),
+                    })?
+            } else if let Some(image_url) = item.url {
+                self.client
+                    .get(&image_url)
+                    .send()
+                    .await
+                    .map_err(|e| EngineError::ProviderError {
+                        provider: self.name.clone(),
+                        detail: format!("image download failed: {e}"),
+                    })?
+                    .bytes()
+                    .await
+                    .map_err(|e| EngineError::ProviderError {
+                        provider: self.name.clone(),
+                        detail: format!("image download read failed: {e}"),
+                    })?
+                    .to_vec()
+            } else {
+                continue;
+            };
+            let path = self.output_dir.join(format!(
+                "mofa_img_{:02}_{}.png",
+                index,
+                uuid::Uuid::new_v4()
+            ));
+            tokio::fs::write(&path, &bytes)
+                .await
+                .map_err(|e| EngineError::Internal(format!("write error: {e}")))?;
+            files.push(path.to_string_lossy().to_string());
+        }
+
+        if files.is_empty() {
+            return Err(EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: "image gen artifacts had neither b64_json nor url".into(),
+            });
+        }
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+        Ok(InferenceResponse {
+            text: None,
+            file: Some(files[0].clone()),
+            model_used: model_name.to_string(),
+            provider: self.name.clone(),
+            duration_ms,
+            request_id: request.request_id.clone(),
+            tokens_used: None,
+            fallback_used: false,
+            routing_reason: None,
+            reasoning: None,
+            files,
         })
     }
 
@@ -517,6 +688,7 @@ impl OpenAiCompatProvider {
             fallback_used: false,
             routing_reason: None,
             reasoning: None,
+            files: Vec::new(),
         })
     }
 
@@ -593,6 +765,7 @@ impl OpenAiCompatProvider {
             fallback_used: false,
             routing_reason: None,
             reasoning: None,
+            files: Vec::new(),
         })
     }
 }
@@ -601,6 +774,92 @@ impl OpenAiCompatProvider {
 mod tests {
     use super::*;
 
+    /// Image generation against a mock images endpoint: b64 artifacts are
+    /// written to the output dir, `files` lists them all, and the request
+    /// body carries prompt/n/size.
+    #[tokio::test]
+    async fn image_gen_writes_artifacts_and_forwards_params() {
+        use base64::Engine as _;
+        let png_1px_red = base64::engine::general_purpose::STANDARD.encode([
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xDE,
+        ]);
+
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::channel::<serde_json::Value>(1);
+        let seen_for_task = std::sync::Arc::new(seen_tx);
+
+        let app = axum::Router::new().route(
+            "/v1/images/generations",
+            axum::routing::post(
+                move |axum::Json(body): axum::Json<serde_json::Value>| async move {
+                    let _ = seen_for_task.send(body).await;
+                    axum::Json(serde_json::json!({
+                        "created": 1,
+                        "data": [
+                            { "b64_json": png_1px_red },
+                            { "b64_json": png_1px_red },
+                        ]
+                    }))
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let output_dir = tempfile::tempdir().unwrap();
+        let provider = OpenAiCompatProvider::with_output_dir(
+            "mock-openai",
+            format!("http://{addr}/v1"),
+            "sk-test",
+            vec![ModelDef {
+                name: "gpt-image".into(),
+                capability: "image_gen".into(),
+                context_window: None,
+                memory_mb: None,
+            }],
+            CostTier::High,
+            Some(output_dir.path().to_string_lossy().to_string()),
+        )
+        .with_http_client(reqwest::Client::builder().no_proxy().build().unwrap());
+
+        let request = InferenceRequest {
+            capability: Some(Capability::ImageGen),
+            model: Some("mock-openai/gpt-image".into()),
+            app_id: None,
+            session_id: None,
+            fallback_policy: Default::default(),
+            messages: vec![mofa_kernel::Message {
+                role: "user".into(),
+                content: "一只橘猫".into(),
+            }],
+            input_file: None,
+            params: serde_json::json!({"n": 2, "size": "1024x1024"}),
+            hint_next: None,
+            request_id: "req-img".into(),
+        };
+
+        let resp = provider
+            .invoke("mock-openai/gpt-image", &request)
+            .await
+            .expect("image gen succeeds");
+
+        assert_eq!(resp.files.len(), 2);
+        assert_eq!(resp.file.as_deref(), Some(resp.files[0].as_str()));
+        for path in &resp.files {
+            let bytes = std::fs::read(path).expect("artifact on disk");
+            // PNG magic survived the round-trip.
+            assert_eq!(&bytes[..4], &[0x89, 0x50, 0x4E, 0x47]);
+        }
+
+        let sent = seen_rx.recv().await.expect("provider saw request body");
+        assert_eq!(sent["prompt"], "一只橘猫");
+        assert_eq!(sent["n"], 2);
+        assert_eq!(sent["size"], "1024x1024");
+        assert_eq!(sent["response_format"], "b64_json");
+        assert_eq!(resp.model_used, "gpt-image");
+    }
     /// Stream an OpenAI-style SSE chat completion (reasoning model) against a
     /// mock provider endpoint, and verify delta kinds, order, aggregation,
     /// and request passthrough (stream flag, temperature, max_tokens).
@@ -863,6 +1122,7 @@ impl OpenAiCompatProvider {
             fallback_used: false,
             routing_reason: None,
             reasoning: (!reasoning_out.is_empty()).then_some(reasoning_out),
+            files: Vec::new(),
         })
     }
 }
