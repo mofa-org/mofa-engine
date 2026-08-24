@@ -68,6 +68,9 @@ pub enum ProviderKind {
     OpenAiCompatible,
     /// Local process-adapter backend (e.g. an MLX/Kokoro or Piper TTS CLI).
     LocalTts,
+    /// Task-based video generation (create → poll → download), e.g.
+    /// DashScope video-synthesis (Seedance).
+    VideoTask,
 }
 
 impl ProviderKind {

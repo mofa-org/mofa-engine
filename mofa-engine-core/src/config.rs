@@ -699,6 +699,7 @@ impl ProviderConfig {
             "ollama" => Ok(ProviderKind::Ollama),
             "openai_compatible" => Ok(ProviderKind::OpenAiCompatible),
             "local_tts" => Ok(ProviderKind::LocalTts),
+            "video_task" => Ok(ProviderKind::VideoTask),
             other => Err(EngineError::Config(format!(
                 "unknown provider kind '{}' for provider '{}'",
                 other, self.name

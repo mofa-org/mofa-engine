@@ -160,6 +160,14 @@ impl Engine {
                 cost_tier,
                 artifacts_dir.map(str::to_string),
             ))),
+            ProviderKind::VideoTask => Ok(Arc::new(crate::backends::VideoTaskProvider::new(
+                &pc.name,
+                &pc.base_url,
+                pc.api_key.clone().unwrap_or_default(),
+                pc.models.clone(),
+                cost_tier,
+                artifacts_dir.map(str::to_string),
+            ))),
             ProviderKind::LocalTts => {
                 let command = pc.command.clone().ok_or_else(|| {
                     EngineError::Config(format!(
