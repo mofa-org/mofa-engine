@@ -109,6 +109,7 @@ impl CounterFamily {
         *self.values.entry(labels).or_insert(0) += n;
     }
 
+    #[allow(dead_code)]
     fn evict_stale(&mut self, now: Instant, max_idle: Duration) {
         let last_seen = &mut self.last_seen;
         self.values.retain(|k, _| {
@@ -152,6 +153,7 @@ impl HistogramFamily {
             .observe(value);
     }
 
+    #[allow(dead_code)]
     fn evict_stale(&mut self, now: Instant, max_idle: Duration) {
         let last_seen = &mut self.last_seen;
         self.values.retain(|k, _| {

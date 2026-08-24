@@ -24,10 +24,10 @@ def invoke(cap=None, model=None, text="Reply with exactly one word: OK", timeout
 def test(name, fn):
     try:
         result = fn()
-        print(f"  ✅ {name}: provider={result['provider']}, model={result['model_used']}, {result['duration_ms']}ms")
+        print(f"  [OK] {name}: provider={result['provider']}, model={result['model_used']}, {result['duration_ms']}ms")
         return True
     except Exception as e:
-        print(f"  ❌ {name}: {e}")
+        print(f"  [ERROR] {name}: {e}")
         return False
 
 def run_all_provider_tests():
@@ -39,7 +39,7 @@ def run_all_provider_tests():
         h = S.get(f"{BASE}/health", timeout=2).json()
         print(f"\nHealth: {h['status']} (uptime {h['uptime_secs']}s)")
     except Exception as e:
-        print(f"⚠️ Engine daemon at {BASE} is offline: {e}")
+        print(f"[WARN] Engine daemon at {BASE} is offline: {e}")
         print("Skipping live provider tests.")
         return 0
 
@@ -87,38 +87,38 @@ def run_all_provider_tests():
         audio_file = r2.get("file")
         has_file = audio_file is not None and os.path.exists(audio_file)
         size_str = f", audio={os.path.getsize(audio_file)}B" if has_file else ""
-        print(f"  ✅ Article→Podcast: LLM({r1['duration_ms']}ms, {r1['provider']}) → TTS({r2['duration_ms']}ms, {r2['provider']}){size_str}")
+        print(f"  [OK] Article→Podcast: LLM({r1['duration_ms']}ms, {r1['provider']}) → TTS({r2['duration_ms']}ms, {r2['provider']}){size_str}")
         passed += 1
     except Exception as e:
-        print(f"  ❌ Article→Podcast: {e}")
+        print(f"  [ERROR] Article→Podcast: {e}")
 
     total += 1
     try:
         r = S.get(f"{BASE}/", timeout=5)
         assert r.status_code == 200 and "MoFA Engine" in r.text
-        print(f"  ✅ Dashboard: {len(r.text)} chars HTML")
+        print(f"  [OK] Dashboard: {len(r.text)} chars HTML")
         passed += 1
     except Exception as e:
-        print(f"  ❌ Dashboard: {e}")
+        print(f"  [ERROR] Dashboard: {e}")
 
     total += 1
     try:
         r = S.get(f"{BASE}/v1/events", timeout=3, stream=True)
         assert r.status_code == 200
-        print(f"  ✅ SSE events endpoint: connected")
+        print(f"  [OK] SSE events endpoint: connected")
         r.close()
         passed += 1
     except Exception as e:
-        print(f"  ❌ SSE events: {e}")
+        print(f"  [ERROR] SSE events: {e}")
 
     total += 1
     try:
         s = S.get(f"{BASE}/v1/status", timeout=5).json()
         assert s["total_models"] >= 10
-        print(f"  ✅ Status: {s['total_models']} models, {s['loaded_models']} loaded, {s['providers']} providers")
+        print(f"  [OK] Status: {s['total_models']} models, {s['loaded_models']} loaded, {s['providers']} providers")
         passed += 1
     except Exception as e:
-        print(f"  ❌ Status: {e}")
+        print(f"  [ERROR] Status: {e}")
 
     print(f"\n{'='*70}")
     print(f"  Results: {passed}/{total} passed")

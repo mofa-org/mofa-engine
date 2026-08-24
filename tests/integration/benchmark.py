@@ -28,7 +28,7 @@ from mofa_sdk import MofaEngine, InvokeResult
 
 def run_benchmarks(mock_mode: bool = False, engine_url: str = "http://127.0.0.1:8420"):
     print("=" * 70)
-    print("  🚀 MoFA Engine — Performance Baseline & Warmup Benchmark")
+    print("  [LAUNCH] MoFA Engine — Performance Baseline & Warmup Benchmark")
     print("=" * 70)
 
     engine = MofaEngine(base_url=engine_url)
@@ -40,7 +40,7 @@ def run_benchmarks(mock_mode: bool = False, engine_url: str = "http://127.0.0.1:
                 is_live = True
                 print(f"Connected to live engine at {engine_url}")
         except Exception:
-            print(f"⚠️ Engine offline at {engine_url}. Running in simulated benchmark mode.")
+            print(f"[WARN] Engine offline at {engine_url}. Running in simulated benchmark mode.")
             is_live = False
 
     results = {
@@ -83,7 +83,7 @@ def run_benchmarks(mock_mode: bool = False, engine_url: str = "http://127.0.0.1:
         "sla_target_ttft_ms": 800.0,
         "sla_passed": first_token_ms < 800.0
     }
-    print(f"  • Time-to-First-Token (TTFT): {first_token_ms:.1f}ms (PRD SLA: <800ms) {'✅' if first_token_ms < 800 else '❌'}")
+    print(f"  • Time-to-First-Token (TTFT): {first_token_ms:.1f}ms (PRD SLA: <800ms) {'[OK]' if first_token_ms < 800 else '[ERROR]'}")
     print(f"  • Generation Velocity:        {tokens_per_sec:.1f} tokens/sec")
     print(f"  • Total Inference Duration:   {total_duration_ms:.1f}ms")
 
@@ -116,7 +116,7 @@ def run_benchmarks(mock_mode: bool = False, engine_url: str = "http://127.0.0.1:
     }
     print(f"  • Cold Start TTS Latency:    {cold_tts_ms:.1f}ms")
     print(f"  • Warm Start (hint_next):    {warm_tts_ms:.1f}ms")
-    print(f"  • Latency Reduction:         {speedup_pct:.1f}% faster with predictive warmup ⚡")
+    print(f"  • Latency Reduction:         {speedup_pct:.1f}% faster with predictive warmup ")
 
     # ─────────────────────────────────────────────────────────────────
     # 3. S6 Podcast End-to-End Pipeline
@@ -144,7 +144,7 @@ def run_benchmarks(mock_mode: bool = False, engine_url: str = "http://127.0.0.1:
     }
     print(f"  • Stage 1 (Script LLM):       {script_ms:.1f}ms")
     print(f"  • Stage 2 (Speech TTS):       {tts_ms:.1f}ms")
-    print(f"  • Total Pipeline Time:        {pipeline_total_ms:.1f}ms (Target: <3000ms) ✅")
+    print(f"  • Total Pipeline Time:        {pipeline_total_ms:.1f}ms (Target: <3000ms) [OK]")
 
     # ─────────────────────────────────────────────────────────────────
     # 4. Dual-Track Cost Efficiency
@@ -164,7 +164,7 @@ def run_benchmarks(mock_mode: bool = False, engine_url: str = "http://127.0.0.1:
     }
     print(f"  • Local Gateway Execution:    $0.0000 / request (Free on-device)")
     print(f"  • Equivalent Cloud API Cost:  $0.0085 / request")
-    print(f"  • Monthly Savings (10k reqs): ${savings_usd:.2f} USD (100% margin retention) 💰")
+    print(f"  • Monthly Savings (10k reqs): ${savings_usd:.2f} USD (100% margin retention) [COST]")
 
     # ─────────────────────────────────────────────────────────────────
     # Export Benchmark Report
@@ -176,7 +176,7 @@ def run_benchmarks(mock_mode: bool = False, engine_url: str = "http://127.0.0.1:
         json.dump(results, f, indent=2)
 
     print("\n" + "=" * 70)
-    print(f"  ✅ Benchmark Complete! Saved JSON report to {json_path}")
+    print(f"  [OK] Benchmark Complete! Saved JSON report to {json_path}")
     print("=" * 70)
 
 

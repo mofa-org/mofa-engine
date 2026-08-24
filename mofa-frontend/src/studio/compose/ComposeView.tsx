@@ -125,7 +125,7 @@ export function ComposeView({ onStart }: ComposeViewProps) {
   const handleGenerate = () => {
     if (!article.trim() || engineState !== 'connected') return;
     const locality = providerOption === 'cloud' ? 'cloud' : 'local';
-    const model = providerOption === 'cloud' ? 'gemini/gemini-2.5-flash' : null;
+    const model = providerOption === 'cloud' ? 'gemini/gemini-3.6-flash' : null;
     const activePreset = SCENARIO_PRESETS.find(p => p.id === selectedScenario);
     onStart(article, { 
       systemPrompt, 
@@ -325,7 +325,7 @@ export function ComposeView({ onStart }: ComposeViewProps) {
            'Generate Content'}
         </Button>
         <span className="text-[13px] text-text-dim">
-          {providerOption === 'cloud' ? '☁️ Google Gemini 2.5 Flash · Cloud Burst' : '~18 seconds · fully local · Cmd ↵'}
+          {providerOption === 'cloud' ? '[CLOUD] Google Gemini 2.5 Flash · Cloud Burst' : '~18 seconds · fully local · Cmd ↵'}
         </span>
       </div>
       </div>

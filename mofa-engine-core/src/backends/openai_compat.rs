@@ -1,6 +1,8 @@
 //! Generic OpenAI-compatible provider backend.
 //!
-//! Works with APIs that follow OpenAI-style chat, TTS, and ASR contracts.
+//! Works with APIs that follow OpenAI-style chat, TTS, ASR, embedding, and
+//! image-generation (`/images/generations`) contracts — e.g. the Agnes AI
+//! gateway used to validate the media scenarios end-to-end.
 
 use async_trait::async_trait;
 use mofa_kernel::{
@@ -46,8 +48,9 @@ impl OpenAiCompatProvider {
         Self::with_output_dir(name, base_url, api_key, models, cost_tier, None)
     }
 
-    /// Create a provider, writing TTS artifacts into `output_dir` (or the system
-    /// temp dir when `None`) so they land where the artifact sweeper looks.
+    /// Create a provider, writing TTS artifacts into `output_dir` (or the
+    /// mofa-owned default artifact directory when `None`) so they land where
+    /// the artifact sweeper looks.
     ///
     /// Fails (rather than panicking or silently dropping the configured
     /// timeouts) if the system TLS/HTTP stack cannot build a client.
@@ -75,10 +78,7 @@ impl OpenAiCompatProvider {
             api_key: api_key.into(),
             models,
             cost_tier,
-            output_dir: output_dir
-                .filter(|s| !s.is_empty())
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(std::env::temp_dir),
+            output_dir: crate::artifacts::ensure_artifact_dir(output_dir),
             client,
         })
     }
@@ -249,6 +249,36 @@ struct TtsRequest {
     response_format: String,
 }
 
+/// OpenAI-style `/images/generations` request.
+#[derive(Debug, Serialize)]
+struct ImageGenRequest {
+    model: String,
+    prompt: String,
+    n: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<String>,
+    /// Optional and omitted by default: some gateways (e.g. Agnes) reject
+    /// `response_format` with a 400, and when it is absent they return an image
+    /// `url` — which we download into a managed artifact anyway. Set it only when
+    /// the caller explicitly asks (`params.response_format`, e.g. `"b64_json"`)
+    /// for a server known to honor it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImageGenResponse {
+    data: Vec<ImageGenData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImageGenData {
+    #[serde(default)]
+    b64_json: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+}
+
 /// OpenAI-style `/embeddings` request: one or more input strings embedded in a
 /// single call (the API accepts a string or an array; we always send an array).
 #[derive(Debug, Serialize)]
@@ -268,9 +298,11 @@ struct EmbeddingResponse {
 struct EmbeddingData {
     #[serde(default)]
     embedding: Vec<f32>,
-    /// Position in the batch; the API may return rows out of order, so we sort by it.
-    #[serde(default)]
-    index: u32,
+    /// Position in the batch; the API may return rows out of order, so we sort by
+    /// it. `Option` (not a `#[serde(default)]` `0`) so we can tell a real index
+    /// from an absent one — collapsing every absent index to `0` would turn the
+    /// sort into a silent no-op and could mismatch rows to inputs.
+    index: Option<u32>,
 }
 
 #[async_trait]
@@ -414,6 +446,7 @@ impl Provider for OpenAiCompatProvider {
             Capability::Chat => self.invoke_chat(model_name, request, start).await,
             Capability::Tts => self.invoke_tts(model_name, request, start).await,
             Capability::Asr => self.invoke_asr(model_name, request, start).await,
+            Capability::ImageGen => self.invoke_image_gen(model_name, request, start).await,
             Capability::Embedding => self.invoke_embedding(model_name, request, start).await,
             other => Err(EngineError::UnsupportedOperation(format!(
                 "provider '{}' does not support {other}",
@@ -781,6 +814,143 @@ impl OpenAiCompatProvider {
         })
     }
 
+    /// Generate an image via the OpenAI-compatible `/images/generations` endpoint
+    /// and store it as a managed artifact.
+    ///
+    /// We request `b64_json` so we can always write a local file; when a gateway
+    /// ignores that and returns a `url` instead, we download the bytes ourselves
+    /// so the caller uniformly gets a `file` path (never a bare remote URL it
+    /// would have to fetch separately).
+    async fn invoke_image_gen(
+        &self,
+        model_name: &str,
+        request: &InferenceRequest,
+        start: std::time::Instant,
+    ) -> Result<InferenceResponse, EngineError> {
+        let prompt = request
+            .messages
+            .first()
+            .map(|m| m.content.clone())
+            .or_else(|| {
+                request
+                    .params
+                    .get("prompt")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+            .filter(|p| !p.trim().is_empty())
+            .ok_or_else(|| {
+                EngineError::InvalidRequest("image generation requires a prompt".into())
+            })?;
+
+        let size = request
+            .params
+            .get("size")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let response_format = request
+            .params
+            .get("response_format")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let body = ImageGenRequest {
+            model: model_name.to_string(),
+            prompt,
+            n: 1,
+            size,
+            response_format,
+        };
+
+        let url = format!("{}/images/generations", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: e.to_string(),
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("image_gen HTTP {status}: {text}"),
+            });
+        }
+
+        let parsed: ImageGenResponse =
+            resp.json().await.map_err(|e| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("image_gen decode error: {e}"),
+            })?;
+        let image = parsed
+            .data
+            .into_iter()
+            .next()
+            .ok_or_else(|| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: "image_gen returned no data".into(),
+            })?;
+
+        // Resolve to bytes: decode inline base64, or download the returned URL.
+        let bytes =
+            if let Some(b64) = image.b64_json {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD
+                    .decode(b64.as_bytes())
+                    .map_err(|e| EngineError::ProviderError {
+                        provider: self.name.clone(),
+                        detail: format!("image base64 decode error: {e}"),
+                    })?
+            } else if let Some(remote) = image.url {
+                let dl = self.client.get(&remote).send().await.map_err(|e| {
+                    EngineError::ProviderError {
+                        provider: self.name.clone(),
+                        detail: format!("image download error: {e}"),
+                    }
+                })?;
+                dl.bytes()
+                    .await
+                    .map_err(|e| EngineError::ProviderError {
+                        provider: self.name.clone(),
+                        detail: format!("image download read error: {e}"),
+                    })?
+                    .to_vec()
+            } else {
+                return Err(EngineError::ProviderError {
+                    provider: self.name.clone(),
+                    detail: "image_gen returned neither b64_json nor url".into(),
+                });
+            };
+
+        let path = self
+            .output_dir
+            .join(format!("mofa_image_{}.png", uuid::Uuid::new_v4()));
+        tokio::fs::write(&path, &bytes)
+            .await
+            .map_err(|e| EngineError::Internal(format!("image write error: {e}")))?;
+
+        Ok(InferenceResponse {
+            text: None,
+            file: Some(path.to_string_lossy().to_string()),
+            model_used: model_name.to_string(),
+            provider: self.name.clone(),
+            duration_ms: start.elapsed().as_millis() as u64,
+            request_id: request.request_id.clone(),
+            tokens_used: None,
+            fallback_used: false,
+            routing_reason: None,
+            ..Default::default()
+        })
+    }
+
     async fn invoke_asr(
         &self,
         model_name: &str,
@@ -903,8 +1073,14 @@ impl OpenAiCompatProvider {
                 detail: format!("embedding parse error: {e}"),
             })?;
 
-        // The API may return rows out of batch order; restore input order.
-        parsed.data.sort_by_key(|d| d.index);
+        // The API may return rows out of batch order; restore input order — but
+        // only when every row actually carries an index. If any row omits it we
+        // can't reorder reliably, so we trust the provider's returned order
+        // (OpenAI-compatible servers return rows in input order) rather than
+        // reordering on missing data.
+        if parsed.data.iter().all(|d| d.index.is_some()) {
+            parsed.data.sort_by_key(|d| d.index);
+        }
         let vectors: Vec<Vec<f32>> = parsed.data.into_iter().map(|d| d.embedding).collect();
         if vectors.is_empty() {
             return Err(EngineError::ProviderError {

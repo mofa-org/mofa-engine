@@ -1,17 +1,54 @@
 //! Retention and cleanup for engine-generated artifacts.
 //!
 //! Backends that produce files (TTS audio, and later image/video output) write
-//! them with a `mofa_` name prefix into a shared directory. Left alone these
-//! accumulate, so the engine runs a periodic sweep that deletes artifacts older
-//! than a configured retention. Only files the engine created (matched by
-//! prefix) are ever removed, so pointing the sweeper at a shared temp dir cannot
-//! touch unrelated files.
+//! them with a `mofa_` name prefix into one artifact directory — by default a
+//! mofa-owned subdirectory of the system temp dir ([`default_artifact_dir`]),
+//! never the shared temp dir itself. Left alone these accumulate, so the engine
+//! runs a periodic sweep that deletes artifacts older than a configured
+//! retention. Only files the engine created (matched by prefix) are ever
+//! removed, and the mofa-owned default keeps even those deletions away from
+//! other tenants of a world-writable shared temp dir.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 /// Name prefix stamped on every engine-generated artifact.
 pub(crate) const ARTIFACT_PREFIX: &str = "mofa_";
+
+/// Directory the engine writes artifacts into when none is configured: a
+/// mofa-OWNED subdirectory of the system temp dir — never the shared temp
+/// dir itself. The [`ArtifactSweeper`] deletes by name prefix, and sweeping
+/// a world-writable shared directory would happily remove another tenant's
+/// (or another app's) `mofa_*` files. Writers and the sweeper resolve
+/// through this one function so they always agree on the location.
+pub(crate) fn default_artifact_dir() -> PathBuf {
+    std::env::temp_dir().join("mofa_artifacts")
+}
+
+/// Resolve a configured artifact directory, falling back to
+/// [`default_artifact_dir`] when unset (or blank).
+pub(crate) fn resolve_artifact_dir(configured: Option<String>) -> PathBuf {
+    configured
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(default_artifact_dir)
+}
+
+/// Resolve the artifact directory and create it on a best-effort basis, so a
+/// writer into a not-yet-existing default subdirectory does not fail. A
+/// creation failure is logged, not fatal — the write itself will surface the
+/// error with more context if the directory truly cannot be used.
+pub(crate) fn ensure_artifact_dir(configured: Option<String>) -> PathBuf {
+    let dir = resolve_artifact_dir(configured);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(
+            dir = %dir.display(),
+            error = %e,
+            "failed to create artifact directory"
+        );
+    }
+    dir
+}
 
 /// Deletes stale engine artifacts from a directory.
 #[derive(Debug, Clone)]
@@ -21,11 +58,12 @@ pub(crate) struct ArtifactSweeper {
 }
 
 impl ArtifactSweeper {
-    /// Create a sweeper for `dir` (defaulting to the system temp dir) that
-    /// removes engine artifacts older than `retention`.
+    /// Create a sweeper for `dir` (defaulting to [`default_artifact_dir`], a
+    /// mofa-owned subdirectory of the system temp) that removes engine
+    /// artifacts older than `retention`.
     pub(crate) fn new(dir: Option<PathBuf>, retention: Duration) -> Self {
         Self {
-            dir: dir.unwrap_or_else(std::env::temp_dir),
+            dir: dir.unwrap_or_else(default_artifact_dir),
             retention,
         }
     }
@@ -106,5 +144,27 @@ mod tests {
         let sweeper =
             ArtifactSweeper::new(Some(PathBuf::from("/nonexistent/mofa/dir")), Duration::ZERO);
         assert_eq!(sweeper.sweep(), 0);
+    }
+
+    #[test]
+    fn default_artifact_dir_is_a_mofa_owned_subdirectory() {
+        // #4 review: the default must never be the shared system temp dir
+        // itself — the sweeper deletes by name prefix, and sweeping a
+        // world-writable shared directory would delete any other tenant's
+        // `mofa_*` files.
+        let dir = resolve_artifact_dir(None);
+        assert_eq!(dir, std::env::temp_dir().join("mofa_artifacts"));
+        assert_ne!(dir, std::env::temp_dir());
+        // A configured dir is honored verbatim.
+        assert_eq!(
+            resolve_artifact_dir(Some("/tmp/custom-mofa".into())),
+            PathBuf::from("/tmp/custom-mofa")
+        );
+    }
+
+    #[test]
+    fn sweeper_defaults_to_the_mofa_owned_subdirectory() {
+        let sweeper = ArtifactSweeper::new(None, Duration::ZERO);
+        assert_eq!(sweeper.dir, std::env::temp_dir().join("mofa_artifacts"));
     }
 }

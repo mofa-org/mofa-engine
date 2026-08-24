@@ -110,7 +110,7 @@ def main():
         out_dir = Path("output")
         out_dir.mkdir(parents=True, exist_ok=True)
         report_lines = [
-            "# 🏎️ S7 Provider Race & Dual-Track Benchmark Report",
+            "# [RACE] S7 Provider Race & Dual-Track Benchmark Report",
             f"\n**Prompt:** *\"{prompt}\"*",
             "\n## Telemetry Comparison\n",
             "| Provider | Model | Latency (ms) | Cost ($) | Locality |",
@@ -126,7 +126,7 @@ def main():
             report_lines.append(f"> {r['answer']}\n")
 
         (out_dir / "provider_race.md").write_text("\n".join(report_lines), encoding="utf-8")
-        print(f"  💾 Full Benchmark Report Saved : output/provider_race.md\n")
+        print(f"  [SAVE] Full Benchmark Report Saved : output/provider_race.md\n")
 
 
 if __name__ == "__main__":

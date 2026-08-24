@@ -32,7 +32,7 @@ pub fn estimate_cost_usd(
 
     // Rates per 1,000 tokens / units: (prompt_rate_per_k, completion_rate_per_k)
     let (prompt_rate, completion_rate) = match (provider_lower.as_str(), model_lower.as_str()) {
-        // 🎙️ Speech & Audio Models (TTS & ASR)
+        // [AUDIO] Speech & Audio Models (TTS & ASR)
         (p, m) if p == "gemini-tts" || m.contains("preview-tts") => (0.000100, 0.000100),
         (_, m) if m.contains("chirp") => (0.01600, 0.01600),
         ("openai", m) if m.contains("tts-1-hd") => (0.03000, 0.03000),
@@ -40,7 +40,7 @@ pub fn estimate_cost_usd(
         ("openai", m) if m.contains("whisper-1") || m.contains("whisper-large") => (0.00600, 0.00600),
         ("openai", m) if m.contains("gpt-transcribe") => (0.00450, 0.00450),
 
-        // 🖼️ Image & Video Generation Models
+        // [IMAGE] Image & Video Generation Models
         ("openai", m) if m.contains("dall-e-3") => (0.04000, 0.04000),
         (_, m) if m.contains("flux-schnell") => (0.00300, 0.00300),
         (_, m) if m.contains("flux-dev") => (0.02500, 0.02500),
@@ -49,7 +49,7 @@ pub fn estimate_cost_usd(
         (_, m) if m.contains("veo-3.1") || m.contains("veo") => (0.40000, 0.40000),
         ("openai", m) if m.contains("sora") => (0.30000, 0.30000),
 
-        // 🟢 OpenAI Family (From OpenRouter Matrix) - Order: Most specific first!
+        // [LOCAL] OpenAI Family (From OpenRouter Matrix) - Order: Most specific first!
         ("openai", m) if m.contains("o1-pro") => (0.07500, 0.30000),
         ("openai", m) if m.contains("gpt-5.5-pro") || m.contains("gpt-5.4-pro") => (0.01500, 0.09000),
         ("openai", m) if m.contains("gpt-5.2-pro") => (0.01050, 0.08400),
@@ -65,7 +65,7 @@ pub fn estimate_cost_usd(
         ("openai", m) if m.contains("gpt-3.5") => (0.00050, 0.00150),
         ("openai", _) => (0.00250, 0.01000),
 
-        // 🟢 Anthropic Claude Family (From OpenRouter Matrix)
+        // [LOCAL] Anthropic Claude Family (From OpenRouter Matrix)
         (p, m) if (p == "anthropic" || m.contains("claude")) && (m.contains("fable-5") || m.contains("opus-5-fast") || m.contains("opus-4.8-fast")) => (0.01000, 0.05000),
         (p, m) if (p == "anthropic" || m.contains("claude")) && (m.contains("opus-4") && !m.contains("opus-4.") && !m.contains("opus-4.5") && !m.contains("opus-4.6") && !m.contains("opus-4.7") && !m.contains("opus-4.8")) => (0.01500, 0.07500),
         (p, m) if (p == "anthropic" || m.contains("claude")) && (m.contains("opus-5") || m.contains("opus-4.8") || m.contains("opus-4.7") || m.contains("opus-4.6") || m.contains("opus-4.5")) => (0.00500, 0.02500),
@@ -74,9 +74,9 @@ pub fn estimate_cost_usd(
         (p, m) if (p == "anthropic" || m.contains("claude")) && m.contains("haiku-4.5") => (0.00100, 0.00500),
         (p, m) if (p == "anthropic" || m.contains("claude")) && (m.contains("haiku") || m.contains("3-haiku")) => (0.00025, 0.00125),
         (p, m) if (p == "anthropic" || m.contains("claude")) && m.contains("3-opus") => (0.01500, 0.07500),
-        (p, _) if p == "anthropic" => (0.00300, 0.01500),
+        ("anthropic", _) => (0.00300, 0.01500),
 
-        // 🟢 DeepSeek Family (From OpenRouter Matrix)
+        // [LOCAL] DeepSeek Family (From OpenRouter Matrix)
         (p, m) if (p == "deepseek" || m.contains("deepseek")) && m.contains("v4-flash") => (0.000065, 0.000180),
         (p, m) if (p == "deepseek" || m.contains("deepseek")) && m.contains("v4-pro") => (0.000414, 0.000828),
         (p, m) if (p == "deepseek" || m.contains("deepseek")) && (m.contains("v3.2") || m.contains("v3.1") || m.contains("v3")) => (0.000209, 0.000310),
@@ -84,14 +84,14 @@ pub fn estimate_cost_usd(
         (p, m) if (p == "deepseek" || m.contains("deepseek")) && m.contains("chat") => (0.00014, 0.00028),
         (p, m) if p == "deepseek" || m.contains("deepseek") => (0.00055, 0.00219),
 
-        // 🟢 Google Gemini Family (From OpenRouter Matrix)
+        // [LOCAL] Google Gemini Family (From OpenRouter Matrix)
         (p, m) if (p.contains("gemini") || m.contains("gemini")) && (m.contains("flash") || m.contains("3.7-flash") || m.contains("2.5-flash") || m.contains("2.0-flash") || m.contains("1.5-flash")) => (0.000075, 0.000300),
         (p, m) if (p.contains("gemini") || m.contains("gemini")) && (m.contains("3-flash-preview")) => (0.000250, 0.001500),
         (p, m) if (p.contains("gemini") || m.contains("gemini")) && (m.contains("pro-latest") || m.contains("3.1-pro") || m.contains("2.5-pro") || m.contains("1.5-pro")) => (0.001250, 0.005000),
         (_p, m) if m.contains("gemma-2-27b") => (0.000650, 0.000650),
         (p, m) if p.contains("gemini") || m.contains("gemini") => (0.000100, 0.000400),
 
-        // 🟢 Open Weights Cloud Hostings (Fireworks, Together, Groq)
+        // [LOCAL] Open Weights Cloud Hostings (Fireworks, Together, Groq)
         (_p, m) if m.contains("llama-3.3-70b") || m.contains("llama-3.1-70b") || m.contains("llama-3-70b") => (0.00090, 0.00090),
         (_p, m) if m.contains("llama-3.1-8b") || m.contains("llama-3-8b") => (0.00020, 0.00020),
         (p, m) if p == "dashscope" || m.contains("qwen") => (0.00280, 0.00840),

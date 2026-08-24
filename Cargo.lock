@@ -937,6 +937,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "http-range-header"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9171a2ea8a68358193d15dd5d70c1c10a2afc3e7e4c5bc92bc9f025cebd7359c"
+
+[[package]]
 name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1480,6 +1486,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "subtle",
  "thiserror",
  "tokio",
  "tokio-stream",
@@ -1487,6 +1494,18 @@ dependencies = [
  "tower-http",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "mofa-explainer"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "dirs",
+ "mofa-engine-core",
+ "mofa-kernel",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -1510,6 +1529,48 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "mofa-podcast"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "dirs",
+ "mofa-engine-core",
+ "mofa-kernel",
+ "reqwest 0.12.28",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "mofa-review"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "dirs",
+ "mofa-engine-core",
+ "mofa-kernel",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "mofa-studio"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.9",
+ "clap",
+ "dirs",
+ "mofa-engine-core",
+ "mofa-kernel",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
 ]
@@ -2939,10 +3000,19 @@ checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
 dependencies = [
  "bitflags",
  "bytes",
+ "futures-core",
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
+ "http-range-header",
+ "httpdate",
+ "mime",
+ "mime_guess",
+ "percent-encoding",
  "pin-project-lite",
+ "tokio",
+ "tokio-util",
  "tower 0.5.3",
  "tower-layer",
  "tower-service",

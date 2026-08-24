@@ -50,7 +50,7 @@ class TestMoFAEngineE2EScenarios(unittest.TestCase):
             self.skipTest("Requires running engine daemon")
         caps = self.engine.capabilities()
         self.assertIsInstance(caps, list)
-        print(f"  ✓ Discovered {len(caps)} models across active providers")
+        print(f"  [OK] Discovered {len(caps)} models across active providers")
 
     def test_02_s7_chat_inference_and_metrics(self):
         """S7: Test basic chat inference with metrics and cost tracking."""
@@ -65,7 +65,7 @@ class TestMoFAEngineE2EScenarios(unittest.TestCase):
         self.assertIsInstance(res, InvokeResult)
         self.assertTrue(res.text and len(res.text) > 0)
         self.assertIn(res.locality, ("local", "cloud"))
-        print(f"  ✓ S7 Chat: provider={res.provider}, model={res.model_used}, locality={res.locality}, latency={res.duration_ms}ms")
+        print(f"  [OK] S7 Chat: provider={res.provider}, model={res.model_used}, locality={res.locality}, latency={res.duration_ms}ms")
 
     def test_03_s5_privacy_hard_constraint(self):
         """S5: Confidential / prefer='local' constraint must strictly keep data on local models."""
@@ -78,11 +78,11 @@ class TestMoFAEngineE2EScenarios(unittest.TestCase):
             )
             # If successful, locality MUST be local
             self.assertEqual(res.locality, "local")
-            print(f"  ✓ S5 Privacy constraint verified: served locally by {res.provider}")
+            print(f"  [OK] S5 Privacy constraint verified: served locally by {res.provider}")
         except Exception as e:
             # If no local model is available, engine MUST fail not fallback to cloud
             err_str = str(e)
-            print(f"  ✓ S5 Privacy fail-not-fallback verified: {err_str}")
+            print(f"  [OK] S5 Privacy fail-not-fallback verified: {err_str}")
             self.assertTrue("NoCapableModel" in err_str or "400" in err_str or "503" in err_str or "HTTP" in err_str)
 
     def test_04_s7_chat_stream_sse(self):
@@ -97,7 +97,7 @@ class TestMoFAEngineE2EScenarios(unittest.TestCase):
                 deltas.append(event.delta)
         
         self.assertGreater(event_count, 1, "Streaming must yield multiple chunks, not single block")
-        print(f"  ✓ S7 SSE Streaming: received {event_count} chunks ({len(''.join(deltas))} chars)")
+        print(f"  [OK] S7 SSE Streaming: received {event_count} chunks ({len(''.join(deltas))} chars)")
 
     def test_05_s2_reasoning_responses_stream(self):
         """S2: Responses API deep thinking thought-chain reasoning stream."""
@@ -111,7 +111,7 @@ class TestMoFAEngineE2EScenarios(unittest.TestCase):
         self.assertGreater(len(events), 0)
         has_reasoning_or_output = any(e.type in ("reasoning", "output", "text") for e in events)
         self.assertTrue(has_reasoning_or_output)
-        print(f"  ✓ S2 Responses Reasoning: streamed {len(events)} reasoning/output increments")
+        print(f"  [OK] S2 Responses Reasoning: streamed {len(events)} reasoning/output increments")
 
     def test_06_s3_vlm_understanding_contract(self):
         """S3: Multimodal understanding with receipt / image samples."""
@@ -125,7 +125,7 @@ class TestMoFAEngineE2EScenarios(unittest.TestCase):
             prefer="auto"
         )
         self.assertIsInstance(res, InvokeResult)
-        print(f"  ✓ S3 VLM Understanding: provider={res.provider}, result_len={len(res.text or '')}")
+        print(f"  [OK] S3 VLM Understanding: provider={res.provider}, result_len={len(res.text or '')}")
 
     def test_07_s6_podcast_pipeline(self):
         """S6: Article to podcast 2-stage pipeline (Chat -> TTS)."""
@@ -148,7 +148,7 @@ class TestMoFAEngineE2EScenarios(unittest.TestCase):
             voice="en-narrator"
         )
         self.assertTrue(tts_res.file or tts_res.url or tts_res.text)
-        print(f"  ✓ S6 Podcast Pipeline: script generated + TTS audio synthesized ({tts_res.duration_ms}ms)")
+        print(f"  [OK] S6 Podcast Pipeline: script generated + TTS audio synthesized ({tts_res.duration_ms}ms)")
 
     def test_08_s1_meeting_brief_pipeline(self):
         """S1: Meeting audio -> minutes -> brief pipeline."""
@@ -160,7 +160,7 @@ class TestMoFAEngineE2EScenarios(unittest.TestCase):
         # ASR transcription
         asr_res = self.engine.asr(str(sample_wav), diarize=True)
         self.assertIsInstance(asr_res, InvokeResult)
-        print(f"  ✓ S1 Meeting Pipeline: ASR transcription complete ({asr_res.duration_ms}ms)")
+        print(f"  [OK] S1 Meeting Pipeline: ASR transcription complete ({asr_res.duration_ms}ms)")
 
     def test_09_offline_sample_integrity(self):
         """Verify bundled sample inputs exist and are non-empty for first-run guarantees."""
@@ -176,7 +176,7 @@ class TestMoFAEngineE2EScenarios(unittest.TestCase):
         for name in required_samples:
             p = samples_dir / name
             self.assertTrue(p.exists() and p.stat().st_size > 0, f"Sample {name} must exist and be non-empty")
-        print(f"  ✓ Verified {len(required_samples)} sample input fixtures")
+        print(f"  [OK] Verified {len(required_samples)} sample input fixtures")
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ export function TopBar({ currentView = 'studio' }: TopBarProps) {
         
         <div className="flex items-center gap-3">
           <div className="hidden sm:flex items-center gap-1.5 px-2 py-1 rounded bg-background-hover border border-border-subtle text-[11px] font-mono text-text-dim cursor-pointer hover:text-text-secondary transition-colors" onClick={() => document.dispatchEvent(new KeyboardEvent('keydown', { metaKey: true, key: 'k' }))}>
-            <span>⌘</span>
+            <span>Cmd+</span>
             <span>K</span>
           </div>
           <button

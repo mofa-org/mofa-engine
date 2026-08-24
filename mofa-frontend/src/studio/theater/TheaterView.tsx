@@ -81,7 +81,7 @@ export function TheaterView({ phase, onRetryTts, onReset }: TheaterViewProps) {
         <Card className="flex-1 flex flex-col min-h-0 bg-background-card border-border-subtle shadow-sm p-0 overflow-hidden">
            <div className="p-4 border-b border-border-subtle flex items-center justify-between bg-background-secondary/50 shrink-0">
              <h3 className="text-[13px] font-medium text-text-primary tracking-wide">
-               {isChatDone ? 'SCRIPT READY ✓' : 'TRANSLATING...'}
+               {isChatDone ? 'SCRIPT READY [OK]' : 'TRANSLATING...'}
              </h3>
            </div>
            <div className="flex-1 p-6 overflow-y-auto">

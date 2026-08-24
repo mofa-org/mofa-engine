@@ -99,7 +99,7 @@ export function usePipeline() {
   const currentScript = useRef<string | null>(null);
   const currentVoice = useRef<string>('Nova');
   const currentScenarioId = useRef<string>('s6-podcast');
-  const currentScenarioName = useRef<string>('🎙️ S6 Podcast Matrix');
+  const currentScenarioName = useRef<string>('[AUDIO] S6 Podcast Matrix');
   const sessionId = useRef<string>(generateUuid());
   
 

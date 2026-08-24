@@ -1,0 +1,14 @@
+[package]
+name = "mofa-review"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Real app: review a git diff / PR locally via the MoFA engine, producing an annotated report"
+
+[dependencies]
+mofa-engine-core = { workspace = true }
+mofa-kernel = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+dirs = { workspace = true }

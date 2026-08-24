@@ -30,13 +30,13 @@ def test(name, fn):
     try:
         result = fn()
         if isinstance(result, str):
-            print(f"  ✅ {name}: {result}")
+            print(f"  [OK] {name}: {result}")
         else:
-            print(f"  ✅ {name}")
+            print(f"  [OK] {name}")
         passed += 1
         return True
     except Exception as e:
-        print(f"  ❌ {name}: {e}")
+        print(f"  [ERROR] {name}: {e}")
         return False
 
 def run_local_model_tests():
@@ -48,7 +48,7 @@ def run_local_model_tests():
     try:
         caps = S.get(f"{BASE}/v1/capabilities", timeout=2).json()
     except Exception as e:
-        print(f"⚠️ Engine daemon at {BASE} is offline: {e}")
+        print(f"[WARN] Engine daemon at {BASE} is offline: {e}")
         print("Skipping local model deep tests.")
         return 0
 

@@ -95,7 +95,7 @@ export function ResultView({ phase, onReset: _onReset }: ResultViewProps) {
               <div className="p-4 bg-background-secondary/80 border border-border-subtle rounded-2xl">
                 <div className="flex items-center justify-between mb-3 px-1">
                   <span className="text-[12px] font-semibold uppercase tracking-wider text-text-secondary flex items-center gap-1.5">
-                    🎨 Visual Storyboard ({((phase as any).image?.images?.length || 1)} Scenes)
+                    [STUDIO] Visual Storyboard ({((phase as any).image?.images?.length || 1)} Scenes)
                   </span>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">

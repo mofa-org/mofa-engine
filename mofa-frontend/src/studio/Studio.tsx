@@ -32,11 +32,11 @@ export function Studio() {
     if (phase.status === 'idle') {
       document.title = 'MoFA FM — Local AI Podcast Studio';
     } else if (phase.status === 'done') {
-      document.title = '✓ Ready — MoFA FM';
+      document.title = '[OK] Ready — MoFA FM';
     } else if (phase.status === 'error') {
       document.title = 'Error — MoFA FM';
     } else {
-      document.title = '⚡ Generating... — MoFA FM';
+      document.title = ' Generating... — MoFA FM';
     }
   }, [phase.status]);
 

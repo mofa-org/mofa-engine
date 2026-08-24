@@ -481,6 +481,7 @@ impl AppState {
             std::path::PathBuf::from(&rest),
             std::path::PathBuf::from("output").join(file_name),
             std::path::PathBuf::from("examples/samples").join(file_name),
+            std::env::temp_dir().join("mofa_artifacts").join(file_name),
             std::env::temp_dir().join(file_name),
         ];
 

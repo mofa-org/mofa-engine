@@ -254,38 +254,42 @@ def interactive_post_menu(minutes_text: str, transcript: str, out_audio: Path, e
                     break
 
             if play_target:
-                print(f"\nPlaying audio brief ({play_target})...")
+                print(f"\nPlaying audio brief ({play_target})... (Press Ctrl+C to stop)")
                 played = False
-                if sys.platform == "darwin":
-                    target_to_play = play_target
-                    try:
-                        with open(play_target, "rb") as f:
-                            magic = f.read(4)
-                        if magic == b"RIFF" and play_target.suffix.lower() != ".wav":
-                            # WAV data inside .mp3 named file; play as .wav for CoreAudio
-                            wav_path = play_target.with_suffix(".wav")
-                            if not wav_path.exists() or wav_path.stat().st_size != play_target.stat().st_size:
-                                shutil.copy(play_target, wav_path)
-                            target_to_play = wav_path
-                    except Exception:
-                        pass
+                try:
+                    if sys.platform == "darwin":
+                        target_to_play = play_target
+                        try:
+                            with open(play_target, "rb") as f:
+                                magic = f.read(4)
+                            if magic == b"RIFF" and play_target.suffix.lower() != ".wav":
+                                # WAV data inside .mp3 named file; play as .wav for CoreAudio
+                                wav_path = play_target.with_suffix(".wav")
+                                if not wav_path.exists() or wav_path.stat().st_size != play_target.stat().st_size:
+                                    shutil.copy(play_target, wav_path)
+                                target_to_play = wav_path
+                        except Exception:
+                            pass
 
-                    res = subprocess.run(["afplay", str(target_to_play)], capture_output=True, text=True)
-                    if res.returncode == 0:
-                        played = True
+                        res = subprocess.run(["afplay", str(target_to_play)], capture_output=True, text=True)
+                        if res.returncode == 0:
+                            played = True
+                        elif shutil.which("ffplay"):
+                            subprocess.run(["ffplay", "-nodisp", "-autoexit", str(target_to_play)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            played = True
                     elif shutil.which("ffplay"):
-                        subprocess.run(["ffplay", "-nodisp", "-autoexit", str(target_to_play)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        subprocess.run(["ffplay", "-nodisp", "-autoexit", str(play_target)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                         played = True
-                elif shutil.which("ffplay"):
-                    subprocess.run(["ffplay", "-nodisp", "-autoexit", str(play_target)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    played = True
-                elif shutil.which("aplay"):
-                    subprocess.run(["aplay", str(play_target)])
-                    played = True
+                    elif shutil.which("aplay"):
+                        subprocess.run(["aplay", str(play_target)])
+                        played = True
 
-                if not played:
-                    print(f"Audio player not found. Listen at: {play_target}")
-                print("[OK] Playback finished.\n")
+                    if not played:
+                        print(f"Audio player not found. Listen at: {play_target}")
+                    else:
+                        print("[OK] Playback finished.\n")
+                except KeyboardInterrupt:
+                    print("\n[STOP] Playback stopped.\n")
             else:
                 print(f"[WARN] Audio file not found at {out_audio}\n")
         elif choice == "4":
@@ -445,5 +449,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (KeyboardInterrupt, EOFError):
+        print("\n\n[EXIT] Exited.")
+        sys.exit(0)
 

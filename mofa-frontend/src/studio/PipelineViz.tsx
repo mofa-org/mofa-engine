@@ -244,7 +244,7 @@ export function PipelineNode({
                 </span>
                 {result.fallbackUsed && (
                   <span className="text-[10px] font-mono text-accent-yellow bg-accent-yellow/10 border border-accent-yellow/20 px-2 py-0.5 rounded-full whitespace-nowrap flex items-center gap-0.5">
-                    ⚡ Fallback
+                     Fallback
                   </span>
                 )}
               </div>
