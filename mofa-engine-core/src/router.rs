@@ -300,6 +300,7 @@ mod tests {
             messages: vec![Message {
                 role: "user".into(),
                 content: "hi".into(),
+                images: Vec::new(),
             }],
             input_file: None,
             params: serde_json::Value::Null,

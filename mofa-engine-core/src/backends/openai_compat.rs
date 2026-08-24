@@ -136,13 +136,42 @@ struct ImageGenItem {
     url: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 struct ChatMessage {
     role: String,
     content: String,
+    /// Attached images (data/http URLs) for vision input.
+    #[serde(default)]
+    images: Vec<String>,
     /// DeepSeek-R1 style reasoning trace, on response messages only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reasoning_content: Option<String>,
+}
+
+/// Serialize chat messages with OpenAI vision semantics: plain `content`
+/// string when there are no images, multipart content parts otherwise.
+impl Serialize for ChatMessage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry("role", &self.role)?;
+        if self.images.is_empty() {
+            map.serialize_entry("content", &self.content)?;
+        } else {
+            let mut parts: Vec<serde_json::Value> = Vec::with_capacity(self.images.len() + 1);
+            if !self.content.is_empty() {
+                parts.push(serde_json::json!({ "type": "text", "text": self.content }));
+            }
+            for url in &self.images {
+                parts.push(serde_json::json!({ "type": "image_url", "image_url": { "url": url } }));
+            }
+            map.serialize_entry("content", &parts)?;
+        }
+        map.end()
+    }
 }
 
 /// One SSE frame of a streaming chat completion.
@@ -295,7 +324,9 @@ impl Provider for OpenAiCompatProvider {
         }
 
         match capability {
-            Capability::Chat => self.invoke_chat(model_name, request, start).await,
+            Capability::Chat | Capability::Vlm => {
+                self.invoke_chat(model_name, request, start).await
+            }
             Capability::Tts => self.invoke_tts(model_name, request, start).await,
             Capability::Asr => self.invoke_asr(model_name, request, start).await,
             Capability::ImageGen => self.invoke_image_gen(model_name, request, start).await,
@@ -316,7 +347,7 @@ impl Provider for OpenAiCompatProvider {
         sink: StreamSink,
     ) -> Result<InferenceResponse, EngineError> {
         let capability = request.capability.unwrap_or(Capability::Chat);
-        if capability != Capability::Chat {
+        if !matches!(capability, Capability::Chat | Capability::Vlm) {
             let response = self.invoke(model_id, request).await?;
             if let Some(text) = &response.text
                 && !text.is_empty()
@@ -346,6 +377,7 @@ impl OpenAiCompatProvider {
             messages: vec![ChatMessage {
                 role: "user".into(),
                 content: "hi".into(),
+                images: Vec::new(),
                 reasoning_content: None,
             }],
             max_tokens: Some(1),
@@ -379,6 +411,7 @@ impl OpenAiCompatProvider {
             .map(|m| ChatMessage {
                 role: m.role.clone(),
                 content: m.content.clone(),
+                images: m.images.clone(),
                 reasoning_content: None,
             })
             .collect();
@@ -774,6 +807,88 @@ impl OpenAiCompatProvider {
 mod tests {
     use super::*;
 
+    /// Vision input: kernel messages carrying image URLs serialize as
+    /// multipart content parts (text + image_url) on the provider wire.
+    #[tokio::test]
+    async fn chat_request_serializes_images_as_multipart_content() {
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::channel::<serde_json::Value>(1);
+        let seen_for_task = std::sync::Arc::new(seen_tx);
+
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(
+                move |axum::Json(body): axum::Json<serde_json::Value>| async move {
+                    let _ = seen_for_task.send(body).await;
+                    axum::Json(serde_json::json!({
+                        "choices": [{ "message": { "role": "assistant", "content": "这是一只猫" } }],
+                        "usage": { "total_tokens": 9 }
+                    }))
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let provider = OpenAiCompatProvider::new(
+            "mock-openai",
+            format!("http://{addr}/v1"),
+            "sk-test",
+            vec![ModelDef {
+                name: "vlm".into(),
+                capability: "vlm".into(),
+                context_window: Some(8192),
+                memory_mb: None,
+            }],
+            CostTier::Low,
+        )
+        .with_http_client(reqwest::Client::builder().no_proxy().build().unwrap());
+
+        let request = InferenceRequest {
+            capability: Some(Capability::Vlm),
+            model: Some("mock-openai/vlm".into()),
+            app_id: None,
+            session_id: None,
+            fallback_policy: Default::default(),
+            messages: vec![mofa_kernel::Message {
+                role: "user".into(),
+                content: "图里是什么？".into(),
+                images: vec!["data:image/png;base64,QUJD".into()],
+            }],
+            input_file: None,
+            params: serde_json::json!({}),
+            hint_next: None,
+            request_id: "req-vlm".into(),
+        };
+
+        let resp = provider
+            .invoke("mock-openai/vlm", &request)
+            .await
+            .expect("invoke succeeds");
+        assert_eq!(resp.text.as_deref(), Some("这是一只猫"));
+
+        let sent = seen_rx.recv().await.expect("provider saw request body");
+        let content = &sent["messages"][0]["content"];
+        assert!(content.is_array(), "content must be multipart: {content}");
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "图里是什么？");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,QUJD");
+    }
+
+    /// No images → plain string content (byte-compatible with before).
+    #[test]
+    fn chat_message_without_images_serializes_plain_content() {
+        let msg = ChatMessage {
+            role: "user".into(),
+            content: "hi".into(),
+            images: Vec::new(),
+            reasoning_content: None,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["content"], "hi");
+        assert!(json.get("images").is_none());
+    }
     /// Image generation against a mock images endpoint: b64 artifacts are
     /// written to the output dir, `files` lists them all, and the request
     /// body carries prompt/n/size.
@@ -833,6 +948,7 @@ mod tests {
             messages: vec![mofa_kernel::Message {
                 role: "user".into(),
                 content: "一只橘猫".into(),
+                images: Vec::new(),
             }],
             input_file: None,
             params: serde_json::json!({"n": 2, "size": "1024x1024"}),
@@ -940,6 +1056,7 @@ mod tests {
             messages: vec![mofa_kernel::Message {
                 role: "user".into(),
                 content: "hi".into(),
+                images: Vec::new(),
             }],
             input_file: None,
             params: serde_json::json!({"temperature": 0.3, "max_tokens": 64, "enable_thinking": true}),
@@ -1033,6 +1150,7 @@ impl OpenAiCompatProvider {
             .map(|m| ChatMessage {
                 role: m.role.clone(),
                 content: m.content.clone(),
+                images: m.images.clone(),
                 reasoning_content: None,
             })
             .collect();

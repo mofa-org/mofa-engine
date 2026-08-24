@@ -98,6 +98,9 @@ struct OllamaChatRequest {
 struct OllamaMessage {
     role: String,
     content: String,
+    /// Bare base64 image payloads (Ollama chat API format).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    images: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -211,10 +214,12 @@ impl Provider for OllamaProvider {
             messages: vec![OllamaMessage {
                 role: "user".into(),
                 content: " ".into(),
+                images: Vec::new(),
             }],
             stream: false,
             keep_alive: Some("5m".into()),
         };
+        // (health probe: no images)
         let url = format!("{}/api/chat", self.base_url);
         let resp = self
             .client
@@ -251,6 +256,7 @@ impl Provider for OllamaProvider {
             messages: vec![OllamaMessage {
                 role: "user".into(),
                 content: " ".into(),
+                images: Vec::new(),
             }],
             stream: false,
             keep_alive: Some("0".into()),
@@ -298,6 +304,16 @@ impl Provider for OllamaProvider {
             .map(|m| OllamaMessage {
                 role: m.role.clone(),
                 content: m.content.clone(),
+                // Ollama wants bare base64; kernel messages carry data URLs.
+                images: m
+                    .images
+                    .iter()
+                    .map(|url| {
+                        url.split_once(",")
+                            .map(|(_, payload)| payload.to_string())
+                            .unwrap_or_else(|| url.clone())
+                    })
+                    .collect(),
             })
             .collect();
 

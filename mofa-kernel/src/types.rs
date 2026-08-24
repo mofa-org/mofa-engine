@@ -341,6 +341,10 @@ pub struct Message {
     pub role: String,
     /// Message content.
     pub content: String,
+    /// Attached images (data URLs or http URLs) for vision input. Present
+    /// only on user turns; providers map them to their multimodal format.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
 }
 
 /// Named-model fallback behavior.
