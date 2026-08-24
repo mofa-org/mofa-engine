@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use mofa_kernel::{
     BackendFeature, BackendHealth, Capability, CostTier, EngineError, InferenceRequest,
     InferenceResponse, LifecycleResult, ModelAvailability, ModelCard, ModelResidency, Provider,
-    ProviderKind, canonical_model_id, model_id_name,
+    ProviderKind, StreamDelta, StreamSink, canonical_model_id, model_id_name,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -42,6 +42,14 @@ impl OpenAiCompatProvider {
         cost_tier: CostTier,
     ) -> Self {
         Self::with_output_dir(name, base_url, api_key, models, cost_tier, None)
+    }
+
+    /// Replace the built-in HTTP client. The default client follows system
+    /// proxy settings (cloud providers may need one); callers talking to a
+    /// loopback endpoint can inject a `no_proxy()` client instead.
+    pub fn with_http_client(mut self, client: Client) -> Self {
+        self.client = client;
+        self
     }
 
     /// Create a provider, writing TTS artifacts into `output_dir` (or the system
@@ -83,12 +91,52 @@ struct ChatCompletionRequest {
     messages: Vec<ChatMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
+    /// Hybrid reasoning models (e.g. Qwen3) gate their thinking mode with
+    /// this body flag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enable_thinking: Option<bool>,
+}
+
+/// `stream_options` payload: ask OpenAI-compatible providers to attach a
+/// final usage frame to the SSE stream.
+#[derive(Debug, Serialize)]
+struct StreamOptions {
+    include_usage: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ChatMessage {
     role: String,
     content: String,
+    /// DeepSeek-R1 style reasoning trace, on response messages only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<String>,
+}
+
+/// One SSE frame of a streaming chat completion.
+#[derive(Debug, Deserialize)]
+struct ChatStreamChunk {
+    choices: Option<Vec<ChatStreamChoice>>,
+    usage: Option<ChatUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatStreamChoice {
+    delta: Option<ChatStreamDelta>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatStreamDelta {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -230,6 +278,29 @@ impl Provider for OpenAiCompatProvider {
             ))),
         }
     }
+
+    /// Stream chat completions token-by-token. Reasoning models surface their
+    /// thinking trace as `Thinking` deltas ahead of the answer text. Other
+    /// capabilities keep the default single-delta compatibility path.
+    async fn stream(
+        &self,
+        model_id: &str,
+        request: &InferenceRequest,
+        sink: StreamSink,
+    ) -> Result<InferenceResponse, EngineError> {
+        let capability = request.capability.unwrap_or(Capability::Chat);
+        if capability != Capability::Chat {
+            let response = self.invoke(model_id, request).await?;
+            if let Some(text) = &response.text
+                && !text.is_empty()
+            {
+                let _ = sink.send(StreamDelta::Text(text.clone())).await;
+            }
+            return Ok(response);
+        }
+        let model_name = model_id_name(model_id);
+        self.stream_chat(model_name, request, sink).await
+    }
 }
 
 impl OpenAiCompatProvider {
@@ -248,8 +319,13 @@ impl OpenAiCompatProvider {
             messages: vec![ChatMessage {
                 role: "user".into(),
                 content: "hi".into(),
+                reasoning_content: None,
             }],
             max_tokens: Some(1),
+            temperature: None,
+            stream: None,
+            stream_options: None,
+            enable_thinking: None,
         };
 
         let url = format!("{}/chat/completions", self.base_url);
@@ -276,6 +352,7 @@ impl OpenAiCompatProvider {
             .map(|m| ChatMessage {
                 role: m.role.clone(),
                 content: m.content.clone(),
+                reasoning_content: None,
             })
             .collect();
 
@@ -289,10 +366,20 @@ impl OpenAiCompatProvider {
             .and_then(|v| v.as_u64())
             .map(|v| v as u32);
 
+        let temperature = request.params.get("temperature").and_then(|v| v.as_f64());
+        let enable_thinking = request
+            .params
+            .get("enable_thinking")
+            .and_then(|v| v.as_bool());
+
         let body = ChatCompletionRequest {
             model: model_name.to_string(),
             messages,
             max_tokens,
+            temperature,
+            stream: None,
+            stream_options: None,
+            enable_thinking,
         };
 
         let url = format!("{}/chat/completions", self.base_url);
@@ -323,12 +410,15 @@ impl OpenAiCompatProvider {
                 detail: format!("parse error: {e}"),
             })?;
 
-        let text = chat
+        let answer = chat
             .choices
             .as_ref()
             .and_then(|c| c.first())
-            .and_then(|c| c.message.as_ref())
-            .map(|m| m.content.clone());
+            .and_then(|c| c.message.as_ref());
+        let text = answer.map(|m| m.content.clone());
+        let reasoning = answer
+            .and_then(|m| m.reasoning_content.clone())
+            .filter(|r| !r.is_empty());
 
         let tokens = chat.usage.and_then(|u| u.total_tokens);
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -343,6 +433,7 @@ impl OpenAiCompatProvider {
             tokens_used: tokens,
             fallback_used: false,
             routing_reason: None,
+            reasoning,
         })
     }
 
@@ -425,6 +516,7 @@ impl OpenAiCompatProvider {
             tokens_used: None,
             fallback_used: false,
             routing_reason: None,
+            reasoning: None,
         })
     }
 
@@ -500,6 +592,7 @@ impl OpenAiCompatProvider {
             tokens_used: None,
             fallback_used: false,
             routing_reason: None,
+            reasoning: None,
         })
     }
 }
@@ -508,6 +601,120 @@ impl OpenAiCompatProvider {
 mod tests {
     use super::*;
 
+    /// Stream an OpenAI-style SSE chat completion (reasoning model) against a
+    /// mock provider endpoint, and verify delta kinds, order, aggregation,
+    /// and request passthrough (stream flag, temperature, max_tokens).
+    #[tokio::test]
+    async fn stream_chat_parses_reasoning_and_text_deltas() {
+        use axum::body::Body;
+        use axum::http::header;
+        use axum::response::Response;
+        use tokio_stream::wrappers::ReceiverStream;
+
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::channel::<serde_json::Value>(1);
+        let seen = std::sync::Arc::new(seen_tx);
+        let seen_for_task = seen.clone();
+
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(
+                move |axum::Json(body): axum::Json<serde_json::Value>| async move {
+                    let _ = seen_for_task.send(body).await;
+                    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(8);
+                    tokio::spawn(async move {
+                        // Deliberately split the first frame across two
+                        // channel items: the parser must buffer partial lines.
+                        let frames: Vec<String> = vec![
+                            r#"data: {"choices":[{"delta":{"reasoning_content":"思考"}}]}"#.into(),
+                            "\n\n".into(),
+                            r#"data: {"choices":[{"delta":{"content":"答"}}]}"#.into(),
+                            "\n\n".into(),
+                            r#"data: {"choices":[{"delta":{"content":"案"}}]}"#.into(),
+                            "\n\n".into(),
+                            r#"data: {"choices":[],"usage":{"total_tokens":7}}"#.into(),
+                            "\n\n".into(),
+                            "data: [DONE]\n\n".into(),
+                        ];
+                        for frame in frames {
+                            let mid = frame.len() / 2;
+                            let (a, b) = frame.split_at(mid);
+                            let _ = tx.send(Ok(a.as_bytes().to_vec())).await;
+                            let _ = tx.send(Ok(b.as_bytes().to_vec())).await;
+                        }
+                    });
+                    let body = Body::from_stream(ReceiverStream::new(rx));
+                    Response::builder()
+                        .status(200)
+                        .header(header::CONTENT_TYPE, "text/event-stream")
+                        .body(body)
+                        .unwrap()
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        // The default client follows system proxy settings, which cannot
+        // reach the loopback mock; talk to it directly.
+        let direct_client = Client::builder().no_proxy().build().expect("test client");
+        let provider = OpenAiCompatProvider::new(
+            "mock-openai",
+            &format!("http://{addr}/v1"),
+            "sk-test",
+            vec![ModelDef {
+                name: "reasoner".into(),
+                capability: "chat".into(),
+                context_window: Some(8192),
+                memory_mb: None,
+            }],
+            CostTier::Low,
+        )
+        .with_http_client(direct_client);
+
+        let request = InferenceRequest {
+            capability: Some(Capability::Chat),
+            model: Some("mock-openai/reasoner".into()),
+            app_id: None,
+            session_id: None,
+            fallback_policy: Default::default(),
+            messages: vec![mofa_kernel::Message {
+                role: "user".into(),
+                content: "hi".into(),
+            }],
+            input_file: None,
+            params: serde_json::json!({"temperature": 0.3, "max_tokens": 64, "enable_thinking": true}),
+            hint_next: None,
+            request_id: "req-t".into(),
+        };
+
+        let (sink_tx, mut sink_rx) = tokio::sync::mpsc::channel::<StreamDelta>(16);
+        let resp = provider
+            .stream("mock-openai/reasoner", &request, sink_tx)
+            .await
+            .expect("stream succeeds");
+
+        let mut kinds = Vec::new();
+        while let Some(delta) = sink_rx.recv().await {
+            kinds.push(if delta.is_thinking() {
+                "thinking"
+            } else {
+                "text"
+            });
+        }
+        assert_eq!(kinds, vec!["thinking", "text", "text"]);
+        assert_eq!(resp.text.as_deref(), Some("答案"));
+        assert_eq!(resp.reasoning.as_deref(), Some("思考"));
+        assert_eq!(resp.tokens_used, Some(7));
+
+        let sent = seen_rx.recv().await.expect("provider saw request body");
+        assert_eq!(sent["stream"], true);
+        assert_eq!(sent["stream_options"]["include_usage"], true);
+        assert_eq!(sent["temperature"], 0.3);
+        assert_eq!(sent["max_tokens"], 64);
+        assert_eq!(sent["enable_thinking"], true);
+        assert_eq!(resp.model_used, "reasoner");
+    }
     #[tokio::test]
     async fn discover_returns_configured_models() {
         let provider = OpenAiCompatProvider::new(
@@ -545,5 +752,153 @@ mod tests {
         let p = OpenAiCompatProvider::new("x", "https://example.com", "key", vec![], CostTier::Low);
         assert_eq!(p.kind(), ProviderKind::OpenAiCompatible);
         assert_eq!(p.name(), "x");
+    }
+}
+
+// ==================== Streaming ====================
+
+impl OpenAiCompatProvider {
+    /// Stream a chat completion: POST with `stream: true`, parse the SSE
+    /// frames, forward `reasoning_content` deltas as `Thinking` and `content`
+    /// deltas as `Text`, and return the aggregate response.
+    async fn stream_chat(
+        &self,
+        model_name: &str,
+        request: &InferenceRequest,
+        sink: StreamSink,
+    ) -> Result<InferenceResponse, EngineError> {
+        let start = std::time::Instant::now();
+        let messages: Vec<ChatMessage> = request
+            .messages
+            .iter()
+            .map(|m| ChatMessage {
+                role: m.role.clone(),
+                content: m.content.clone(),
+                reasoning_content: None,
+            })
+            .collect();
+        if messages.is_empty() {
+            return Err(EngineError::InvalidRequest("no messages provided".into()));
+        }
+
+        let max_tokens = request
+            .params
+            .get("max_tokens")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let temperature = request.params.get("temperature").and_then(|v| v.as_f64());
+        let enable_thinking = request
+            .params
+            .get("enable_thinking")
+            .and_then(|v| v.as_bool());
+
+        let body = ChatCompletionRequest {
+            model: model_name.to_string(),
+            messages,
+            max_tokens,
+            temperature,
+            stream: Some(true),
+            stream_options: Some(StreamOptions {
+                include_usage: true,
+            }),
+            enable_thinking,
+        };
+
+        let url = format!("{}/chat/completions", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: e.to_string(),
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("HTTP {status}: {text}"),
+            });
+        }
+
+        let mut text_out = String::new();
+        let mut reasoning_out = String::new();
+        let mut tokens_used: Option<u32> = None;
+        // SSE frames can split across network chunks; buffer partial lines
+        // (splitting at `\n` is UTF-8 safe).
+        let mut line_buf: Vec<u8> = Vec::new();
+        let mut upstream = resp.bytes_stream();
+        while let Some(item) = tokio_stream::StreamExt::next(&mut upstream).await {
+            let bytes = item.map_err(|e| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: e.to_string(),
+            })?;
+            line_buf.extend_from_slice(&bytes);
+            while let Some(pos) = line_buf.iter().position(|&b| b == b'\n') {
+                let line: Vec<u8> = line_buf.drain(..=pos).collect();
+                consume_sse_line(
+                    &String::from_utf8_lossy(&line),
+                    &sink,
+                    &mut text_out,
+                    &mut reasoning_out,
+                    &mut tokens_used,
+                )
+                .await;
+            }
+        }
+
+        Ok(InferenceResponse {
+            text: (!text_out.is_empty()).then_some(text_out),
+            file: None,
+            model_used: model_name.to_string(),
+            provider: self.name.clone(),
+            duration_ms: start.elapsed().as_millis() as u64,
+            request_id: request.request_id.clone(),
+            tokens_used,
+            fallback_used: false,
+            routing_reason: None,
+            reasoning: (!reasoning_out.is_empty()).then_some(reasoning_out),
+        })
+    }
+}
+
+/// Parse one SSE line from an OpenAI-compatible stream and push its deltas.
+async fn consume_sse_line(
+    line: &str,
+    sink: &StreamSink,
+    text_out: &mut String,
+    reasoning_out: &mut String,
+    tokens_used: &mut Option<u32>,
+) {
+    let line = line.trim_end_matches(['\n', '\r']);
+    let Some(data) = line.strip_prefix("data: ") else {
+        return; // comments, keep-alive pings, `event:` lines
+    };
+    let data = data.trim();
+    if data.is_empty() || data == "[DONE]" {
+        return;
+    }
+    let Ok(chunk) = serde_json::from_str::<ChatStreamChunk>(data) else {
+        return; // non-JSON keep-alive payload
+    };
+    if let Some(choice) = chunk.choices.as_ref().and_then(|c| c.first()) {
+        if let Some(delta) = &choice.delta {
+            if let Some(reasoning) = delta.reasoning_content.as_ref().filter(|r| !r.is_empty()) {
+                reasoning_out.push_str(reasoning);
+                let _ = sink.send(StreamDelta::Thinking(reasoning.clone())).await;
+            }
+            if let Some(content) = delta.content.as_ref().filter(|c| !c.is_empty()) {
+                text_out.push_str(content);
+                let _ = sink.send(StreamDelta::Text(content.clone())).await;
+            }
+        }
+    }
+    if let Some(usage) = chunk.usage {
+        *tokens_used = usage.total_tokens;
     }
 }

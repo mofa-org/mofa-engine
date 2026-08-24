@@ -13,7 +13,7 @@ use dashmap::DashMap;
 use mofa_kernel::{
     BackendHealth, BackendStatus, Capability, CostTier, EngineError, EngineEvent, EngineStatus,
     FallbackPolicy, InferenceRequest, InferenceResponse, ModelCard, ModelResidency, Provider,
-    ProviderHealth, ProviderKind, StreamChunk, model_id_name,
+    ProviderHealth, ProviderKind, StreamChunk, StreamDelta, model_id_name,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore, broadcast, mpsc};
@@ -737,14 +737,18 @@ impl Engine {
             })
             .await;
 
-        // Forward the provider's text deltas into the output stream as they
+        // Forward the provider's output deltas into the output stream as they
         // arrive. The provider drops its sink when it returns, ending the
         // forwarder, so all deltas are flushed before the terminal chunk.
-        let (delta_tx, mut delta_rx) = mpsc::channel::<String>(64);
+        let (delta_tx, mut delta_rx) = mpsc::channel::<StreamDelta>(64);
         let forward_out = out.clone();
         let forwarder = tokio::spawn(async move {
             while let Some(delta) = delta_rx.recv().await {
-                if forward_out.send(StreamChunk::Text { delta }).await.is_err() {
+                let chunk = match delta {
+                    StreamDelta::Text(delta) => StreamChunk::Text { delta },
+                    StreamDelta::Thinking(delta) => StreamChunk::Thinking { delta },
+                };
+                if forward_out.send(chunk).await.is_err() {
                     break;
                 }
             }
@@ -1811,6 +1815,7 @@ mod tests {
                 tokens_used: Some(1),
                 fallback_used: false,
                 routing_reason: None,
+                reasoning: None,
             })
         }
     }
@@ -2553,11 +2558,13 @@ mod tests {
         chunks
     }
 
-    /// A provider that emits several real text deltas, to prove the engine
+    /// A provider that emits several real output deltas, to prove the engine
     /// forwards incremental output in order (not just the compatibility path).
     struct MultiDeltaProvider {
         name: String,
         deltas: Vec<String>,
+        /// Reasoning deltas, streamed ahead of the answer text.
+        thinking: Vec<String>,
     }
 
     #[async_trait]
@@ -2611,6 +2618,7 @@ mod tests {
                 tokens_used: Some(self.deltas.len() as u32),
                 fallback_used: false,
                 routing_reason: None,
+                reasoning: (!self.thinking.is_empty()).then(|| self.thinking.concat()),
             })
         }
         async fn stream(
@@ -2619,8 +2627,13 @@ mod tests {
             request: &InferenceRequest,
             sink: mofa_kernel::StreamSink,
         ) -> Result<InferenceResponse, EngineError> {
+            for d in &self.thinking {
+                let _ = sink
+                    .send(mofa_kernel::StreamDelta::Thinking(d.clone()))
+                    .await;
+            }
             for d in &self.deltas {
-                let _ = sink.send(d.clone()).await;
+                let _ = sink.send(mofa_kernel::StreamDelta::Text(d.clone())).await;
             }
             self.invoke(model_id, request).await
         }
@@ -2655,10 +2668,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_emits_thinking_deltas_before_text() {
+        let provider = Arc::new(MultiDeltaProvider {
+            name: "ollama".into(),
+            deltas: vec!["答案".into()],
+            thinking: vec!["先想".into(), "再想".into()],
+        });
+        let engine = build_engine(vec![provider], 1000, 0);
+        engine.refresh_resources().await;
+
+        let chunks = collect_stream(engine.invoke_stream(chat_request(None))).await;
+        // Thinking deltas arrive ahead of the answer text, both preserved.
+        let kinds: Vec<&str> = chunks
+            .iter()
+            .filter_map(|c| match c {
+                StreamChunk::Thinking { .. } => Some("thinking"),
+                StreamChunk::Text { .. } => Some("text"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, vec!["thinking", "thinking", "text"]);
+        match chunks.last() {
+            Some(StreamChunk::Completed { .. }) => {}
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn stream_forwards_incremental_deltas_in_order() {
         let provider = Arc::new(MultiDeltaProvider {
             name: "ollama".into(),
             deltas: vec!["Hello".into(), ", ".into(), "world".into()],
+            thinking: vec![],
         });
         let engine = build_engine(vec![provider], 1000, 0);
         engine.refresh_resources().await;

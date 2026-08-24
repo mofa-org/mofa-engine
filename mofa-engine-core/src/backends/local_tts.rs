@@ -205,6 +205,7 @@ impl LocalTtsProvider {
             tokens_used: None,
             fallback_used: false,
             routing_reason: None,
+            reasoning: None,
         })
     }
 }

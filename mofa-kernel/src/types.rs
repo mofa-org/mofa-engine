@@ -411,6 +411,10 @@ pub struct InferenceResponse {
     pub fallback_used: bool,
     /// Machine-readable routing reason.
     pub routing_reason: Option<String>,
+    /// Reasoning/thinking output (e.g. DeepSeek-R1 style `reasoning_content`),
+    /// when the serving model exposes a separate thinking trace.
+    #[serde(default)]
+    pub reasoning: Option<String>,
 }
 
 /// A single event in a streaming inference response.
@@ -436,6 +440,12 @@ pub enum StreamChunk {
         /// Text delta appended to the output so far.
         delta: String,
     },
+    /// An incremental piece of reasoning/thinking output, kept separate from
+    /// the answer text (e.g. DeepSeek-R1 style `reasoning_content`).
+    Thinking {
+        /// Reasoning delta appended to the thinking trace so far.
+        delta: String,
+    },
     /// Terminal success event with aggregate metadata and any file output.
     Completed {
         /// Wall-clock duration in milliseconds.
@@ -453,11 +463,35 @@ pub enum StreamChunk {
     Error(ErrorInfo),
 }
 
-/// Channel a provider uses to emit incremental text deltas while streaming.
+/// An incremental piece of provider output pushed to a [`StreamSink`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamDelta {
+    /// Answer text delta.
+    Text(String),
+    /// Reasoning/thinking delta, rendered separately from the answer.
+    Thinking(String),
+}
+
+impl StreamDelta {
+    /// The payload string, regardless of kind.
+    pub fn into_payload(self) -> String {
+        match self {
+            Self::Text(s) | Self::Thinking(s) => s,
+        }
+    }
+
+    /// Whether this delta carries reasoning rather than answer text.
+    pub fn is_thinking(&self) -> bool {
+        matches!(self, Self::Thinking(_))
+    }
+}
+
+/// Channel a provider uses to emit incremental output deltas while streaming.
 ///
 /// The engine owns the surrounding envelope (`Started`/`Completed`/`Error`);
-/// providers push only text deltas here and return the final aggregate response.
-pub type StreamSink = tokio::sync::mpsc::Sender<String>;
+/// providers push only output deltas here and return the final aggregate
+/// response.
+pub type StreamSink = tokio::sync::mpsc::Sender<StreamDelta>;
 
 /// Result of a lifecycle operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]

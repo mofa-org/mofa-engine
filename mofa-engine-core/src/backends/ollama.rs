@@ -354,6 +354,7 @@ impl Provider for OllamaProvider {
             tokens_used: chat_resp.eval_count,
             fallback_used: false,
             routing_reason: None,
+            reasoning: None,
         })
     }
 }
