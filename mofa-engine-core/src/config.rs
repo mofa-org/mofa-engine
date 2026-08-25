@@ -397,6 +397,21 @@ pub struct ModelDef {
 }
 
 impl EngineConfig {
+    /// The config file the loader would use: MOFA_ENGINE_CONFIG
+    /// env > ./config.toml > ~/.config/mofa-engine/config.toml.
+    pub fn resolved_path() -> Option<std::path::PathBuf> {
+        if let Ok(explicit) = std::env::var("MOFA_ENGINE_CONFIG") {
+            if !explicit.is_empty() {
+                return Some(std::path::PathBuf::from(explicit));
+            }
+        }
+        let cwd = std::path::PathBuf::from("config.toml");
+        if cwd.exists() {
+            return Some(cwd);
+        }
+        dirs::config_dir().map(|d| d.join("mofa-engine").join("config.toml"))
+    }
+
     /// Load configuration from the first available source.
     ///
     /// Priority: explicit path > `./config.toml` > `~/.config/mofa-engine/config.toml` > env auto-detect.
@@ -759,7 +774,7 @@ impl ProviderConfig {
     }
 
     /// Parse the configured provider kind.
-    pub(crate) fn provider_kind(&self) -> Result<ProviderKind, EngineError> {
+    pub fn provider_kind(&self) -> Result<ProviderKind, EngineError> {
         match self.kind.as_str() {
             "ollama" => Ok(ProviderKind::Ollama),
             "openai_compatible" => Ok(ProviderKind::OpenAiCompatible),
