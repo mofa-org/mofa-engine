@@ -90,6 +90,9 @@ pub struct MemoryReport {
 pub struct Engine {
     /// Named providers.
     providers: Vec<RegisteredProvider>,
+    /// Providers registered after startup via the runtime provider-config
+    /// API; lookups consult both lists (runtime first, then startup).
+    runtime_providers: std::sync::RwLock<Vec<RegisteredProvider>>,
     /// Cached model cards.
     models: DashMap<String, ModelCard>,
     /// Latest backend health by provider.
@@ -208,6 +211,146 @@ impl Engine {
             .expect("engine configuration should be valid")
     }
 
+    /// Build a provider from its config entry. Shared by startup assembly
+    /// and the runtime provider-config API (POST /v1/config/providers).
+    pub fn build_provider(
+        pc: &crate::config::ProviderConfig,
+        artifacts_dir: Option<&str>,
+    ) -> Result<Arc<dyn Provider>, EngineError> {
+        let cost_tier = CostTier::from_str_loose(&pc.cost_tier);
+        match pc.provider_kind()? {
+            ProviderKind::Ollama => Ok(Arc::new(OllamaProvider::new(
+                &pc.name,
+                &pc.base_url,
+                &pc.models,
+            )?)),
+            ProviderKind::OpenAiCompatible => Ok(Arc::new(OpenAiCompatProvider::with_output_dir(
+                &pc.name,
+                &pc.base_url,
+                pc.api_key.clone().unwrap_or_default(),
+                pc.models.clone(),
+                cost_tier,
+                artifacts_dir.map(str::to_string),
+            )?)),
+            ProviderKind::LiterLlm => Ok(Arc::new(LiterLLMProvider::new(
+                &pc.name,
+                pc.api_key.clone(),
+                &pc.base_url,
+                pc.models.clone(),
+                cost_tier,
+                artifacts_dir.map(str::to_string),
+            )?)),
+            ProviderKind::LocalTts => {
+                let command = pc.command.clone().ok_or_else(|| {
+                    EngineError::Config(format!(
+                        "provider '{}' (local_tts) requires a command",
+                        pc.name
+                    ))
+                })?;
+                Ok(Arc::new(LocalTtsProvider::new(
+                    &pc.name,
+                    command,
+                    pc.args.clone(),
+                    pc.output_format.clone(),
+                    pc.output_dir.clone(),
+                    pc.models.clone(),
+                )))
+            }
+            ProviderKind::LocalAsr => {
+                let command = pc.command.clone().ok_or_else(|| {
+                    EngineError::Config(format!(
+                        "provider '{}' (local_asr) requires a command",
+                        pc.name
+                    ))
+                })?;
+                Ok(Arc::new(
+                    LocalAsrProvider::new(
+                        &pc.name,
+                        command,
+                        pc.args.clone(),
+                        pc.output_dir.clone(),
+                        pc.models.clone(),
+                    )
+                    .with_diarize_args(pc.diarize_args.clone()),
+                ))
+            }
+            ProviderKind::LocalImageGen => {
+                let command = pc.command.clone().ok_or_else(|| {
+                    EngineError::Config(format!(
+                        "provider '{}' (local_image_gen) requires a command",
+                        pc.name
+                    ))
+                })?;
+                Ok(Arc::new(LocalImageGenProvider::new(
+                    &pc.name,
+                    command,
+                    pc.args.clone(),
+                    pc.output_format.clone(),
+                    pc.output_dir.clone(),
+                    pc.models.clone(),
+                )))
+            }
+            ProviderKind::LocalVideoGen => {
+                let command = pc.command.clone().ok_or_else(|| {
+                    EngineError::Config(format!(
+                        "provider '{}' (local_video_gen) requires a command",
+                        pc.name
+                    ))
+                })?;
+                Ok(Arc::new(LocalVideoGenProvider::new(
+                    &pc.name,
+                    command,
+                    pc.args.clone(),
+                    pc.output_format.clone(),
+                    pc.output_dir.clone(),
+                    pc.models.clone(),
+                )))
+            }
+            ProviderKind::CloudVideoGen => Ok(Arc::new(CloudVideoGenProvider::new(
+                &pc.name,
+                &pc.dialect,
+                &pc.base_url,
+                pc.api_key.clone(),
+                pc.models.clone(),
+                cost_tier,
+                artifacts_dir.map(str::to_string),
+            )?)),
+            _ => Err(EngineError::Config(format!(
+                "provider '{}' uses unsupported provider kind",
+                pc.name
+            ))),
+        }
+    }
+
+    /// Register a provider at runtime (provider-config API). The provider
+    /// joins routing and discovery immediately; callers persist the config
+    /// entry separately so it survives restarts.
+    pub fn add_provider_config(
+        &self,
+        pc: &crate::config::ProviderConfig,
+    ) -> Result<(), EngineError> {
+        if !pc.enabled {
+            return Err(EngineError::InvalidRequest(format!(
+                "provider '{}' is disabled",
+                pc.name
+            )));
+        }
+        let kind = pc.provider_kind()?;
+        let provider = Self::build_provider(pc, None)?;
+        let mut runtime = self
+            .runtime_providers
+            .write()
+            .expect("runtime providers lock");
+        runtime.retain(|registered| registered.name != pc.name);
+        runtime.push(RegisteredProvider {
+            name: pc.name.clone(),
+            kind,
+            priority: pc.priority,
+            provider,
+        });
+        Ok(())
+    }
+
     /// Create and initialize a new engine from validated configuration.
     pub async fn try_new(config: EngineConfig) -> Result<Arc<Self>, EngineError> {
         config.validate()?;
@@ -226,109 +369,8 @@ impl Engine {
             }
 
             let kind = pc.provider_kind()?;
-            let cost_tier = CostTier::from_str_loose(&pc.cost_tier);
-            let provider: Arc<dyn Provider> = match kind {
-                ProviderKind::Ollama => {
-                    Arc::new(OllamaProvider::new(&pc.name, &pc.base_url, &pc.models)?)
-                }
-                ProviderKind::OpenAiCompatible => Arc::new(OpenAiCompatProvider::with_output_dir(
-                    &pc.name,
-                    &pc.base_url,
-                    pc.api_key.clone().unwrap_or_default(),
-                    pc.models.clone(),
-                    cost_tier,
-                    config.artifacts.dir.clone(),
-                )?),
-                ProviderKind::LiterLlm => Arc::new(LiterLLMProvider::new(
-                    &pc.name,
-                    pc.api_key.clone(),
-                    &pc.base_url,
-                    pc.models.clone(),
-                    cost_tier,
-                    config.artifacts.dir.clone(),
-                )?),
-                ProviderKind::LocalTts => {
-                    let command = pc.command.clone().ok_or_else(|| {
-                        EngineError::Config(format!(
-                            "provider '{}' (local_tts) requires a command",
-                            pc.name
-                        ))
-                    })?;
-                    Arc::new(LocalTtsProvider::new(
-                        &pc.name,
-                        command,
-                        pc.args.clone(),
-                        pc.output_format.clone(),
-                        pc.output_dir.clone(),
-                        pc.models.clone(),
-                    ))
-                }
-                ProviderKind::LocalAsr => {
-                    let command = pc.command.clone().ok_or_else(|| {
-                        EngineError::Config(format!(
-                            "provider '{}' (local_asr) requires a command",
-                            pc.name
-                        ))
-                    })?;
-                    Arc::new(
-                        LocalAsrProvider::new(
-                            &pc.name,
-                            command,
-                            pc.args.clone(),
-                            pc.output_dir.clone(),
-                            pc.models.clone(),
-                        )
-                        .with_diarize_args(pc.diarize_args.clone()),
-                    )
-                }
-                ProviderKind::LocalImageGen => {
-                    let command = pc.command.clone().ok_or_else(|| {
-                        EngineError::Config(format!(
-                            "provider '{}' (local_image_gen) requires a command",
-                            pc.name
-                        ))
-                    })?;
-                    Arc::new(LocalImageGenProvider::new(
-                        &pc.name,
-                        command,
-                        pc.args.clone(),
-                        pc.output_format.clone(),
-                        pc.output_dir.clone(),
-                        pc.models.clone(),
-                    ))
-                }
-                ProviderKind::LocalVideoGen => {
-                    let command = pc.command.clone().ok_or_else(|| {
-                        EngineError::Config(format!(
-                            "provider '{}' (local_video_gen) requires a command",
-                            pc.name
-                        ))
-                    })?;
-                    Arc::new(LocalVideoGenProvider::new(
-                        &pc.name,
-                        command,
-                        pc.args.clone(),
-                        pc.output_format.clone(),
-                        pc.output_dir.clone(),
-                        pc.models.clone(),
-                    ))
-                }
-                ProviderKind::CloudVideoGen => Arc::new(CloudVideoGenProvider::new(
-                    &pc.name,
-                    &pc.dialect,
-                    &pc.base_url,
-                    pc.api_key.clone(),
-                    pc.models.clone(),
-                    cost_tier,
-                    config.artifacts.dir.clone(),
-                )?),
-                _ => {
-                    return Err(EngineError::Config(format!(
-                        "provider '{}' uses unsupported provider kind",
-                        pc.name
-                    )));
-                }
-            };
+            let provider: Arc<dyn Provider> =
+                Self::build_provider(pc, config.artifacts.dir.as_deref())?;
 
             providers.push(RegisteredProvider {
                 name: pc.name.clone(),
@@ -397,6 +439,7 @@ impl Engine {
 
         let engine = Arc::new(Self {
             providers,
+            runtime_providers: std::sync::RwLock::new(Vec::new()),
             models: DashMap::new(),
             backend_health: DashMap::new(),
             memory,
@@ -439,13 +482,25 @@ impl Engine {
 
     /// Discover models from all providers with bounded per-provider timeouts.
     async fn discover_all(&self) {
+        // Runtime-registered providers join every discovery sweep so their
+        // models appear in capabilities after registration.
         let discovery_timeout = self.timeouts.discovery();
-        let handles = self
-            .providers
-            .iter()
-            .map(|registered| {
-                let name = registered.name.clone();
-                let provider = Arc::clone(&registered.provider);
+        let snapshot: Vec<(String, Arc<dyn Provider>)> = {
+            let mut all: Vec<(String, Arc<dyn Provider>)> = self
+                .providers
+                .iter()
+                .map(|r| (r.name.clone(), Arc::clone(&r.provider)))
+                .collect();
+            if let Ok(runtime) = self.runtime_providers.read() {
+                for r in runtime.iter() {
+                    all.push((r.name.clone(), Arc::clone(&r.provider)));
+                }
+            }
+            all
+        };
+        let handles = snapshot
+            .into_iter()
+            .map(|(name, provider)| {
                 tokio::spawn(async move {
                     let result = tokio::time::timeout(discovery_timeout, provider.discover())
                         .await
@@ -1886,6 +1941,11 @@ impl Engine {
     }
 
     fn find_provider(&self, name: &str) -> Option<Arc<dyn Provider>> {
+        if let Ok(runtime) = self.runtime_providers.read() {
+            if let Some(found) = runtime.iter().find(|registered| registered.name == name) {
+                return Some(Arc::clone(&found.provider));
+            }
+        }
         self.providers
             .iter()
             .find(|registered| registered.name == name)
@@ -1893,21 +1953,30 @@ impl Engine {
     }
 
     fn routing_providers(&self) -> Vec<RoutingProvider> {
-        self.providers
+        let mut all: Vec<(String, ProviderKind, u8, Arc<dyn Provider>)> = self
+            .providers
             .iter()
-            .map(|registered| {
+            .map(|r| (r.name.clone(), r.kind, r.priority, Arc::clone(&r.provider)))
+            .collect();
+        if let Ok(runtime) = self.runtime_providers.read() {
+            for r in runtime.iter() {
+                all.push((r.name.clone(), r.kind, r.priority, Arc::clone(&r.provider)));
+            }
+        }
+        all.into_iter()
+            .map(|(name, kind, priority, _)| {
                 let health = self
                     .backend_health
-                    .get(&registered.name)
+                    .get(&name)
                     .map(|h| *h)
                     .unwrap_or(BackendHealth::Unknown);
+                let circuit_open = self.circuit_breakers.state(&name) == CircuitState::Open;
                 RoutingProvider {
-                    name: registered.name.clone(),
-                    kind: registered.kind,
-                    priority: registered.priority,
+                    name,
+                    kind,
+                    priority,
                     health,
-                    circuit_open: self.circuit_breakers.state(&registered.name)
-                        == CircuitState::Open,
+                    circuit_open,
                 }
             })
             .collect()
@@ -2176,6 +2245,115 @@ impl Drop for Engine {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(test)]
+    mod runtime_config {
+        use super::*;
+
+        #[test]
+        fn build_provider_covers_every_configured_kind() {
+            // The shared factory must handle at least the config-declared
+            // kinds: smoke-test openai_compatible construction end to end.
+            let pc = crate::config::ProviderConfig {
+                name: "factory-smoke".into(),
+                kind: "openai_compatible".into(),
+                base_url: "http://127.0.0.1:9".into(),
+                api_key: Some("sk-test".into()),
+                enabled: true,
+                priority: 10,
+                cost_tier: "low".into(),
+                models: vec![],
+                command: None,
+                args: vec![],
+                output_format: None,
+                output_dir: None,
+                dialect: String::new(),
+                diarize_args: Vec::new(),
+                price_input_per_1k: 0.0,
+                price_output_per_1k: 0.0,
+            };
+            let provider = Engine::build_provider(&pc, None).expect("factory builds");
+            assert_eq!(provider.name(), "factory-smoke");
+        }
+
+        #[tokio::test]
+        async fn runtime_registration_serves_requests_and_caps_list() {
+            use crate::config::ProviderConfig;
+
+            let app = axum::Router::new().route(
+            "/chat/completions",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({
+                    "choices": [{ "message": { "role": "assistant", "content": "runtime ok" } }],
+                }))
+            }),
+        );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+
+            let engine = build_engine(vec![], 1000, 0);
+            engine.refresh_resources().await;
+            assert_eq!(engine.capabilities().await.len(), 0);
+
+            let pc = ProviderConfig {
+                name: "runtime-mock".into(),
+                kind: "openai_compatible".into(),
+                base_url: format!("http://{addr}"),
+                api_key: Some("sk-test".into()),
+                enabled: true,
+                priority: 5,
+                cost_tier: "low".into(),
+                models: vec![crate::config::ModelDef {
+                    name: "rt-model".into(),
+                    capability: "chat".into(),
+                    context_window: Some(4096),
+                    memory_mb: None,
+                    reasoning_tier: None,
+                }],
+                command: None,
+                args: vec![],
+                output_format: None,
+                output_dir: None,
+                dialect: String::new(),
+                diarize_args: Vec::new(),
+                price_input_per_1k: 0.0,
+                price_output_per_1k: 0.0,
+            };
+            engine.add_provider_config(&pc).expect("register");
+            engine.refresh_resources().await;
+
+            let cards = engine.capabilities().await;
+            assert!(
+                cards.iter().any(|c| c.id == "runtime-mock/rt-model"),
+                "cards: {cards:?}"
+            );
+
+            let resp = engine
+                .invoke(InferenceRequest {
+                    capability: Some(Capability::Chat),
+                    model: Some("runtime-mock/rt-model".into()),
+                    messages: vec![Message {
+                        role: "user".into(),
+                        content: "hi".into(),
+                        images: vec![],
+                    }],
+                    params: serde_json::json!({}),
+                    request_id: "req-rt".into(),
+                    ..Default::default()
+                })
+                .await
+                .expect("invoke routes to runtime provider");
+            assert_eq!(resp.text.as_deref(), Some("runtime ok"));
+
+            // Disabled providers are rejected up front.
+            let mut disabled = pc.clone();
+            disabled.enabled = false;
+            assert!(engine.add_provider_config(&disabled).is_err());
+        }
+    }
+
     use super::*;
     use async_trait::async_trait;
     use mofa_kernel::{
@@ -2406,6 +2584,7 @@ mod tests {
             .collect();
         let engine = Arc::new(Engine {
             providers: registered,
+            runtime_providers: std::sync::RwLock::new(Vec::new()),
             models: DashMap::new(),
             backend_health: DashMap::new(),
             memory: MemoryManager::new(Some(budget_mb)),
