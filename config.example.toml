@@ -141,6 +141,22 @@ price_output_per_1k = 0.0011
 #   name = "openai/dall-e-3"
 #   capability = "image_gen"
 
+# Image editing (I2I / inpainting) over any OpenAI-compatible `/images/edits`
+# endpoint (e.g. gpt-image-1). The input image rides on `messages[0].images[0]`
+# as a data:/http(s) URL or local path; an optional `input_mask` PNG marks the
+# regions to regenerate with its transparent (alpha 0) areas — no mask means a
+# whole-image edit.
+# [[providers]]
+# name = "openai-edits"
+# kind = "openai_compatible"
+# base_url = "https://api.openai.com/v1"
+# api_key = "${OPENAI_API_KEY}"
+# priority = 10
+# cost_tier = "high"
+#   [[providers.models]]
+#   name = "gpt-image-1"
+#   capability = "image_edit"
+
 # Built-in zero-config voice: when this config declares NO TTS backend, the engine
 # automatically registers the operating system's native voice (macOS `say`, Linux
 # `espeak-ng`/`espeak`) as a low-priority local fallback — so local audio scenarios

@@ -419,6 +419,7 @@ impl Provider for OpenAiCompatProvider {
             Capability::Tts => self.invoke_tts(model_name, request, start).await,
             Capability::Asr => self.invoke_asr(model_name, request, start).await,
             Capability::ImageGen => self.invoke_image_gen(model_name, request, start).await,
+            Capability::ImageEdit => self.invoke_image_edit(model_name, request, start).await,
             Capability::Embedding => self.invoke_embedding(model_name, request, start).await,
             other => Err(EngineError::UnsupportedOperation(format!(
                 "provider '{}' does not support {other}",
@@ -871,40 +872,226 @@ impl OpenAiCompatProvider {
                 detail: "image_gen returned no data".into(),
             })?;
 
-        // Resolve to bytes: decode inline base64, or download the returned URL.
-        let bytes =
-            if let Some(b64) = image.b64_json {
-                use base64::Engine as _;
-                base64::engine::general_purpose::STANDARD
-                    .decode(b64.as_bytes())
-                    .map_err(|e| EngineError::ProviderError {
-                        provider: self.name.clone(),
-                        detail: format!("image base64 decode error: {e}"),
-                    })?
-            } else if let Some(remote) = image.url {
-                let dl = self.client.get(&remote).send().await.map_err(|e| {
-                    EngineError::ProviderError {
-                        provider: self.name.clone(),
-                        detail: format!("image download error: {e}"),
-                    }
-                })?;
-                dl.bytes()
-                    .await
-                    .map_err(|e| EngineError::ProviderError {
-                        provider: self.name.clone(),
-                        detail: format!("image download read error: {e}"),
-                    })?
-                    .to_vec()
-            } else {
-                return Err(EngineError::ProviderError {
-                    provider: self.name.clone(),
-                    detail: "image_gen returned neither b64_json nor url".into(),
-                });
-            };
+        let bytes = self.image_bytes_from_response(image).await?;
 
         let path = self
             .output_dir
             .join(format!("mofa_image_{}.png", uuid::Uuid::new_v4()));
+        tokio::fs::write(&path, &bytes)
+            .await
+            .map_err(|e| EngineError::Internal(format!("image write error: {e}")))?;
+
+        Ok(InferenceResponse {
+            text: None,
+            file: Some(path.to_string_lossy().to_string()),
+            model_used: model_name.to_string(),
+            provider: self.name.clone(),
+            duration_ms: start.elapsed().as_millis() as u64,
+            request_id: request.request_id.clone(),
+            tokens_used: None,
+            fallback_used: false,
+            routing_reason: None,
+            ..Default::default()
+        })
+    }
+
+    /// Resolve one provider image result to bytes: decode inline base64, or
+    /// download the returned URL. Shared by generation and editing.
+    async fn image_bytes_from_response(&self, image: ImageGenData) -> Result<Vec<u8>, EngineError> {
+        if let Some(b64) = image.b64_json {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD
+                .decode(b64.as_bytes())
+                .map_err(|e| EngineError::ProviderError {
+                    provider: self.name.clone(),
+                    detail: format!("image base64 decode error: {e}"),
+                })
+        } else if let Some(remote) = image.url {
+            let dl =
+                self.client
+                    .get(&remote)
+                    .send()
+                    .await
+                    .map_err(|e| EngineError::ProviderError {
+                        provider: self.name.clone(),
+                        detail: format!("image download error: {e}"),
+                    })?;
+            dl.bytes()
+                .await
+                .map_err(|e| EngineError::ProviderError {
+                    provider: self.name.clone(),
+                    detail: format!("image download read error: {e}"),
+                })
+                .map(|b| b.to_vec())
+        } else {
+            Err(EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: "image result had neither b64_json nor url".into(),
+            })
+        }
+    }
+
+    /// Fetch an image reference (an HTTP(S) URL, `data:` URL, or local path)
+    /// to raw bytes, plus its MIME type when derivable.
+    async fn fetch_image_ref(
+        &self,
+        reference: &str,
+        role: &str,
+    ) -> Result<(Vec<u8>, String), EngineError> {
+        if let Some((mime, is_base64, payload)) = parse_data_url(reference) {
+            if !is_base64 {
+                return Err(EngineError::InvalidRequest(format!(
+                    "{role} data: URL must be base64-encoded"
+                )));
+            }
+            use base64::Engine as _;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(payload.as_bytes())
+                .map_err(|e| {
+                    EngineError::InvalidRequest(format!(
+                        "{role} data: URL payload is not valid base64: {e}"
+                    ))
+                })?;
+            Ok((bytes, mime))
+        } else if reference.starts_with("http://") || reference.starts_with("https://") {
+            let resp = self.client.get(reference).send().await.map_err(|e| {
+                EngineError::ProviderError {
+                    provider: self.name.clone(),
+                    detail: format!("{role} download error: {e}"),
+                }
+            })?;
+            let mime = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+                .unwrap_or_else(|| "image/png".into());
+            let bytes = resp.bytes().await.map_err(|e| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("{role} download read error: {e}"),
+            })?;
+            Ok((bytes.to_vec(), mime))
+        } else {
+            // Local file path on the engine host.
+            let bytes = tokio::fs::read(reference).await.map_err(|e| {
+                EngineError::InvalidRequest(format!("cannot read {role} file '{reference}': {e}"))
+            })?;
+            let mime = match std::path::Path::new(reference)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_lowercase)
+                .as_deref()
+            {
+                Some("jpg") | Some("jpeg") => "image/jpeg",
+                Some("webp") => "image/webp",
+                Some("gif") => "image/gif",
+                _ => "image/png",
+            }
+            .to_string();
+            Ok((bytes, mime))
+        }
+    }
+
+    /// Edit an image via the OpenAI-compatible `/images/edits` endpoint:
+    /// whole-image (I2I) when no mask is supplied, or inpainting restricted
+    /// to the mask's transparent areas. The input image rides on
+    /// `messages[0].images[0]`; the mask on `request.input_mask`.
+    async fn invoke_image_edit(
+        &self,
+        model_name: &str,
+        request: &InferenceRequest,
+        start: std::time::Instant,
+    ) -> Result<InferenceResponse, EngineError> {
+        let prompt = request
+            .messages
+            .first()
+            .map(|m| m.content.clone())
+            .or_else(|| {
+                request
+                    .params
+                    .get("prompt")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+            .filter(|p| !p.trim().is_empty())
+            .ok_or_else(|| EngineError::InvalidRequest("image editing requires a prompt".into()))?;
+
+        let image_ref = request
+            .messages
+            .first()
+            .and_then(|m| m.images.first())
+            .ok_or_else(|| {
+                EngineError::InvalidRequest(
+                    "image editing requires an input image (messages[0].images)".into(),
+                )
+            })?;
+        let (image_bytes, image_mime) = self.fetch_image_ref(image_ref, "input image").await?;
+
+        let mut form = reqwest::multipart::Form::new()
+            .text("model", model_name.to_string())
+            .text("prompt", prompt)
+            .text("n", "1")
+            .part(
+                "image",
+                reqwest::multipart::Part::bytes(image_bytes)
+                    .file_name("input.png")
+                    .mime_str(&image_mime)
+                    .map_err(|e| EngineError::Internal(format!("mime error: {e}")))?,
+            );
+        if let Some(mask_ref) = request.input_mask.as_deref() {
+            let (mask_bytes, _) = self.fetch_image_ref(mask_ref, "mask").await?;
+            form = form.part(
+                "mask",
+                reqwest::multipart::Part::bytes(mask_bytes)
+                    .file_name("mask.png")
+                    .mime_str("image/png")
+                    .map_err(|e| EngineError::Internal(format!("mime error: {e}")))?,
+            );
+        }
+        if let Some(size) = request.params.get("size").and_then(|v| v.as_str()) {
+            form = form.text("size", size.to_string());
+        }
+
+        let url = format!("{}/images/edits", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: e.to_string(),
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("image_edit HTTP {status}: {text}"),
+            });
+        }
+
+        let parsed: ImageGenResponse =
+            resp.json().await.map_err(|e| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: format!("image_edit decode error: {e}"),
+            })?;
+        let image = parsed
+            .data
+            .into_iter()
+            .next()
+            .ok_or_else(|| EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: "image_edit returned no data".into(),
+            })?;
+        let bytes = self.image_bytes_from_response(image).await?;
+
+        let path = self
+            .output_dir
+            .join(format!("mofa_image_edit_{}.png", uuid::Uuid::new_v4()));
         tokio::fs::write(&path, &bytes)
             .await
             .map_err(|e| EngineError::Internal(format!("image write error: {e}")))?;
@@ -1084,6 +1271,24 @@ impl OpenAiCompatProvider {
     }
 }
 
+/// Split a `data:` URL into `(mime, is_base64, payload)`; `None` when the
+/// reference is not a data URL. No percent-decoding: non-base64 payloads are
+/// rejected by the caller (every image producer we support emits base64).
+fn parse_data_url(reference: &str) -> Option<(String, bool, &str)> {
+    let rest = reference.strip_prefix("data:")?;
+    let (header, payload) = rest.split_once(',')?;
+    let (mime, is_base64) = match header.split_once(';') {
+        Some((m, tail)) => (m.to_string(), tail.eq_ignore_ascii_case("base64")),
+        None => (header.to_string(), false),
+    };
+    let mime = if mime.is_empty() {
+        "image/png".to_string()
+    } else {
+        mime
+    };
+    Some((mime, is_base64, payload))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1257,5 +1462,191 @@ mod tests {
                 .and_then(|c| c.delta.content),
             Some("hi".to_string())
         );
+    }
+
+    #[test]
+    fn parse_data_url_splits_header_and_payload() {
+        let (mime, is_base64, payload) = parse_data_url("data:image/png;base64,aGVsbG8=").unwrap();
+        assert_eq!(mime, "image/png");
+        assert!(is_base64);
+        assert_eq!(payload, "aGVsbG8=");
+
+        // No mime → image/png default; no `;base64` marker → not base64.
+        let (mime, is_base64, payload) = parse_data_url("data:,abc").unwrap();
+        assert_eq!(mime, "image/png");
+        assert!(!is_base64);
+        assert_eq!(payload, "abc");
+
+        assert!(parse_data_url("https://example.com/x.png").is_none());
+        assert!(parse_data_url("data:nocomma").is_none());
+    }
+
+    #[tokio::test]
+    async fn image_edit_sends_multipart_and_writes_artifact() {
+        use base64::Engine as _;
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+
+        let image_data_url = format!("data:image/png;base64,{}", b64(b"fake-input-png"));
+        let mask_data_url = format!("data:image/png;base64,{}", b64(b"fake-mask-png"));
+        let edited = b"edited-png-bytes".to_vec();
+        let edited_b64 = b64(&edited);
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let seen_handler = seen.clone();
+        let app = axum::Router::new().route(
+            "/images/edits",
+            axum::routing::post(move |body: axum::body::Bytes| {
+                let seen = seen_handler.clone();
+                async move {
+                    *seen.lock().unwrap() = body.to_vec();
+                    axum::Json(serde_json::json!({ "data": [{ "b64_json": edited_b64 }] }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let provider = OpenAiCompatProvider::new(
+            "edit-mock",
+            format!("http://{addr}"),
+            "sk-test",
+            vec![ModelDef {
+                name: "edit-model".into(),
+                capability: "image_edit".into(),
+                context_window: None,
+                memory_mb: None,
+                ..Default::default()
+            }],
+            CostTier::Medium,
+        )
+        .unwrap();
+
+        let request = InferenceRequest {
+            capability: Some(Capability::ImageEdit),
+            messages: vec![mofa_kernel::Message {
+                role: "user".into(),
+                content: "把天空换成夜景".into(),
+                images: vec![image_data_url],
+            }],
+            input_mask: Some(mask_data_url),
+            params: serde_json::json!({ "size": "1024x1024" }),
+            ..Default::default()
+        };
+        let resp = provider
+            .invoke("edit-mock/edit-model", &request)
+            .await
+            .unwrap();
+        assert_eq!(resp.model_used, "edit-model");
+        assert_eq!(resp.provider, "edit-mock");
+
+        let body = String::from_utf8_lossy(&seen.lock().unwrap().clone()).into_owned();
+        assert!(
+            body.contains("name=\"image\""),
+            "image part missing: {body}"
+        );
+        assert!(body.contains("filename=\"input.png\""));
+        assert!(body.contains("name=\"mask\""), "mask part missing: {body}");
+        assert!(body.contains("filename=\"mask.png\""));
+        assert!(body.contains("name=\"prompt\""));
+        assert!(body.contains("把天空换成夜景"));
+        assert!(body.contains("name=\"size\""));
+        assert!(body.contains("1024x1024"));
+        // The referenced image and mask bytes ride inline in the multipart body.
+        assert!(body.contains("fake-input-png"));
+        assert!(body.contains("fake-mask-png"));
+
+        let path = resp.file.expect("artifact path");
+        assert_eq!(std::fs::read(&path).unwrap(), edited);
+    }
+
+    #[tokio::test]
+    async fn image_edit_without_mask_edits_whole_image() {
+        use base64::Engine as _;
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+
+        let image_data_url = format!("data:image/jpeg;base64,{}", b64(b"jpeg-input"));
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let seen_handler = seen.clone();
+        let app = axum::Router::new().route(
+            "/images/edits",
+            axum::routing::post(move |body: axum::body::Bytes| {
+                let seen = seen_handler.clone();
+                async move {
+                    *seen.lock().unwrap() = body.to_vec();
+                    axum::Json(serde_json::json!({ "data": [{ "b64_json": b64(b"i2i-out") }] }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let provider = OpenAiCompatProvider::new(
+            "i2i-mock",
+            format!("http://{addr}"),
+            "sk-test",
+            vec![ModelDef {
+                name: "edit-model".into(),
+                capability: "image_edit".into(),
+                ..Default::default()
+            }],
+            CostTier::Medium,
+        )
+        .unwrap();
+
+        let request = InferenceRequest {
+            capability: Some(Capability::ImageEdit),
+            messages: vec![mofa_kernel::Message {
+                role: "user".into(),
+                content: "整体改成水彩风格".into(),
+                images: vec![image_data_url],
+            }],
+            ..Default::default()
+        };
+        let resp = provider
+            .invoke("i2i-mock/edit-model", &request)
+            .await
+            .unwrap();
+
+        let body = String::from_utf8_lossy(&seen.lock().unwrap().clone()).into_owned();
+        // Whole-image edit: an image part with the reference's JPEG mime, and no mask.
+        assert!(body.contains("name=\"image\""));
+        assert!(body.contains("image/jpeg"));
+        assert!(
+            !body.contains("name=\"mask\""),
+            "unexpected mask part: {body}"
+        );
+        assert_eq!(
+            std::fs::read(resp.file.expect("artifact path")).unwrap(),
+            b"i2i-out"
+        );
+    }
+
+    #[tokio::test]
+    async fn image_edit_requires_an_input_image() {
+        let provider = OpenAiCompatProvider::new(
+            "x",
+            "https://example.com",
+            "k",
+            vec![ModelDef {
+                name: "m".into(),
+                capability: "image_edit".into(),
+                ..Default::default()
+            }],
+            CostTier::Low,
+        )
+        .unwrap();
+        let request = InferenceRequest {
+            capability: Some(Capability::ImageEdit),
+            messages: vec![mofa_kernel::Message {
+                role: "user".into(),
+                content: "no image attached".into(),
+                images: vec![],
+            }],
+            ..Default::default()
+        };
+        let err = provider.invoke("x/m", &request).await.unwrap_err();
+        assert!(err.to_string().contains("input image"), "got: {err}");
     }
 }
