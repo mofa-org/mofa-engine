@@ -1016,28 +1016,37 @@ impl OpenAiCompatProvider {
             .filter(|p| !p.trim().is_empty())
             .ok_or_else(|| EngineError::InvalidRequest("image editing requires a prompt".into()))?;
 
-        let image_ref = request
+        let image_refs = request
             .messages
             .first()
-            .and_then(|m| m.images.first())
+            .map(|m| m.images.clone())
+            .filter(|v| !v.is_empty())
             .ok_or_else(|| {
                 EngineError::InvalidRequest(
                     "image editing requires an input image (messages[0].images)".into(),
                 )
             })?;
-        let (image_bytes, image_mime) = self.fetch_image_ref(image_ref, "input image").await?;
-
+        // Every reference rides as its own `image` part (gpt-image-1 style
+        // multi-reference consistency); the first is the image being edited.
         let mut form = reqwest::multipart::Form::new()
             .text("model", model_name.to_string())
             .text("prompt", prompt)
-            .text("n", "1")
-            .part(
+            .text("n", "1");
+        for (index, image_ref) in image_refs.iter().enumerate() {
+            let (image_bytes, image_mime) = self.fetch_image_ref(image_ref, "input image").await?;
+            let file_name = if index == 0 {
+                "input.png".to_string()
+            } else {
+                format!("reference-{index}.png")
+            };
+            form = form.part(
                 "image",
                 reqwest::multipart::Part::bytes(image_bytes)
-                    .file_name("input.png")
+                    .file_name(file_name)
                     .mime_str(&image_mime)
                     .map_err(|e| EngineError::Internal(format!("mime error: {e}")))?,
             );
+        }
         if let Some(mask_ref) = request.input_mask.as_deref() {
             let (mask_bytes, _) = self.fetch_image_ref(mask_ref, "mask").await?;
             form = form.part(
@@ -1648,5 +1657,72 @@ mod tests {
         };
         let err = provider.invoke("x/m", &request).await.unwrap_err();
         assert!(err.to_string().contains("input image"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn image_edit_sends_one_part_per_reference() {
+        use base64::Engine as _;
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let seen_handler = seen.clone();
+        let app = axum::Router::new().route(
+            "/images/edits",
+            axum::routing::post(move |body: axum::body::Bytes| {
+                let seen = seen_handler.clone();
+                async move {
+                    *seen.lock().unwrap() = body.to_vec();
+                    axum::Json(serde_json::json!({ "data": [{ "b64_json": b64(b"multi-out") }] }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let provider = OpenAiCompatProvider::new(
+            "multi-mock",
+            format!("http://{addr}"),
+            "sk-test",
+            vec![ModelDef {
+                name: "edit-model".into(),
+                capability: "image_edit".into(),
+                ..Default::default()
+            }],
+            CostTier::Medium,
+        )
+        .unwrap();
+
+        // Three references: the base image plus two consistency anchors.
+        let request = InferenceRequest {
+            capability: Some(Capability::ImageEdit),
+            messages: vec![mofa_kernel::Message {
+                role: "user".into(),
+                content: "保持角色一致，换成赛博朋克街道".into(),
+                images: vec![
+                    format!("data:image/png;base64,{}", b64(b"base-img")),
+                    format!("data:image/png;base64,{}", b64(b"ref-1")),
+                    format!("data:image/png;base64,{}", b64(b"ref-2")),
+                ],
+            }],
+            ..Default::default()
+        };
+        provider
+            .invoke("multi-mock/edit-model", &request)
+            .await
+            .unwrap();
+
+        let body = String::from_utf8_lossy(&seen.lock().unwrap().clone()).into_owned();
+        assert_eq!(
+            body.matches("name=\"image\"").count(),
+            3,
+            "one image part per reference: {body}"
+        );
+        assert!(body.contains("filename=\"input.png\""));
+        assert!(body.contains("filename=\"reference-1.png\""));
+        assert!(body.contains("filename=\"reference-2.png\""));
+        assert!(body.contains("base-img"));
+        assert!(body.contains("ref-1"));
+        assert!(body.contains("ref-2"));
     }
 }
