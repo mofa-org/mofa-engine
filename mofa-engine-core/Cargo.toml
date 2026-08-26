@@ -29,3 +29,4 @@ tokio-stream = { workspace = true }
 # Vetted 1.11.0 for the initial engine landing.
 liter-llm = "=1.11.0"
 base64 = "0.23.0"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }

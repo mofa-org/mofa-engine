@@ -737,15 +737,31 @@ impl EngineConfig {
 }
 
 impl ProviderConfig {
-    /// Resolve a `${ENV_VAR}` reference to the environment variable's value,
-    /// passing any other string through unchanged. Lets a config keep secrets
-    /// (e.g. `api_key = "${OPENAI_API_KEY}"`) out of the file itself.
+    /// Resolve an indirect secret reference to its value, passing any other
+    /// string through unchanged. Three indirection forms keep secrets out of
+    /// the config file itself:
+    ///   - `${VAR}` / `env:VAR` — an environment variable, and
+    ///   - `keychain:ACCOUNT` — the OS keychain entry written by
+    ///     `mofa-engine keychain set ACCOUNT` (PLAT-04: 密钥仅存 OS 钥匙串).
+    /// Anything else is a literal secret. Real API keys never start with
+    /// these prefixes, so this cannot accidentally shadow one.
     fn resolve_env_var(s: &str) -> Result<String, EngineError> {
         // Two accepted indirection forms resolve to an environment variable:
         //   - `${VAR}` (shell-style), and
         //   - `env:VAR` (the terser form used throughout our example configs).
         // Anything else is treated as a literal secret. A real API key never
         // matches these prefixes, so this cannot accidentally shadow one.
+        if let Some(account) = s.strip_prefix("keychain:") {
+            return crate::secrets::load(account).map_err(EngineError::Config).and_then(
+                |secret| {
+                    secret.ok_or_else(|| {
+                        EngineError::Config(format!(
+                            "keychain entry '{account}' is not set (store it with: mofa-engine keychain set {account})"
+                        ))
+                    })
+                },
+            );
+        }
         let var_name = s
             .strip_prefix("${")
             .and_then(|rest| rest.strip_suffix('}'))
@@ -780,6 +796,27 @@ impl ProviderConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_keychain_reference_via_mock_store() {
+        // Shared process-wide persistent stand-in (see secrets.rs).
+        crate::secrets::install_mock_store_once();
+        crate::secrets::store("test/resolve", "sk-from-keychain").unwrap();
+        assert_eq!(
+            ProviderConfig::resolve_env_var("keychain:test/resolve").unwrap(),
+            "sk-from-keychain"
+        );
+        // A literal secret with a similar shape but no prefix passes through.
+        assert_eq!(
+            ProviderConfig::resolve_env_var("keychain-plain-key").unwrap(),
+            "keychain-plain-key"
+        );
+        // Missing entry → honest error naming the fix command.
+        let err = ProviderConfig::resolve_env_var("keychain:test/missing").unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("keychain set"), "got: {message}");
+        crate::secrets::delete("test/resolve").unwrap();
+    }
 
     #[test]
     fn resolve_env_var_plain() {

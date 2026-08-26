@@ -68,12 +68,20 @@ cost_tier = "free"
   capability = "chat"
   reasoning_tier = "high"
 
+# SECRETS (PLAT-04: 密钥仅存 OS 钥匙串) — three indirection forms keep keys
+# out of this file; a bare string remains a literal key:
+#   api_key = "${OPENAI_API_KEY}"     # environment variable
+#   api_key = "env:OPENAI_API_KEY"    # same, terser
+#   api_key = "keychain:mofa/openai"  # OS keychain entry, stored once via:
+#        mofa-engine keychain set --account mofa/openai   (then paste, Enter)
+# Works on macOS Keychain / Windows Credential Manager / Linux Secret Service.
+
 # Cloud OpenAI-compatible backend. Models are declared explicitly.
 [[providers]]
 name = "openai"
 kind = "openai_compatible"
 base_url = "https://api.openai.com/v1"
-api_key = "${OPENAI_API_KEY}"
+api_key = "keychain:mofa/openai"   # or "${OPENAI_API_KEY}"
 priority = 10
 cost_tier = "high"
 # Optional token pricing (USD per 1000 tokens) for cost tracking in /metrics and

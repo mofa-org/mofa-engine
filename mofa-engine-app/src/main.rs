@@ -50,6 +50,25 @@ enum Command {
     Status(DaemonArgs),
     /// Re-run discovery on a running daemon.
     Refresh(DaemonArgs),
+    /// Store a provider secret in the OS keychain (PLAT-04).
+    KeychainSet {
+        /// Keychain account, e.g. `mofa/openai` (referenced as `keychain:mofa/openai`).
+        #[arg(long)]
+        account: String,
+        /// The secret; omit to read one line from stdin (keeps it out of shell history).
+        #[arg(long)]
+        value: Option<String>,
+    },
+    /// Read a keychain entry (prints the secret — for verification only).
+    KeychainGet {
+        #[arg(long)]
+        account: String,
+    },
+    /// Delete a keychain entry (idempotent).
+    KeychainDelete {
+        #[arg(long)]
+        account: String,
+    },
     /// Invoke a model on a running daemon.
     Invoke {
         #[command(flatten)]
@@ -89,6 +108,39 @@ impl Cli {
             }
             Some(Command::Status(d)) => Self::print_json(Self::daemon_client(d).status().await),
             Some(Command::Refresh(d)) => Self::print_json(Self::daemon_client(d).refresh().await),
+            Some(Command::KeychainSet { account, value }) => {
+                let secret = match value {
+                    Some(v) => v,
+                    None => {
+                        let mut line = String::new();
+                        std::io::stdin()
+                            .read_line(&mut line)
+                            .map_err(|e| anyhow::anyhow!("reading stdin: {e}"))?;
+                        line.trim_end().to_string()
+                    }
+                };
+                if secret.is_empty() {
+                    anyhow::bail!("refusing to store an empty secret for '{account}'");
+                }
+                mofa_engine_core::secrets::store(&account, &secret)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                println!("stored keychain:{account}");
+                Ok(())
+            }
+            Some(Command::KeychainGet { account }) => {
+                match mofa_engine_core::secrets::load(&account).map_err(|e| anyhow::anyhow!(e))? {
+                    Some(secret) => {
+                        println!("{secret}");
+                        Ok(())
+                    }
+                    None => anyhow::bail!("keychain:{account} is not set"),
+                }
+            }
+            Some(Command::KeychainDelete { account }) => {
+                mofa_engine_core::secrets::delete(&account).map_err(|e| anyhow::anyhow!(e))?;
+                println!("deleted keychain:{account}");
+                Ok(())
+            }
             Some(Command::Invoke {
                 daemon,
                 capability,

@@ -18,6 +18,7 @@ pub mod config;
 pub mod engine;
 pub mod preflight;
 pub mod quality_gate;
+pub mod secrets;
 pub mod subscription;
 
 pub use config::EngineConfig;
