@@ -18,6 +18,9 @@ pub enum Capability {
     Asr,
     /// Image generation.
     ImageGen,
+    /// Image editing (I2I / inpainting): regenerate an input image, either
+    /// whole or in the regions marked by an optional mask.
+    ImageEdit,
     /// Video generation.
     VideoGen,
     /// Vision-language model.
@@ -33,6 +36,7 @@ impl std::fmt::Display for Capability {
             Self::Tts => "tts",
             Self::Asr => "asr",
             Self::ImageGen => "image_gen",
+            Self::ImageEdit => "image_edit",
             Self::VideoGen => "video_gen",
             Self::Vlm => "vlm",
             Self::Embedding => "embedding",
@@ -49,6 +53,9 @@ impl Capability {
             "tts" => Some(Self::Tts),
             "asr" | "stt" => Some(Self::Asr),
             "imagegen" | "image_gen" | "image-gen" => Some(Self::ImageGen),
+            "imageedit" | "image_edit" | "image-edit" | "inpaint" | "inpainting" => {
+                Some(Self::ImageEdit)
+            }
             "videogen" | "video_gen" | "video-gen" => Some(Self::VideoGen),
             "vlm" | "vision" => Some(Self::Vlm),
             "embedding" | "embeddings" => Some(Self::Embedding),
@@ -518,6 +525,13 @@ pub struct InferenceRequest {
     pub messages: Vec<Message>,
     /// Path to an input file on the engine host.
     pub input_file: Option<String>,
+    /// Mask for the `image_edit` capability: an HTTP(S) URL, `data:` URL, or
+    /// local file path pointing at a PNG whose **fully transparent areas**
+    /// (alpha 0) mark where the input image should be regenerated — the
+    /// OpenAI `/images/edits` convention, passed through to the provider
+    /// untouched. `None` means whole-image editing (I2I).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_mask: Option<String>,
     /// Extra parameters passed through to the provider.
     #[serde(default)]
     pub params: serde_json::Value,
@@ -542,6 +556,7 @@ impl Default for InferenceRequest {
             max_cost_usd: None,
             messages: Vec::new(),
             input_file: None,
+            input_mask: None,
             params: serde_json::Value::Null,
             hint_next: None,
             request_id: Self::generate_request_id(),
