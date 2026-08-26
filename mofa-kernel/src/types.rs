@@ -633,6 +633,11 @@ pub struct InferenceResponse {
     /// Whether the response came from a fallback candidate.
     #[serde(default)]
     pub fallback_used: bool,
+    /// Deep-reasoning trace surfaced by reasoning-capable models on the
+    /// blocking path (`None` otherwise). Mirrors what the streaming path
+    /// delivers as `StreamChunk::Reasoning` increments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
     /// Machine-readable routing reason.
     pub routing_reason: Option<String>,
 }
