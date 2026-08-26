@@ -21,9 +21,9 @@ use tokio::sync::{Mutex as AsyncMutex, Semaphore, broadcast, mpsc};
 use tokio::task::{AbortHandle, JoinHandle};
 
 use crate::backends::{
-    CloudVideoGenProvider, LiterLLMProvider, LocalAsrProvider, LocalImageGenProvider,
-    LocalTtsProvider, LocalVideoGenProvider, OllamaProvider, OpenAiCompatProvider,
-    SystemTtsProvider,
+    CloudMusicGenProvider, CloudVideoGenProvider, LiterLLMProvider, LocalAsrProvider,
+    LocalImageGenProvider, LocalTtsProvider, LocalVideoGenProvider, OllamaProvider,
+    OpenAiCompatProvider, SystemTtsProvider,
 };
 use crate::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerRegistry, CircuitState};
 use crate::config::{EngineConfig, PreflightConfig, TimeoutConfig};
@@ -313,6 +313,14 @@ impl Engine {
                         pc.models.clone(),
                     ))
                 }
+                ProviderKind::CloudMusicGen => Arc::new(CloudMusicGenProvider::new(
+                    &pc.name,
+                    &pc.base_url,
+                    pc.api_key.clone(),
+                    pc.models.clone(),
+                    cost_tier,
+                    config.artifacts.dir.clone(),
+                )?),
                 ProviderKind::CloudVideoGen => Arc::new(CloudVideoGenProvider::new(
                     &pc.name,
                     &pc.dialect,

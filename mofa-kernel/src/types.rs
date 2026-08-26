@@ -20,6 +20,8 @@ pub enum Capability {
     ImageGen,
     /// Video generation.
     VideoGen,
+    /// Music generation (text-to-music).
+    MusicGen,
     /// Vision-language model.
     Vlm,
     /// Text embedding.
@@ -34,6 +36,7 @@ impl std::fmt::Display for Capability {
             Self::Asr => "asr",
             Self::ImageGen => "image_gen",
             Self::VideoGen => "video_gen",
+            Self::MusicGen => "music_gen",
             Self::Vlm => "vlm",
             Self::Embedding => "embedding",
         };
@@ -50,6 +53,9 @@ impl Capability {
             "asr" | "stt" => Some(Self::Asr),
             "imagegen" | "image_gen" | "image-gen" => Some(Self::ImageGen),
             "videogen" | "video_gen" | "video-gen" => Some(Self::VideoGen),
+            "musicgen" | "music_gen" | "music-gen" | "music" | "ttm" | "singing" => {
+                Some(Self::MusicGen)
+            }
             "vlm" | "vision" => Some(Self::Vlm),
             "embedding" | "embeddings" => Some(Self::Embedding),
             _ => None,
@@ -78,6 +84,9 @@ pub enum ProviderKind {
     /// Cloud video-generation API (the Volcengine Ark / BytePlus task contract
     /// that ByteDance's Seedance models speak): submit → poll → download.
     CloudVideoGen,
+    /// Cloud music-generation API (the gcui-art/suno-api gateway contract):
+    /// submit → poll clips → download audio.
+    CloudMusicGen,
     /// Multi-vendor cloud gateway via the `liter-llm` crate (143+ providers,
     /// unified OpenAI-style contract).
     LiterLlm,
