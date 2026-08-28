@@ -503,8 +503,11 @@ impl Engine {
                                 _ => {}
                             }
                         }
-                        if matches!(card.residency, ModelResidency::Loaded) && card.memory_estimate_bytes > 0 {
-                            self.memory.try_reserve(&card.id, card.memory_estimate_bytes);
+                        if matches!(card.residency, ModelResidency::Loaded)
+                            && card.memory_estimate_bytes > 0
+                        {
+                            self.memory
+                                .try_reserve(&card.id, card.memory_estimate_bytes);
                             self.memory.touch(&card.id);
                         }
                         card.refresh_status();

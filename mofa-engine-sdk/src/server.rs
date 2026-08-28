@@ -470,10 +470,7 @@ impl AppState {
 
         // Security: only serve files with the engine artifact prefix to
         // prevent arbitrary filesystem reads.
-        let file_name = file_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let file_name = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         // Try the path as-is first (absolute path from engine response),
         // then fall back to the system temp dir with just the filename.
@@ -511,7 +508,8 @@ impl AppState {
             StatusCode::OK,
             [(header::CONTENT_TYPE, content_type)],
             bytes,
-        ).into_response()
+        )
+            .into_response()
     }
 
     /// `POST /v1/assemble_video` — assemble scene images + narration audio
@@ -519,13 +517,16 @@ impl AppState {
     async fn assemble_video_handler(
         Json(req): Json<serde_json::Value>,
     ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-        let images = req.get("images")
+        let images = req
+            .get("images")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
-        let audio = req.get("audio")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let audio = req.get("audio").and_then(|v| v.as_str()).unwrap_or("");
 
         if images.is_empty() || audio.is_empty() {
             return Err((StatusCode::BAD_REQUEST, "images and audio required".into()));
@@ -535,9 +536,8 @@ impl AppState {
         let audio_path = if std::path::Path::new(audio).exists() {
             audio.to_string()
         } else {
-            let temp_path = std::env::temp_dir().join(
-                std::path::Path::new(audio).file_name().unwrap_or_default()
-            );
+            let temp_path = std::env::temp_dir()
+                .join(std::path::Path::new(audio).file_name().unwrap_or_default());
             temp_path.to_string_lossy().to_string()
         };
 
@@ -554,9 +554,8 @@ impl AppState {
             let img_path = if std::path::Path::new(img).exists() {
                 img.clone()
             } else {
-                let temp = std::env::temp_dir().join(
-                    std::path::Path::new(img).file_name().unwrap_or_default()
-                );
+                let temp = std::env::temp_dir()
+                    .join(std::path::Path::new(img).file_name().unwrap_or_default());
                 temp.to_string_lossy().to_string()
             };
             args.push(img_path);
@@ -582,11 +581,18 @@ impl AppState {
             }
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Video assembly failed: {}", stderr.chars().take(300).collect::<String>())))
+                Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!(
+                        "Video assembly failed: {}",
+                        stderr.chars().take(300).collect::<String>()
+                    ),
+                ))
             }
-            Err(e) => {
-                Err((StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to spawn assembler: {e}")))
-            }
+            Err(e) => Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to spawn assembler: {e}"),
+            )),
         }
     }
 
@@ -638,13 +644,12 @@ impl AppState {
             let name = field.name().unwrap_or("").to_string();
             match name.as_str() {
                 "file" => {
-                    if let Some(file_name) = field.file_name() {
-                        if let Some(ext) = std::path::Path::new(file_name)
-                            .extension()
-                            .and_then(|e| e.to_str())
-                        {
-                            file_ext = ext.to_string();
-                        }
+                    if let Some(ext) = field
+                        .file_name()
+                        .and_then(|name| std::path::Path::new(name).extension())
+                        .and_then(|e| e.to_str())
+                    {
+                        file_ext = ext.to_string();
                     }
                     if let Ok(bytes) = field.bytes().await {
                         file_bytes = bytes.to_vec();
@@ -765,10 +770,11 @@ impl AppState {
         if let Some(voice) = req.voice {
             params.insert("voice".into(), serde_json::Value::String(voice));
         }
-        if let Some(speed) = req.speed {
-            if let Some(n) = serde_json::Number::from_f64(speed as f64) {
-                params.insert("speed".into(), serde_json::Value::Number(n));
-            }
+        if let Some(n) = req
+            .speed
+            .and_then(|speed| serde_json::Number::from_f64(speed as f64))
+        {
+            params.insert("speed".into(), serde_json::Value::Number(n));
         }
         let inv_req = InferenceRequest {
             capability: Some(Capability::Tts),
@@ -1091,10 +1097,9 @@ impl AppState {
                         !duplicated.iter().any(|dup| {
                             // Match "# HELP mofa_xxx", "# TYPE mofa_xxx", or "mofa_xxx ..."/"mofa_xxx{"
                             if line.starts_with("# HELP ") || line.starts_with("# TYPE ") {
-                                line.split_whitespace().nth(2).map_or(false, |name| name == *dup)
+                                line.split_whitespace().nth(2) == Some(*dup)
                             } else {
-                                line.starts_with(dup) && line[dup.len()..]
-                                    .starts_with(|c: char| c == ' ' || c == '{')
+                                line.starts_with(dup) && line[dup.len()..].starts_with([' ', '{'])
                             }
                         })
                     })
@@ -1257,7 +1262,10 @@ impl AppState {
                     serde_json::json!({"type":"error","message":"failed to serialize engine event"})
                 });
                 if let serde_json::Value::Object(ref mut map) = val {
-                    map.insert("timestamp_ms".to_string(), serde_json::Value::Number(now_ms.into()));
+                    map.insert(
+                        "timestamp_ms".to_string(),
+                        serde_json::Value::Number(now_ms.into()),
+                    );
                 }
                 let data = serde_json::to_string(&val).unwrap_or_default();
                 Some(Ok(Event::default().id(seq.to_string()).data(data)))

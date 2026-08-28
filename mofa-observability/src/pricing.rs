@@ -37,7 +37,9 @@ pub fn estimate_cost_usd(
         (_, m) if m.contains("chirp") => (0.01600, 0.01600),
         ("openai", m) if m.contains("tts-1-hd") => (0.03000, 0.03000),
         ("openai", m) if m.contains("tts-1") || m.contains("tts") => (0.01500, 0.01500),
-        ("openai", m) if m.contains("whisper-1") || m.contains("whisper-large") => (0.00600, 0.00600),
+        ("openai", m) if m.contains("whisper-1") || m.contains("whisper-large") => {
+            (0.00600, 0.00600)
+        }
         ("openai", m) if m.contains("gpt-transcribe") => (0.00450, 0.00450),
 
         // [IMAGE] Image & Video Generation Models
@@ -51,11 +53,17 @@ pub fn estimate_cost_usd(
 
         // [LOCAL] OpenAI Family (From OpenRouter Matrix) - Order: Most specific first!
         ("openai", m) if m.contains("o1-pro") => (0.07500, 0.30000),
-        ("openai", m) if m.contains("gpt-5.5-pro") || m.contains("gpt-5.4-pro") => (0.01500, 0.09000),
+        ("openai", m) if m.contains("gpt-5.5-pro") || m.contains("gpt-5.4-pro") => {
+            (0.01500, 0.09000)
+        }
         ("openai", m) if m.contains("gpt-5.2-pro") => (0.01050, 0.08400),
         ("openai", m) if m.contains("gpt-5-pro") || m.contains("o3-pro") => (0.00750, 0.06000),
         ("openai", m) if m.contains("gpt-5-codex") => (0.000625, 0.00500),
-        ("openai", m) if m.contains("o1-mini") || m.contains("o3-mini") || m.contains("o4-mini") => (0.00055, 0.00220),
+        ("openai", m)
+            if m.contains("o1-mini") || m.contains("o3-mini") || m.contains("o4-mini") =>
+        {
+            (0.00055, 0.00220)
+        }
         ("openai", m) if m.contains("o1") => (0.00750, 0.03000),
         ("openai", m) if m.contains("gpt-4o-mini") => (0.00015, 0.00060),
         ("openai", m) if m.contains("gpt-mini-latest") => (0.00075, 0.00450),
@@ -66,33 +74,122 @@ pub fn estimate_cost_usd(
         ("openai", _) => (0.00250, 0.01000),
 
         // [LOCAL] Anthropic Claude Family (From OpenRouter Matrix)
-        (p, m) if (p == "anthropic" || m.contains("claude")) && (m.contains("fable-5") || m.contains("opus-5-fast") || m.contains("opus-4.8-fast")) => (0.01000, 0.05000),
-        (p, m) if (p == "anthropic" || m.contains("claude")) && (m.contains("opus-4") && !m.contains("opus-4.") && !m.contains("opus-4.5") && !m.contains("opus-4.6") && !m.contains("opus-4.7") && !m.contains("opus-4.8")) => (0.01500, 0.07500),
-        (p, m) if (p == "anthropic" || m.contains("claude")) && (m.contains("opus-5") || m.contains("opus-4.8") || m.contains("opus-4.7") || m.contains("opus-4.6") || m.contains("opus-4.5")) => (0.00500, 0.02500),
-        (p, m) if (p == "anthropic" || m.contains("claude")) && m.contains("sonnet-5") => (0.00200, 0.01000),
-        (p, m) if (p == "anthropic" || m.contains("claude")) && (m.contains("sonnet-4") || m.contains("3-5-sonnet") || m.contains("3.5-sonnet") || m.contains("sonnet")) => (0.00300, 0.01500),
-        (p, m) if (p == "anthropic" || m.contains("claude")) && m.contains("haiku-4.5") => (0.00100, 0.00500),
-        (p, m) if (p == "anthropic" || m.contains("claude")) && (m.contains("haiku") || m.contains("3-haiku")) => (0.00025, 0.00125),
-        (p, m) if (p == "anthropic" || m.contains("claude")) && m.contains("3-opus") => (0.01500, 0.07500),
+        (p, m)
+            if (p == "anthropic" || m.contains("claude"))
+                && (m.contains("fable-5")
+                    || m.contains("opus-5-fast")
+                    || m.contains("opus-4.8-fast")) =>
+        {
+            (0.01000, 0.05000)
+        }
+        (p, m)
+            if (p == "anthropic" || m.contains("claude"))
+                && (m.contains("opus-4")
+                    && !m.contains("opus-4.")
+                    && !m.contains("opus-4.5")
+                    && !m.contains("opus-4.6")
+                    && !m.contains("opus-4.7")
+                    && !m.contains("opus-4.8")) =>
+        {
+            (0.01500, 0.07500)
+        }
+        (p, m)
+            if (p == "anthropic" || m.contains("claude"))
+                && (m.contains("opus-5")
+                    || m.contains("opus-4.8")
+                    || m.contains("opus-4.7")
+                    || m.contains("opus-4.6")
+                    || m.contains("opus-4.5")) =>
+        {
+            (0.00500, 0.02500)
+        }
+        (p, m) if (p == "anthropic" || m.contains("claude")) && m.contains("sonnet-5") => {
+            (0.00200, 0.01000)
+        }
+        (p, m)
+            if (p == "anthropic" || m.contains("claude"))
+                && (m.contains("sonnet-4")
+                    || m.contains("3-5-sonnet")
+                    || m.contains("3.5-sonnet")
+                    || m.contains("sonnet")) =>
+        {
+            (0.00300, 0.01500)
+        }
+        (p, m) if (p == "anthropic" || m.contains("claude")) && m.contains("haiku-4.5") => {
+            (0.00100, 0.00500)
+        }
+        (p, m)
+            if (p == "anthropic" || m.contains("claude"))
+                && (m.contains("haiku") || m.contains("3-haiku")) =>
+        {
+            (0.00025, 0.00125)
+        }
+        (p, m) if (p == "anthropic" || m.contains("claude")) && m.contains("3-opus") => {
+            (0.01500, 0.07500)
+        }
         ("anthropic", _) => (0.00300, 0.01500),
 
         // [LOCAL] DeepSeek Family (From OpenRouter Matrix)
-        (p, m) if (p == "deepseek" || m.contains("deepseek")) && m.contains("v4-flash") => (0.000065, 0.000180),
-        (p, m) if (p == "deepseek" || m.contains("deepseek")) && m.contains("v4-pro") => (0.000414, 0.000828),
-        (p, m) if (p == "deepseek" || m.contains("deepseek")) && (m.contains("v3.2") || m.contains("v3.1") || m.contains("v3")) => (0.000209, 0.000310),
-        (p, m) if (p == "deepseek" || m.contains("deepseek")) && (m.contains("reasoner") || m.contains("r1")) => (0.00055, 0.00219),
-        (p, m) if (p == "deepseek" || m.contains("deepseek")) && m.contains("chat") => (0.00014, 0.00028),
+        (p, m) if (p == "deepseek" || m.contains("deepseek")) && m.contains("v4-flash") => {
+            (0.000065, 0.000180)
+        }
+        (p, m) if (p == "deepseek" || m.contains("deepseek")) && m.contains("v4-pro") => {
+            (0.000414, 0.000828)
+        }
+        (p, m)
+            if (p == "deepseek" || m.contains("deepseek"))
+                && (m.contains("v3.2") || m.contains("v3.1") || m.contains("v3")) =>
+        {
+            (0.000209, 0.000310)
+        }
+        (p, m)
+            if (p == "deepseek" || m.contains("deepseek"))
+                && (m.contains("reasoner") || m.contains("r1")) =>
+        {
+            (0.00055, 0.00219)
+        }
+        (p, m) if (p == "deepseek" || m.contains("deepseek")) && m.contains("chat") => {
+            (0.00014, 0.00028)
+        }
         (p, m) if p == "deepseek" || m.contains("deepseek") => (0.00055, 0.00219),
 
         // [LOCAL] Google Gemini Family (From OpenRouter Matrix)
-        (p, m) if (p.contains("gemini") || m.contains("gemini")) && (m.contains("flash") || m.contains("3.7-flash") || m.contains("2.5-flash") || m.contains("2.0-flash") || m.contains("1.5-flash")) => (0.000075, 0.000300),
-        (p, m) if (p.contains("gemini") || m.contains("gemini")) && (m.contains("3-flash-preview")) => (0.000250, 0.001500),
-        (p, m) if (p.contains("gemini") || m.contains("gemini")) && (m.contains("pro-latest") || m.contains("3.1-pro") || m.contains("2.5-pro") || m.contains("1.5-pro")) => (0.001250, 0.005000),
+        (p, m)
+            if (p.contains("gemini") || m.contains("gemini"))
+                && (m.contains("flash")
+                    || m.contains("3.7-flash")
+                    || m.contains("2.5-flash")
+                    || m.contains("2.0-flash")
+                    || m.contains("1.5-flash")) =>
+        {
+            (0.000075, 0.000300)
+        }
+        (p, m)
+            if (p.contains("gemini") || m.contains("gemini"))
+                && (m.contains("3-flash-preview")) =>
+        {
+            (0.000250, 0.001500)
+        }
+        (p, m)
+            if (p.contains("gemini") || m.contains("gemini"))
+                && (m.contains("pro-latest")
+                    || m.contains("3.1-pro")
+                    || m.contains("2.5-pro")
+                    || m.contains("1.5-pro")) =>
+        {
+            (0.001250, 0.005000)
+        }
         (_p, m) if m.contains("gemma-2-27b") => (0.000650, 0.000650),
         (p, m) if p.contains("gemini") || m.contains("gemini") => (0.000100, 0.000400),
 
         // [LOCAL] Open Weights Cloud Hostings (Fireworks, Together, Groq)
-        (_p, m) if m.contains("llama-3.3-70b") || m.contains("llama-3.1-70b") || m.contains("llama-3-70b") => (0.00090, 0.00090),
+        (_p, m)
+            if m.contains("llama-3.3-70b")
+                || m.contains("llama-3.1-70b")
+                || m.contains("llama-3-70b") =>
+        {
+            (0.00090, 0.00090)
+        }
         (_p, m) if m.contains("llama-3.1-8b") || m.contains("llama-3-8b") => (0.00020, 0.00020),
         (p, m) if p == "dashscope" || m.contains("qwen") => (0.00280, 0.00840),
 
@@ -137,7 +234,10 @@ mod tests {
             0.0
         );
         assert_eq!(estimate_cost_usd("kokoro", "kokoro", 500, 500, true), 0.0);
-        assert_eq!(estimate_cost_usd("funasr", "paraformer", 500, 500, false), 0.0);
+        assert_eq!(
+            estimate_cost_usd("funasr", "paraformer", 500, 500, false),
+            0.0
+        );
     }
 
     #[test]
@@ -194,7 +294,8 @@ mod tests {
     #[test]
     fn multimodal_models_pricing_verification() {
         // Gemini TTS ($0.000100 / 1k chars)
-        let tts_cost = estimate_cost_usd("gemini-tts", "gemini-2.5-flash-preview-tts", 1000, 0, false);
+        let tts_cost =
+            estimate_cost_usd("gemini-tts", "gemini-2.5-flash-preview-tts", 1000, 0, false);
         assert!((tts_cost - 0.000100).abs() < 1e-6);
 
         // OpenAI Whisper ($0.006 / min)
@@ -210,7 +311,13 @@ mod tests {
         assert!((veo_cost - 0.400000).abs() < 1e-6);
 
         // Local Kokoro TTS and FunASR are free ($0.00)
-        assert_eq!(estimate_cost_usd("local-tts", "kokoro", 1000, 1000, true), 0.0);
-        assert_eq!(estimate_cost_usd("local-asr", "funasr", 1000, 1000, true), 0.0);
+        assert_eq!(
+            estimate_cost_usd("local-tts", "kokoro", 1000, 1000, true),
+            0.0
+        );
+        assert_eq!(
+            estimate_cost_usd("local-asr", "funasr", 1000, 1000, true),
+            0.0
+        );
     }
 }

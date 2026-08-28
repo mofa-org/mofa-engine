@@ -10,7 +10,9 @@ use mofa_observability::events::{
     EngineEvent as ObsEngineEvent, EventEnvelope, EvictionTriggered, ModelLoaded, ModelUnloaded,
     PreflightSignal, RequestCompleted, RequestReceived, SignalSource, UnloadReason,
 };
-use mofa_observability::events::{PreflightHit as ObsPreflightHit, PreflightMiss as ObsPreflightMiss};
+use mofa_observability::events::{
+    PreflightHit as ObsPreflightHit, PreflightMiss as ObsPreflightMiss,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;

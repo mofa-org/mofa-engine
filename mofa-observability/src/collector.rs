@@ -592,6 +592,7 @@ impl EventSender {
     /// Send a critical event asynchronously. If the channel is full, this will await
     /// and apply backpressure to the caller instead of dropping the event.
     /// Use for rare, critical events like `FailoverTriggered` and `EvictionTriggered`.
+    #[allow(clippy::result_large_err)]
     pub async fn send_critical(
         &self,
         event: EventEnvelope,
