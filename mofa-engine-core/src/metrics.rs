@@ -21,8 +21,8 @@ struct ProviderUsage {
     /// Accumulated cost in micro-USD (millionths of a dollar) to avoid float
     /// atomics; rendered back to USD.
     cost_micro_usd: AtomicU64,
-    /// Track this provider serves — `"local"` or `"cloud"` (a provider is always
-    /// one or the other). Set on first use; drives the dual-track `locality` label.
+    /// Track this provider serves — `"local"` or `"cloud"`. Set on first use;
+    /// drives the dual-track `locality` label.
     locality: std::sync::OnceLock<&'static str>,
 }
 
@@ -202,7 +202,6 @@ impl EngineMetrics {
         ));
         out.push_str(&format!("mofa_request_duration_ms_count {cumulative}\n"));
 
-        // Point-in-time gauges from the engine.
         gauge(
             &mut out,
             "mofa_models_total",

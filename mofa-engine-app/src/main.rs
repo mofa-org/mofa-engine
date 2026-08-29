@@ -73,8 +73,6 @@ async fn main() -> anyhow::Result<()> {
 }
 
 impl Cli {
-    /// Dispatch the parsed command to its handler. Serve/validate run in-process;
-    /// the remaining subcommands act on a running daemon over the `/v1` API.
     async fn run(self) -> anyhow::Result<()> {
         let Cli {
             config,
@@ -151,7 +149,6 @@ impl Cli {
         }
     }
 
-    /// Run the daemon in-process.
     async fn serve(config_path: Option<PathBuf>, port: Option<u16>) -> anyhow::Result<()> {
         let mut config = EngineConfig::load_checked(config_path.as_deref())?;
         if let Some(port) = port {
@@ -183,7 +180,6 @@ impl Cli {
         }
     }
 
-    /// Pretty-print a client result as JSON, or fail with the error.
     fn print_json<T: serde::Serialize, E: std::fmt::Display>(
         result: Result<T, E>,
     ) -> anyhow::Result<()> {

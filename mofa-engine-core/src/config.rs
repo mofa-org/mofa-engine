@@ -13,25 +13,19 @@ use std::path::{Path, PathBuf};
 /// Top-level engine configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EngineConfig {
-    /// Network listen settings
     #[serde(default)]
     pub listen: ListenConfig,
-    /// Memory management settings
     #[serde(default)]
     pub memory: MemoryConfig,
-    /// Operation timeout settings
     #[serde(default)]
     pub timeouts: TimeoutConfig,
-    /// Preflight (predictive warming) settings
+    /// Preflight (predictive warming) settings.
     #[serde(default)]
     pub preflight: PreflightConfig,
-    /// Generated-artifact retention settings
     #[serde(default)]
     pub artifacts: ArtifactConfig,
-    /// Security and file-access settings
     #[serde(default)]
     pub security: SecurityConfig,
-    /// Provider definitions
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
 }
@@ -78,10 +72,8 @@ pub struct SecurityConfig {
 /// Network listen configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ListenConfig {
-    /// Bind address
     #[serde(default = "ListenConfig::default_host")]
     pub host: String,
-    /// Bind port
     #[serde(default = "ListenConfig::default_port")]
     pub port: u16,
 }
@@ -110,9 +102,9 @@ impl ListenConfig {
 /// Memory management configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {
-    /// Memory budget in megabytes (None = auto-detect from system)
+    /// Memory budget in megabytes (None = auto-detect from system).
     pub budget_mb: Option<u64>,
-    /// Seconds of idle time before evicting a model
+    /// Seconds of idle time before evicting a model.
     #[serde(default = "MemoryConfig::default_idle_timeout")]
     pub idle_timeout_secs: u64,
 }
@@ -283,24 +275,19 @@ impl PreflightConfig {
 /// Configuration for a single provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
-    /// Provider display name
     pub name: String,
-    /// Provider kind: "ollama" or "openai_compatible"
+    /// Provider kind, e.g. `"ollama"` or `"openai_compatible"`.
     pub kind: String,
-    /// Base URL for the API
     pub base_url: String,
-    /// API key (supports `${ENV_VAR}` syntax)
+    /// API key (supports `${ENV_VAR}` syntax).
     pub api_key: Option<String>,
-    /// Routing priority (lower = preferred; 1 = local, 10 = cloud)
+    /// Routing priority (lower = preferred; 1 = local, 10 = cloud).
     #[serde(default = "ProviderConfig::default_priority")]
     pub priority: u8,
-    /// Cost tier string
     #[serde(default = "ProviderConfig::default_cost_tier")]
     pub cost_tier: String,
-    /// Explicit model definitions
     #[serde(default)]
     pub models: Vec<ModelDef>,
-    /// Whether this provider is enabled
     #[serde(default = "ProviderConfig::default_enabled")]
     pub enabled: bool,
     /// Program to execute for a `local_tts` process-adapter backend.
@@ -382,13 +369,12 @@ impl ProviderConfig {
 /// A model definition within a provider config.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelDef {
-    /// Model name / identifier
     pub name: String,
-    /// Capability string (e.g. "chat", "tts")
+    /// Capability string (e.g. `"chat"`, `"tts"`).
     pub capability: String,
-    /// Context window size in tokens
+    /// Context window size in tokens.
     pub context_window: Option<u32>,
-    /// Estimated memory in megabytes
+    /// Estimated memory in megabytes.
     pub memory_mb: Option<u64>,
     /// Reasoning tier (`low`/`medium`/`high`) this model serves, for
     /// `reasoning.effort` tier routing (S2). Omit for non-reasoning models.

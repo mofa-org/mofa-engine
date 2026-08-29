@@ -3,26 +3,12 @@
 //! Runs a configured local command — an MLX/Kokoro or Piper-style TTS CLI — to
 //! synthesize speech, returning the produced audio as a managed artifact.
 //!
-//! Runtime- and device-specific concerns stay behind this `Provider` boundary,
-//! so the engine treats a local TTS model like any other backend: it is
-//! discovered, admitted through memory reservation, warmed, idle-unloaded, and
-//! can fail over to a cloud TTS backend when the local one is unavailable.
-//!
-//! ## Lifecycle model
-//!
-//! This adapter spawns the command once per synthesis (a cold, stateless
-//! process). `load` performs a cheap readiness probe (the program resolves and
-//! is executable) and reports the model as resident with its configured memory
-//! estimate; that conservative reservation lets the engine's coexistence and
-//! idle-eviction logic apply to local TTS exactly as it does to Ollama. A
-//! long-running server variant can later make `load` start the process without
-//! changing the engine contract.
-//!
-//! ## Cancellation
-//!
-//! Child processes are spawned with `kill_on_drop(true)`, so when the engine's
-//! inference timeout fires and drops the invocation future, the underlying
-//! synthesis process is terminated rather than leaked.
+//! The command is spawned once per synthesis (cold, stateless). `load` performs
+//! a cheap readiness probe (the program resolves) and reports the configured
+//! memory estimate, so the engine's coexistence and idle-eviction logic applies
+//! to local TTS exactly as to Ollama. Children spawn with `kill_on_drop(true)`,
+//! so an inference-timeout that drops the future terminates the process rather
+//! than leaking it.
 
 use std::path::{Path, PathBuf};
 
@@ -38,18 +24,13 @@ use crate::config::ModelDef;
 
 /// A process-adapter provider that shells out to a local TTS command.
 pub(crate) struct LocalTtsProvider {
-    /// Display name.
     name: String,
-    /// Program to execute per synthesis.
     command: String,
     /// Argument template with `{text}`, `{text_file}`, `{output}`, `{voice}`,
     /// `{speed}`, and `{format}` placeholders.
     args: Vec<String>,
-    /// Output audio extension/container (e.g. `wav`, `mp3`).
     output_format: String,
-    /// Directory for generated artifacts.
     output_dir: PathBuf,
-    /// Configured models this backend serves.
     models: Vec<ModelDef>,
 }
 
@@ -115,19 +96,16 @@ impl LocalTtsProvider {
             .filter(|t| !t.trim().is_empty())
             .ok_or_else(|| EngineError::InvalidRequest("TTS requires text input".into()))?;
 
-        // Per-request voice/speed/format (S1/S6). The request's `params` can select
-        // a voice and speaking rate, and choose the output container; each flows to
-        // the command via its matching placeholder. `format` also picks the artifact
-        // extension when set, so a caller asking for mp3 gets `…​.mp3`, not the
-        // backend default. Absent params substitute to empty (a no-op in the args).
+        // `format` also picks the artifact extension when set, so a caller asking
+        // for mp3 gets `….mp3`, not the backend default. Absent params substitute
+        // to empty (a no-op in the args).
         let voice = request
             .params
             .get("voice")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
-        // `speed` may arrive as a number (1.5) or a string ("1.5"); normalize both
-        // to a plain string for substitution.
+        // `speed` may arrive as a number (1.5) or a string ("1.5"); normalize both.
         let speed = request
             .params
             .get("speed")

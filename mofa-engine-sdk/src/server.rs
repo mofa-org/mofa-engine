@@ -535,7 +535,7 @@ mod tests {
     use axum::http::Request as HttpRequest;
     use mofa_engine_core::EngineConfig;
     use mofa_engine_core::config::{ListenConfig, MemoryConfig, PreflightConfig, TimeoutConfig};
-    use tower::ServiceExt; // for `oneshot`
+    use tower::ServiceExt;
 
     #[test]
     fn constant_time_eq_covers_all_shapes() {

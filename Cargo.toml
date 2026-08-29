@@ -8,7 +8,7 @@ members = [
     "mofa-podcast",
     "mofa-explainer",
     "mofa-review",
-    "mofa-studio",
+    "mofa-studio/src-tauri",
 ]
 
 [workspace.package]

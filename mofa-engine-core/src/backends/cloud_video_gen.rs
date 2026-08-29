@@ -109,23 +109,15 @@ impl VideoDialect {
 
 /// A provider that renders video through a task-based cloud API (see [`VideoDialect`]).
 pub(crate) struct CloudVideoGenProvider {
-    /// Display name.
     name: String,
-    /// Which vendor dialect to speak.
     dialect: VideoDialect,
-    /// API root, e.g. `https://ark.cn-beijing.volces.com/api/v3`.
     base_url: String,
-    /// Bearer token. Empty means "no credentials" → the provider reports itself
-    /// unavailable rather than failing engine startup (mirrors the other cloud
-    /// backends), so an offline/keyless config still boots.
+    /// Empty means "no credentials" → the provider reports itself unavailable
+    /// rather than failing engine startup, so an offline/keyless config boots.
     api_key: String,
-    /// Configured Seedance model ids this backend serves.
     models: Vec<ModelDef>,
-    /// Cost tier applied to this provider's models.
     cost_tier: CostTier,
-    /// Directory for downloaded video artifacts.
     output_dir: PathBuf,
-    /// Shared HTTP client (connection reuse across submit/poll/download).
     client: Client,
 }
 
@@ -222,9 +214,7 @@ impl CloudVideoGenProvider {
         })
     }
 
-    // ==========================================================================
-    // Pure request/response mapping (unit-tested without the network)
-    // ==========================================================================
+    // Pure request/response mapping (unit-tested without the network).
 
     /// Translate the familiar size/duration knobs into the Seedance text-command
     /// suffix appended to the prompt (e.g. ` --ratio 16:9 --resolution 1080p`).
@@ -379,12 +369,14 @@ impl CloudVideoGenProvider {
             .to_ascii_lowercase();
         match status.as_str() {
             "succeeded" | "success" | "done" | "completed" => {
-                // The finished URL sits at `content.video_url` (Ark), a top-level
-                // `video_url`, or `metadata.url` (Agnes) — accept any of them.
+                // The finished URL location varies by dialect/version: `content.video_url`
+                // (Ark), a top-level `video_url`, a top-level `url` (Agnes `/videos`
+                // actually returns the clip here), or `metadata.url` — accept any.
                 let url = body
                     .get("content")
                     .and_then(|c| c.get("video_url"))
                     .or_else(|| body.get("video_url"))
+                    .or_else(|| body.get("url"))
                     .or_else(|| body.get("metadata").and_then(|m| m.get("url")))
                     .and_then(|v| v.as_str());
                 match url {
@@ -874,7 +866,18 @@ mod tests {
 
     #[test]
     fn parse_task_state_agnes_shape() {
-        // Agnes: `completed` status, URL nested under `metadata.url`.
+        // Agnes `/videos` actually returns `completed` with the clip at a *top-level*
+        // `url` (regression: the code previously only looked at `metadata.url`, so a
+        // finished task failed with "task succeeded but returned no video URL").
+        assert_eq!(
+            CloudVideoGenProvider::parse_task_state(&serde_json::json!({
+                "status": "completed",
+                "url": "https://out/clip.mp4",
+                "video_id": "video_abc"
+            })),
+            TaskState::Succeeded("https://out/clip.mp4".into())
+        );
+        // `metadata.url` remains accepted for any dialect/version that uses it.
         assert_eq!(
             CloudVideoGenProvider::parse_task_state(&serde_json::json!({
                 "status": "completed",

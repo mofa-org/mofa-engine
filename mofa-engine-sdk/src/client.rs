@@ -21,8 +21,9 @@ use mofa_engine_core::subscription::SubscriptionInfo;
 use mofa_engine_core::{Engine, EngineConfig};
 use mofa_kernel::{
     Capability, EngineError, EngineStatus, ErrorInfo, InferenceRequest, InferenceResponse, Message,
-    ModelCard, ResponsesRequest, ResponsesResponse,
+    ModelCard, ResponsesRequest, ResponsesResponse, StreamChunk,
 };
+use tokio::sync::mpsc;
 
 /// Errors returned by [`DaemonClient`].
 #[derive(Debug, thiserror::Error)]
@@ -183,6 +184,88 @@ impl EmbeddedEngine {
     /// Serialize an engine error to a JSON `ErrorInfo` string.
     fn err_json(e: EngineError) -> String {
         serde_json::to_string(&e.info()).unwrap_or_else(|_| e.to_string())
+    }
+}
+
+/// An **async-native**, in-process facade over the engine for embedded use from
+/// Rust applications that already own a Tokio runtime.
+///
+/// [`EmbeddedEngine`] exists for *synchronous* callers: it owns a runtime and
+/// `block_on`s every call, so it **must not** be driven from inside a running
+/// runtime — doing so panics with "Cannot start a runtime from within a runtime".
+/// Async apps need this facade instead: it holds only the shared engine handle,
+/// borrows the caller's ambient runtime, and exposes the engine's async methods.
+/// Unlike the sync facade it also preserves streaming (see
+/// [`AsyncEmbeddedEngine::invoke_stream`]).
+///
+/// Cloning is cheap: it clones the inner [`Arc<Engine>`], so the same engine can be
+/// shared across request handlers (e.g. Axum/Tauri state) without re-initializing.
+#[derive(Clone)]
+pub struct AsyncEmbeddedEngine {
+    engine: Arc<Engine>,
+}
+
+impl AsyncEmbeddedEngine {
+    /// Build and initialize an embedded engine from configuration, using the
+    /// caller's ambient Tokio runtime. Unlike [`EmbeddedEngine::new`] this does not
+    /// create or block on a runtime, so it is safe to call from `async` code.
+    pub async fn new(config: EngineConfig) -> Result<Self, EngineError> {
+        let engine = Engine::try_new(config).await?;
+        Ok(Self { engine })
+    }
+
+    /// Wrap an already-initialized engine handle (e.g. one shared with a running
+    /// daemon `Server`) so callers can go through the SDK facade uniformly.
+    pub fn from_engine(engine: Arc<Engine>) -> Self {
+        Self { engine }
+    }
+
+    /// List all known model cards.
+    pub async fn capabilities(&self) -> Vec<ModelCard> {
+        self.engine.capabilities().await
+    }
+
+    /// Run one inference request to completion.
+    pub async fn invoke(
+        &self,
+        request: InferenceRequest,
+    ) -> Result<InferenceResponse, EngineError> {
+        self.engine.invoke(request).await
+    }
+
+    /// Stream one inference request, yielding [`StreamChunk`]s (reasoning deltas
+    /// first, then answer text) as they are produced.
+    ///
+    /// This is intentionally *not* on the synchronous [`EmbeddedEngine`]: SSE-style
+    /// consumption is caller-specific. Here we return the engine's native channel
+    /// receiver unchanged so a caller can `while let Some(chunk) = rx.recv().await`
+    /// exactly as it would against `Engine::invoke_stream`.
+    pub fn invoke_stream(&self, request: InferenceRequest) -> mpsc::Receiver<StreamChunk> {
+        self.engine.invoke_stream(request)
+    }
+
+    /// Run one turn of the stateful Responses API (multi-turn deep reasoning).
+    pub async fn respond(
+        &self,
+        request: ResponsesRequest,
+    ) -> Result<ResponsesResponse, EngineError> {
+        self.engine.respond(request).await
+    }
+
+    /// Snapshot the engine status.
+    pub async fn status(&self) -> EngineStatus {
+        self.engine.status().await
+    }
+
+    /// Re-run discovery and health probes.
+    pub async fn refresh(&self) {
+        self.engine.refresh_resources().await;
+    }
+
+    /// Access the underlying async engine for advanced, engine-native use (e.g.
+    /// subscription management or APIs not yet surfaced on this facade).
+    pub fn engine(&self) -> &Arc<Engine> {
+        &self.engine
     }
 }
 
@@ -518,6 +601,50 @@ mod tests {
         // An empty turn is rejected before routing.
         let err = engine.respond_json("{}").unwrap_err();
         assert!(err.contains("invalid_request"), "got: {err}");
+    }
+
+    // The whole reason `AsyncEmbeddedEngine` exists: it must be constructible and
+    // drivable from *inside* a Tokio runtime. `#[tokio::test]` runs the body on a
+    // running runtime, so if this facade tried to `block_on` (as the sync
+    // `EmbeddedEngine` does) it would panic with "Cannot start a runtime from
+    // within a runtime". Reaching the assertions proves it does not.
+    #[tokio::test]
+    async fn async_embedded_boots_inside_a_runtime() {
+        let engine = AsyncEmbeddedEngine::new(empty_config())
+            .await
+            .expect("async embedded engine builds under a running runtime");
+        assert!(engine.capabilities().await.is_empty());
+        assert_eq!(engine.status().await.total_models, 0);
+    }
+
+    #[tokio::test]
+    async fn async_embedded_invoke_without_models_errors() {
+        let engine = AsyncEmbeddedEngine::new(empty_config()).await.unwrap();
+        let req = InferenceRequest {
+            capability: Some(Capability::Chat),
+            request_id: "t".into(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            engine.invoke(req).await,
+            Err(EngineError::NoCapableModel(_))
+        ));
+    }
+
+    // `invoke_stream` returns the engine's native `StreamChunk` receiver unchanged.
+    // With no models the stream closes without yielding chunks, but the point here
+    // is that the receiver is live and awaitable through the facade.
+    #[tokio::test]
+    async fn async_embedded_invoke_stream_yields_a_receiver() {
+        let engine = AsyncEmbeddedEngine::new(empty_config()).await.unwrap();
+        let req = InferenceRequest {
+            capability: Some(Capability::Chat),
+            request_id: "t".into(),
+            ..Default::default()
+        };
+        let mut rx = engine.invoke_stream(req);
+        // Drain to completion; no models means no chunks, just a clean close.
+        while rx.recv().await.is_some() {}
     }
 
     #[test]

@@ -29,11 +29,9 @@ use crate::config::ModelDef;
 
 /// A provider that reaches many cloud vendors through the `liter-llm` gateway.
 pub(crate) struct LiterLLMProvider {
-    /// Display name.
     name: String,
     /// Configured models (each `name` is a liter-llm `provider/model` id).
     models: Vec<ModelDef>,
-    /// Cost tier for all models from this provider.
     cost_tier: CostTier,
     /// Directory for generated image artifacts.
     output_dir: std::path::PathBuf,
@@ -44,8 +42,6 @@ pub(crate) struct LiterLLMProvider {
 }
 
 impl LiterLLMProvider {
-    /// Build a liter-llm provider.
-    ///
     /// When `api_key` is empty, liter-llm resolves the vendor's environment
     /// variable (e.g. `OPENAI_API_KEY`) from the first model's `provider/` prefix.
     /// A non-empty `base_url` overrides the vendor default (e.g. a private gateway).
@@ -104,7 +100,6 @@ impl LiterLLMProvider {
         }
     }
 
-    /// Map MoFA conversation messages to liter-llm's typed text `Message`s.
     fn to_liter_messages(request: &InferenceRequest) -> Vec<LiterMessage> {
         request
             .messages
@@ -393,8 +388,6 @@ impl LiterLLMProvider {
     }
 }
 
-/// Pure/IO conversions between MoFA and liter-llm types, grouped as private
-/// associated functions rather than free functions.
 impl LiterLLMProvider {
     /// Map a MoFA reasoning request to liter-llm's effort enum.
     fn to_liter_effort(reasoning: Option<Reasoning>) -> Option<liter_llm::ReasoningEffort> {

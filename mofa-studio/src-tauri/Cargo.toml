@@ -1,0 +1,31 @@
+[package]
+name = "mofa-studio"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "MoFA Studio: a Tauri desktop creative studio (chat, image, video) driven by the MoFA engine through the SDK"
+
+# A plain binary target is enough for a desktop-only app (no mobile lib split).
+[[bin]]
+name = "mofa-studio"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Engine access goes through the SDK boundary (never mofa-engine-core directly):
+# the Tauri commands drive an in-process AsyncEmbeddedEngine.
+mofa-engine-sdk = { workspace = true }
+mofa-kernel = { workspace = true }
+
+# `protocol-asset` lets the webview load generated image/video artifacts by path
+# (scoped in tauri.conf.json to $CACHE/mofa-studio/**).
+tauri = { version = "2", features = ["protocol-asset"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+dirs = { workspace = true }
+uuid = { workspace = true }

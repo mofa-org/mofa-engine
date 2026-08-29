@@ -2,15 +2,9 @@
 //!
 //! Runs a configured local command — a Stable Diffusion CLI (e.g. `sd`/sd.cpp,
 //! `mflux`, or a wrapper script) — to render an image from a text prompt,
-//! returning the produced file as a managed artifact. This is the flagship S4
-//! enabler for **fully offline** operation: with a local SD backend, an explainer
-//! video's scene images can be generated on-device (`prefer=local`, cost ≈ $0)
-//! rather than falling back to a cloud image API.
-//!
-//! Device- and runtime-specific concerns stay behind this `Provider` boundary,
-//! so the engine treats a local image-gen model like any other backend: it is
-//! discovered, memory-managed, warmed, idle-unloaded, and can fail over to a
-//! cloud image backend (via liter-llm) when the local one is unavailable.
+//! returning the produced file as a managed artifact. Enables fully offline
+//! operation (`prefer=local`, cost ≈ $0), and can fail over to a cloud image
+//! backend (via liter-llm) when the local one is unavailable.
 //!
 //! ## Command contract
 //!

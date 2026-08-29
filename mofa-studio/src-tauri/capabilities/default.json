@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Core permissions for the studio's single main window: IPC to our commands, event listen/emit for chat streaming, and asset-protocol loading of generated artifacts.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

@@ -165,7 +165,6 @@ impl QualityGate {
     ) -> QualityReport {
         let mut checks = Vec::new();
 
-        // 1. Duration / integrity.
         let dur_pass = probe.has_video
             && probe
                 .duration_secs
@@ -182,7 +181,6 @@ impl QualityGate {
             },
         });
 
-        // 2. Slideshow-risk.
         let slide_pass = slideshow_risk.is_some_and(|r| r <= self.thresholds.max_slideshow_risk);
         checks.push(QualityCheck {
             name: "slideshow_risk",
@@ -201,7 +199,7 @@ impl QualityGate {
             },
         });
 
-        // 3. VLM semantic match (only when the caller supplied a verdict).
+        // VLM check only exists when the caller supplied a verdict.
         if let Some(ok) = vlm_ok {
             checks.push(QualityCheck {
                 name: "vlm_match",

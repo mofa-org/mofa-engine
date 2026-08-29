@@ -1,19 +1,13 @@
 //! Local video-generation process-adapter backend.
 //!
-//! Runs a configured local command — a text-to-video CLI (e.g. an AnimateDiff /
-//! Stable-Video-Diffusion wrapper, or a `Wan`/`mochi`-style generator) — to
-//! render a short clip from a text prompt, returning the produced file as a
-//! managed artifact. This completes the S4 Creative Generation track: with a
-//! local backend an explainer clip can be generated on-device (`prefer=local`,
-//! cost ≈ $0); liter-llm exposes no video endpoint, so unlike image generation
-//! there is no cloud fallback and this local adapter is the whole path.
+//! Runs a configured local text-to-video CLI to render a short clip from a
+//! prompt. liter-llm exposes no video endpoint, so unlike image generation there
+//! is no cloud fallback and this local adapter is the whole path.
 //!
-//! Device- and runtime-specific concerns stay behind this `Provider` boundary,
-//! so the engine treats a local video-gen model like any other backend: it is
-//! discovered, memory-managed, warmed, and idle-unloaded. Because generation is
-//! typically slow, an operator should size the `inference_secs` timeout
-//! accordingly; the child is spawned with `kill_on_drop(true)` so a timeout that
-//! drops the future terminates the render rather than leaking it.
+//! Because generation is typically slow, an operator should size the
+//! `inference_secs` timeout accordingly; the child is spawned with
+//! `kill_on_drop(true)` so a timeout that drops the future terminates the render
+//! rather than leaking it.
 //!
 //! ## Command contract
 //!
@@ -51,23 +45,18 @@ const DEFAULT_FPS: u32 = 16;
 
 /// A process-adapter provider that shells out to a local video-generation command.
 pub(crate) struct LocalVideoGenProvider {
-    /// Display name.
     name: String,
-    /// Program to execute per clip.
     command: String,
     /// Argument template with `{prompt}`, `{output}`, `{negative_prompt}`,
     /// `{width}`, `{height}`, `{seconds}`, and `{fps}` placeholders.
     args: Vec<String>,
     /// Output video extension/container (e.g. `mp4`, `webm`).
     output_format: String,
-    /// Directory for generated artifacts.
     output_dir: PathBuf,
-    /// Configured models this backend serves.
     models: Vec<ModelDef>,
 }
 
 impl LocalVideoGenProvider {
-    /// Create a new local video-generation process adapter.
     pub(crate) fn new(
         name: impl Into<String>,
         command: impl Into<String>,
@@ -232,7 +221,6 @@ impl LocalVideoGenProvider {
     }
 }
 
-/// Pure parameter parsing, grouped as private associated functions.
 impl LocalVideoGenProvider {
     /// Requested dimensions from `params`, accepting a combined `size` (`"WxH"`)
     /// or explicit `width`/`height`, falling back to a square [`DEFAULT_EDGE`].

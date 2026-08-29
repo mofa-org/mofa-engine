@@ -18,19 +18,13 @@ use crate::config::ModelDef;
 
 /// A provider for any OpenAI-compatible API.
 pub(crate) struct OpenAiCompatProvider {
-    /// Display name.
     name: String,
-    /// Base URL.
     base_url: String,
-    /// Bearer token.
     api_key: String,
-    /// Configured models.
     models: Vec<ModelDef>,
-    /// Cost tier for all models from this provider.
     cost_tier: CostTier,
     /// Directory for generated TTS artifacts.
     output_dir: std::path::PathBuf,
-    /// HTTP client.
     client: Client,
 }
 
@@ -174,8 +168,8 @@ impl OpenAiCompatProvider {
                 if !data.is_empty() {
                     data.push('\n');
                 }
-                // Per the spec a single space immediately after the colon is part
-                // of the delimiter, not the value; any further whitespace is content.
+                // Per the SSE spec, a single space after the colon is part of the
+                // delimiter, not the value; any further whitespace is content.
                 data.push_str(rest.strip_prefix(' ').unwrap_or(rest));
             }
         }
@@ -277,6 +271,32 @@ struct ImageGenData {
     b64_json: Option<String>,
     #[serde(default)]
     url: Option<String>,
+}
+
+/// Where an image-generation response gives us the actual bytes.
+enum ImageSource {
+    /// Inline base64 payload to decode.
+    Base64(String),
+    /// A URL to download.
+    Download(String),
+}
+
+/// Decide where an image's bytes come from.
+///
+/// Tolerates gateways (e.g. Agnes) that return an **empty** `b64_json` string
+/// *alongside* a real `url`. An empty string is `Some("")`, not `None`, so a naive
+/// `if let Some(b64)` would take the base64 branch and decode it to zero bytes,
+/// writing a 0-byte artifact and never trying the URL. Filtering out empty/blank
+/// strings makes the two fields fall through in the right order (inline base64
+/// preferred, then URL), returning `None` only when neither carries anything.
+fn resolve_image_source(b64_json: Option<String>, url: Option<String>) -> Option<ImageSource> {
+    if let Some(b64) = b64_json.filter(|s| !s.trim().is_empty()) {
+        Some(ImageSource::Base64(b64))
+    } else if let Some(url) = url.filter(|s| !s.trim().is_empty()) {
+        Some(ImageSource::Download(url))
+    } else {
+        None
+    }
 }
 
 /// OpenAI-style `/embeddings` request: one or more input strings embedded in a
@@ -501,9 +521,6 @@ impl Provider for OpenAiCompatProvider {
             });
         }
 
-        // OpenAI SSE: events are delimited by a blank line (`\n\n`). Buffer bytes,
-        // emit each token's `delta.content` as its event completes, and capture the
-        // token counts from the terminal usage-only chunk.
         let mut buf: Vec<u8> = Vec::new();
         let mut full = String::new();
         let mut prompt_tokens = None;
@@ -545,7 +562,7 @@ impl Provider for OpenAiCompatProvider {
                 }
             }
         }
-        // Any trailing event without a final blank line.
+        // Any trailing event lacking a final blank-line delimiter.
         if let Some(event) = Self::parse_sse_event(&buf)
             && let Some(delta) = apply(event, &mut full)
         {
@@ -871,9 +888,8 @@ impl OpenAiCompatProvider {
                 detail: "image_gen returned no data".into(),
             })?;
 
-        // Resolve to bytes: decode inline base64, or download the returned URL.
-        let bytes =
-            if let Some(b64) = image.b64_json {
+        let bytes = match resolve_image_source(image.b64_json, image.url) {
+            Some(ImageSource::Base64(b64)) => {
                 use base64::Engine as _;
                 base64::engine::general_purpose::STANDARD
                     .decode(b64.as_bytes())
@@ -881,13 +897,22 @@ impl OpenAiCompatProvider {
                         provider: self.name.clone(),
                         detail: format!("image base64 decode error: {e}"),
                     })?
-            } else if let Some(remote) = image.url {
+            }
+            Some(ImageSource::Download(remote)) => {
                 let dl = self.client.get(&remote).send().await.map_err(|e| {
                     EngineError::ProviderError {
                         provider: self.name.clone(),
                         detail: format!("image download error: {e}"),
                     }
                 })?;
+                // A non-success download would otherwise yield an error page (or
+                // empty body) that we'd silently persist as the "image".
+                if !dl.status().is_success() {
+                    return Err(EngineError::ProviderError {
+                        provider: self.name.clone(),
+                        detail: format!("image download HTTP {}", dl.status()),
+                    });
+                }
                 dl.bytes()
                     .await
                     .map_err(|e| EngineError::ProviderError {
@@ -895,12 +920,23 @@ impl OpenAiCompatProvider {
                         detail: format!("image download read error: {e}"),
                     })?
                     .to_vec()
-            } else {
+            }
+            None => {
                 return Err(EngineError::ProviderError {
                     provider: self.name.clone(),
                     detail: "image_gen returned neither b64_json nor url".into(),
                 });
-            };
+            }
+        };
+
+        // Never persist an empty artifact — surface it as an error instead of a
+        // broken image the caller has to diagnose downstream.
+        if bytes.is_empty() {
+            return Err(EngineError::ProviderError {
+                provider: self.name.clone(),
+                detail: "image_gen produced no image bytes".into(),
+            });
+        }
 
         let path = self
             .output_dir
@@ -1121,6 +1157,26 @@ mod tests {
         assert_eq!(cards[0].residency, ModelResidency::Remote);
         assert_eq!(cards[1].capability, Capability::Tts);
         assert_eq!(cards[1].memory_estimate_bytes, 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn empty_b64_json_falls_through_to_url() {
+        // Regression: Agnes returns `"b64_json": ""` (empty, not null) *and* a real
+        // `url`. The empty string must not be treated as inline base64 — that would
+        // decode to zero bytes and persist a 0-byte, unrenderable image.
+        match resolve_image_source(Some(String::new()), Some("https://x/img.png".into())) {
+            Some(ImageSource::Download(u)) => assert_eq!(u, "https://x/img.png"),
+            _ => panic!("empty b64_json should fall through to the url"),
+        }
+        // A genuine base64 payload is preferred over a url.
+        assert!(matches!(
+            resolve_image_source(Some("aGk=".into()), Some("https://x".into())),
+            Some(ImageSource::Base64(_))
+        ));
+        // Blank/whitespace b64 with no url, and both-missing, yield None (the caller
+        // turns this into a provider error rather than an empty artifact).
+        assert!(resolve_image_source(Some("   ".into()), None).is_none());
+        assert!(resolve_image_source(None, None).is_none());
     }
 
     #[test]

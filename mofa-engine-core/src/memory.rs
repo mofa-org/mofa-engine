@@ -81,7 +81,7 @@ impl MemoryManager {
     /// Detect available system memory and use 70% as budget.
     fn detect_system_memory() -> u64 {
         let sys = sysinfo::System::new_all();
-        let total = sys.total_memory(); // bytes
+        let total = sys.total_memory();
         (total as f64 * 0.7) as u64
     }
 

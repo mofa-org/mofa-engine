@@ -16,13 +16,10 @@ const TIER_MATCH_BONUS: i64 = 5_000;
 /// Provider facts needed by routing.
 #[derive(Debug, Clone)]
 pub(crate) struct RoutingProvider {
-    /// Provider name.
     pub name: String,
-    /// Provider kind.
     pub kind: ProviderKind,
     /// Configured priority. Lower is preferred.
     pub priority: u8,
-    /// Current health.
     pub health: BackendHealth,
     /// Whether the provider circuit is open.
     pub circuit_open: bool,
@@ -31,9 +28,7 @@ pub(crate) struct RoutingProvider {
 /// Explainable route decision.
 #[derive(Debug, Clone)]
 pub(crate) struct RouteDecision<'a> {
-    /// Selected model.
     pub model: &'a ModelCard,
-    /// Composite score.
     pub score: i64,
     /// Human-readable reason suitable for logs and debug UI.
     pub reason: String,
@@ -108,14 +103,9 @@ impl Router {
                 continue;
             }
 
-            // Under `prefer=auto` (the default), the seven-dimensional score already
-            // biases toward local via the locality term while keeping cloud as a
-            // fallback; the hard cases above have removed the ineligible candidates.
             let mut score = Self::score(model, desired_cap, provider);
-            // Reasoning-tier routing (S2): when the request declares an effort, a
-            // model whose configured tier matches gets a bonus placed *below*
-            // locality (so local-first still holds) but *above* cost/priority, so
-            // effort selects the right tier among same-locality candidates.
+            // Reasoning-tier routing (S2): a matching configured tier earns
+            // `TIER_MATCH_BONUS`; see its doc for why it sits below locality.
             if let Some(reasoning) = request.reasoning
                 && model.reasoning_tier == Some(reasoning.effort)
             {

@@ -655,10 +655,10 @@ impl Engine {
             mut request,
         } = req;
 
-        // 1. Seed history: continue a stored conversation, or start a fresh one
-        //    (with optional system instructions). An unknown prior id is a hard
-        //    error rather than a silent fresh start, so an expired/evicted chain
-        //    surfaces to the caller.
+        // Seed history: continue a stored conversation, or start a fresh one
+        // (with optional system instructions). An unknown prior id is a hard
+        // error rather than a silent fresh start, so an expired/evicted chain
+        // surfaces to the caller.
         let mut messages: Vec<Message> = match previous_response_id.as_deref() {
             Some(prev) => self
                 .conversations
@@ -679,8 +679,6 @@ impl Engine {
             },
         };
 
-        // 2. Append this turn's new messages, then the `input` shorthand as a
-        //    user turn.
         messages.append(&mut request.messages);
         if let Some(text) = input.filter(|t| !t.trim().is_empty()) {
             messages.push(Message {
@@ -695,16 +693,15 @@ impl Engine {
             ));
         }
 
-        // 3. Route + invoke with the accumulated history. Default to chat when the
-        //    caller does not pin a capability, since Responses is a chat surface.
+        // Default to chat when the caller does not pin a capability, since
+        // Responses is a chat surface.
         request.messages = messages.clone();
         if request.capability.is_none() {
             request.capability = Some(Capability::Chat);
         }
         let response = self.invoke(request).await?;
 
-        // 4. Append the assistant reply and persist the updated history under a
-        //    new response id.
+        // Persist the updated history under a new response id.
         if let Some(text) = response.text.clone().filter(|t| !t.is_empty()) {
             messages.push(Message {
                 role: "assistant".into(),

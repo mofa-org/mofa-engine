@@ -140,7 +140,6 @@ impl SystemTtsProvider {
         stem: &str,
         want_format: &str,
     ) -> Result<PathBuf, EngineError> {
-        // 1. Native synthesis → an intermediate file.
         let native = match self.voice {
             Voice::MacSay => {
                 let aiff = self.output_dir.join(format!("mofa_tts_{stem}.aiff"));
@@ -193,7 +192,7 @@ impl SystemTtsProvider {
             }
         }
 
-        // 2. Transcode to the requested format when it differs from the native one.
+        // Transcode to the requested format only when it differs from the native one.
         let native_ext = native
             .extension()
             .and_then(|e| e.to_str())
@@ -346,10 +345,6 @@ impl Provider for SystemTtsProvider {
         self.synthesize(request, std::time::Instant::now()).await
     }
 }
-
-// ==============================================================================
-// Platform detection helpers
-// ==============================================================================
 
 /// Detect the OS-native voice tool available on this machine.
 fn detect_voice() -> Voice {

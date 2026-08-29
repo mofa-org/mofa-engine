@@ -90,7 +90,6 @@ impl ProviderBreaker {
         match self.state {
             CircuitState::Closed => true,
             CircuitState::Open => {
-                // Check if cool-down period has elapsed.
                 if let Some(last) = self.last_failure
                     && last.elapsed() >= Duration::from_secs(self.config.cool_down_secs)
                 {
@@ -162,9 +161,7 @@ impl ProviderBreaker {
                 self.probe_started = None;
                 tracing::warn!("circuit breaker → open (probe failed)");
             }
-            CircuitState::Open => {
-                // Already open.
-            }
+            CircuitState::Open => {}
         }
     }
 }

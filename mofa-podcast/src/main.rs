@@ -23,7 +23,7 @@
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
-use mofa_engine_core::{Engine, EngineConfig};
+use mofa_engine_sdk::{AsyncEmbeddedEngine, EngineConfig};
 use mofa_kernel::{Capability, InferenceRequest, Message, Prefer};
 
 /// Article → narrated podcast episode (.mp3), via the MoFA engine.
@@ -98,10 +98,10 @@ async fn run(cli: Cli) -> Result<(), String> {
         Some(p) => Some(p.clone()),
         None => provision_offline_config()?,
     };
-    let engine = Engine::try_new(EngineConfig::load(config_path.as_deref()))
+    let engine = AsyncEmbeddedEngine::new(EngineConfig::load(config_path.as_deref()))
         .await
         .map_err(|e| format!("engine init failed: {e}"))?;
-    engine.refresh_resources().await;
+    engine.refresh().await;
 
     let prefer = match cli.prefer.as_str() {
         "local" => Prefer::Local,

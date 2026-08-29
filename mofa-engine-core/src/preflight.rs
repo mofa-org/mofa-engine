@@ -134,8 +134,8 @@ impl PreflightPredictor {
         let mut scopes = self.lock();
         Self::evict_if_full(&mut scopes, scope);
 
-        // Observe into the scope's own chain, capturing the transition edge it
-        // just formed (its previous capability, if any).
+        // Capture the transition edge the observation forms (its previous
+        // capability, if any) so only a real edge is mirrored globally.
         let edge_from = {
             let chain = scopes
                 .entry(scope.to_string())
@@ -145,7 +145,6 @@ impl PreflightPredictor {
             prev
         };
 
-        // Mirror only that real edge into the global aggregate.
         if scope != GLOBAL_SCOPE
             && let Some(from) = edge_from
         {

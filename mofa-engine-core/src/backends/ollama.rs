@@ -18,11 +18,8 @@ use crate::config::ModelDef;
 
 /// Provider for a local Ollama instance.
 pub(crate) struct OllamaProvider {
-    /// Display name.
     name: String,
-    /// Base URL.
     base_url: String,
-    /// HTTP client.
     client: Client,
     /// Config-supplied reasoning-tier overrides, keyed by Ollama model name
     /// (e.g. `"deepseek-r1:8b"`). Ollama auto-discovers its models, so these are
@@ -34,8 +31,6 @@ pub(crate) struct OllamaProvider {
 }
 
 impl OllamaProvider {
-    /// Create a new Ollama provider.
-    ///
     /// Fails (rather than panicking or silently dropping the configured
     /// timeouts/`no_proxy`) if the system TLS/HTTP stack cannot build a client,
     /// so the engine surfaces a clean startup error instead of crashing.
@@ -640,8 +635,7 @@ impl Provider for OllamaProvider {
             });
         }
 
-        // Ollama streams newline-delimited JSON. Buffer bytes and emit each
-        // token's content as it completes a line, accumulating the full text.
+        // Ollama streams newline-delimited JSON.
         let mut buf: Vec<u8> = Vec::new();
         let mut full = String::new();
         let mut prompt_tokens = None;

@@ -153,7 +153,6 @@ pub enum ModelResidency {
 /// Execution state and concurrency limits for a model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionState {
-    /// Number of active requests.
     pub active_requests: u32,
     /// Maximum requests the backend says this model can handle.
     pub max_concurrency: u32,
@@ -280,7 +279,6 @@ pub struct ModelCard {
     pub availability: ModelAvailability,
     /// Whether the model is loaded locally.
     pub residency: ModelResidency,
-    /// Request concurrency state.
     pub execution: ExecutionState,
     /// Cost classification.
     pub cost_tier: CostTier,
@@ -289,7 +287,7 @@ pub struct ModelCard {
     /// Estimated memory footprint in bytes.
     pub memory_estimate_bytes: u64,
     /// Reasoning tier this model serves, when configured. Lets `reasoning.effort`
-    /// route `low | medium | high` to cheaper/stronger models (S2). `None` for
+    /// route `low | medium | high` to cheaper/stronger models. `None` for
     /// non-tiered models.
     #[serde(default)]
     pub reasoning_tier: Option<ReasoningEffort>,
@@ -376,7 +374,6 @@ impl ModelId {
 pub struct Message {
     /// Role: "system", "user", "assistant".
     pub role: String,
-    /// Message text content.
     pub content: String,
     /// Image references for multimodal (VLM) requests — HTTP(S) URLs, `data:`
     /// URLs, or local file paths. Empty for text-only messages.
@@ -617,23 +614,18 @@ pub struct InferenceResponse {
     pub provider: String,
     /// Wall-clock duration in milliseconds.
     pub duration_ms: u64,
-    /// Request correlation ID.
     pub request_id: String,
     /// Total token usage, if reported by provider.
     pub tokens_used: Option<u32>,
-    /// Prompt/input tokens, if reported by provider.
     #[serde(default)]
     pub prompt_tokens: Option<u32>,
-    /// Completion/output tokens, if reported by provider.
     #[serde(default)]
     pub completion_tokens: Option<u32>,
     /// Estimated cost in USD, if a price is configured for the serving provider.
     #[serde(default)]
     pub cost_usd: Option<f64>,
-    /// Whether the response came from a fallback candidate.
     #[serde(default)]
     pub fallback_used: bool,
-    /// Machine-readable routing reason.
     pub routing_reason: Option<String>,
 }
 
@@ -648,11 +640,8 @@ pub struct InferenceResponse {
 pub enum StreamChunk {
     /// Emitted once before any content; identifies the serving model.
     Started {
-        /// Request correlation ID.
         request_id: String,
-        /// Model actually serving the request.
         model_used: String,
-        /// Provider serving the request.
         provider: String,
     },
     /// An incremental piece of text output.
@@ -669,14 +658,10 @@ pub enum StreamChunk {
     },
     /// Terminal success event with aggregate metadata and any file output.
     Completed {
-        /// Wall-clock duration in milliseconds.
         duration_ms: u64,
-        /// Total token usage, if reported.
         tokens_used: Option<u32>,
-        /// Prompt/input tokens, if reported.
         #[serde(default)]
         prompt_tokens: Option<u32>,
-        /// Completion/output tokens, if reported.
         #[serde(default)]
         completion_tokens: Option<u32>,
         /// Estimated cost in USD, if a price is configured for the provider.
@@ -684,9 +669,7 @@ pub enum StreamChunk {
         cost_usd: Option<f64>,
         /// File output path (for TTS, image gen, etc.).
         file: Option<String>,
-        /// Whether a fallback candidate served the request.
         fallback_used: bool,
-        /// Machine-readable routing reason.
         routing_reason: Option<String>,
     },
     /// Terminal error event.
@@ -725,7 +708,6 @@ pub type StreamSink = tokio::sync::mpsc::Sender<StreamDelta>;
 pub struct LifecycleResult {
     /// Model affected by this operation.
     pub model_id: String,
-    /// Resulting residency.
     pub residency: ModelResidency,
     /// Observed or estimated memory, if known.
     pub memory_bytes: Option<u64>,
@@ -736,15 +718,10 @@ pub struct LifecycleResult {
 /// Backend status snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackendStatus {
-    /// Provider name.
     pub name: String,
-    /// Provider kind.
     pub kind: ProviderKind,
-    /// Health status.
     pub health: BackendHealth,
-    /// Circuit breaker state.
     pub circuit_state: String,
-    /// Static backend feature flags.
     pub features: Vec<BackendFeature>,
 }
 
@@ -755,82 +732,60 @@ pub struct BackendStatus {
 pub enum EngineEvent {
     /// A model's compatibility status changed.
     ModelStatusChanged {
-        /// Model identifier.
         model_id: String,
-        /// Previous status.
         old: ModelStatus,
-        /// New status.
         new: ModelStatus,
     },
     /// A model's richer residency state changed.
     ModelResidencyChanged {
-        /// Model identifier.
         model_id: String,
-        /// Previous residency.
         old: ModelResidency,
-        /// New residency.
         new: ModelResidency,
     },
     /// A request started processing.
     RequestStarted {
-        /// Request correlation ID.
         request_id: String,
-        /// Requested capability.
         capability: Option<Capability>,
-        /// Model selected for this request.
         model_id: String,
     },
     /// A request completed.
     RequestCompleted {
-        /// Request correlation ID.
         request_id: String,
-        /// Duration in milliseconds.
         duration_ms: u64,
-        /// Whether it succeeded.
         success: bool,
     },
     /// Memory allocation changed.
     MemoryChanged {
-        /// Currently used bytes.
         used_bytes: u64,
-        /// Total budget bytes.
         total_bytes: u64,
     },
     /// A model was evicted from local memory.
     ModelEvicted {
-        /// Model identifier.
         model_id: String,
         /// Why it was evicted, e.g. `memory_pressure` or `idle_timeout`.
         reason: String,
     },
     /// Predictive (Preflight) warming started for a model.
     PreflightWarmStarted {
-        /// Model identifier being warmed.
         model_id: String,
         /// What triggered the warm: `hint`, `subscription`, or `history`.
         source: String,
     },
     /// Predictive (Preflight) warming finished.
     PreflightWarmCompleted {
-        /// Model identifier that was warmed.
         model_id: String,
-        /// Whether the warm succeeded.
         success: bool,
     },
     /// Provider health changed.
     ProviderHealthChanged {
-        /// Provider name.
         provider: String,
-        /// Current health.
         health: BackendHealth,
     },
     /// Discovery completed for one provider.
     DiscoveryCompleted {
-        /// Provider name.
         provider: String,
         /// Number of models registered.
         models: usize,
-        /// Whether discovery succeeded.
         success: bool,
     },
 }
@@ -838,21 +793,14 @@ pub enum EngineEvent {
 /// Overall engine status snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineStatus {
-    /// Total number of known models.
     pub total_models: usize,
-    /// Number of currently loaded models.
     pub loaded_models: usize,
-    /// Number of active providers.
     pub providers: usize,
-    /// Memory used in bytes.
     pub memory_used_bytes: u64,
-    /// Memory budget in bytes.
     pub memory_budget_bytes: u64,
-    /// Engine uptime in seconds.
     pub uptime_secs: u64,
     /// Provider health map retained for compatibility.
     pub provider_health: Vec<ProviderHealth>,
-    /// Backend status snapshots.
     #[serde(default)]
     pub backends: Vec<BackendStatus>,
 }
@@ -860,11 +808,9 @@ pub struct EngineStatus {
 /// Health status for a single provider retained for compatibility.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderHealth {
-    /// Provider name.
     pub name: String,
     /// Whether the backend is currently routable.
     pub healthy: bool,
-    /// Circuit breaker state.
     pub circuit_state: String,
 }
 

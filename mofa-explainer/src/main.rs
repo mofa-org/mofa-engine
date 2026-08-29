@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use mofa_engine_core::quality_gate::QualityGate;
-use mofa_engine_core::{Engine, EngineConfig};
+use mofa_engine_sdk::{AsyncEmbeddedEngine, EngineConfig};
 use mofa_kernel::{Capability, InferenceRequest, Message, Prefer};
 
 /// Topic → narrated, subtitled explainer video (.mp4), via the MoFA engine.
@@ -104,10 +104,10 @@ async fn run(cli: Cli) -> Result<(), String> {
         Some(p) => Some(p.clone()),
         None => provision_offline_config()?,
     };
-    let engine = Engine::try_new(EngineConfig::load(config_path.as_deref()))
+    let engine = AsyncEmbeddedEngine::new(EngineConfig::load(config_path.as_deref()))
         .await
         .map_err(|e| format!("engine init failed: {e}"))?;
-    engine.refresh_resources().await;
+    engine.refresh().await;
 
     let prefer = match cli.prefer.as_str() {
         "local" => Prefer::Local,
@@ -195,7 +195,11 @@ async fn run(cli: Cli) -> Result<(), String> {
 // ==============================================================================
 
 /// Ask the engine for a scene-by-scene narration script.
-async fn write_script(engine: &Engine, cli: &Cli, prefer: Prefer) -> Result<String, String> {
+async fn write_script(
+    engine: &AsyncEmbeddedEngine,
+    cli: &Cli,
+    prefer: Prefer,
+) -> Result<String, String> {
     let req = InferenceRequest {
         capability: Some(Capability::Chat),
         model: cli.model.clone(),
@@ -242,7 +246,7 @@ async fn write_script(engine: &Engine, cli: &Cli, prefer: Prefer) -> Result<Stri
 
 /// Synthesize the narration audio for the whole script.
 async fn synthesize_narration(
-    engine: &Engine,
+    engine: &AsyncEmbeddedEngine,
     cli: &Cli,
     prefer: Prefer,
     script: &str,
@@ -285,7 +289,7 @@ async fn synthesize_narration(
 /// succeeded (possibly empty) — a missing image backend is expected offline and
 /// is not fatal (the composition falls back to title cards).
 async fn generate_scenes(
-    engine: &Engine,
+    engine: &AsyncEmbeddedEngine,
     prefer: Prefer,
     scenes: &[String],
     work: &Path,

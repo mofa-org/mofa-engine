@@ -16,5 +16,10 @@ pub mod server;
 // Internal: the embedded dashboard HTML, served by `server`.
 pub(crate) mod dashboard;
 
-pub use client::{ClientError, DaemonClient, EmbeddedEngine};
+pub use client::{AsyncEmbeddedEngine, ClientError, DaemonClient, EmbeddedEngine};
 pub use server::Server;
+
+// Re-export the config type callers need to construct an embedded engine, so an
+// app can depend on `mofa-engine-sdk` alone for engine access instead of also
+// reaching into `mofa-engine-core`.
+pub use mofa_engine_core::EngineConfig;

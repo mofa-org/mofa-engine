@@ -31,24 +31,20 @@ pub enum ErrorCode {
 /// why it failed. Lets an Agent see *all* attempts, not just the last error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FailedAttempt {
-    /// Provider that was tried.
     pub provider: String,
-    /// Model that was tried (canonical short name).
+    /// Canonical short name.
     pub model: String,
-    /// Human-readable failure reason.
     pub reason: String,
 }
 
 /// Structured error body suitable for HTTP and SDKs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorInfo {
-    /// Stable code.
     pub code: ErrorCode,
-    /// Human-readable message.
     pub message: String,
     /// Whether retrying the same request may succeed.
     pub retryable: bool,
-    /// Optional source provider/backend.
+    /// Source provider/backend.
     pub source: Option<String>,
     /// Complete per-candidate failure chain (empty unless failover was attempted).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -69,9 +65,7 @@ pub enum EngineError {
     /// A provider returned an error.
     #[error("provider '{provider}' error: {detail}")]
     ProviderError {
-        /// Which provider failed.
         provider: String,
-        /// Error detail.
         detail: String,
     },
 
@@ -82,9 +76,7 @@ pub enum EngineError {
     /// Not enough memory to load the requested model.
     #[error("memory pressure: need {need} bytes, only {available} available")]
     MemoryPressure {
-        /// Bytes needed.
         need: u64,
-        /// Bytes available.
         available: u64,
     },
 

@@ -43,7 +43,6 @@ use crate::config::ModelDef;
 
 /// A process-adapter provider that shells out to a local ASR command.
 pub(crate) struct LocalAsrProvider {
-    /// Display name.
     name: String,
     /// Program to execute per transcription.
     command: String,
@@ -54,14 +53,11 @@ pub(crate) struct LocalAsrProvider {
     /// when the configured CLI does not do speaker separation, in which case a
     /// diarize request degrades to a plain transcript.
     diarize_args: Vec<String>,
-    /// Directory for transient transcript files.
     output_dir: PathBuf,
-    /// Configured models this backend serves.
     models: Vec<ModelDef>,
 }
 
 impl LocalAsrProvider {
-    /// Create a new local ASR process adapter.
     pub(crate) fn new(
         name: impl Into<String>,
         command: impl Into<String>,
