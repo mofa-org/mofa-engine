@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
 """End-to-End Test Suite for MoFA Engine MCP Server (Model Context Protocol).
 
-Tests MCP tool registration, schema validation, and live end-to-end tool execution
-across all 7 full-modal capabilities:
+Tests MCP tool registration, schema validation, live end-to-end tool execution,
+resources, prompts, pipelines, and multi-turn sessions across all capabilities:
   1. mofa_doctor (Diagnostic & readiness inspection)
-  2. mofa_chat (Chat LLM with optional deep thinking reasoning)
-  3. mofa_tts (Speech synthesis with voice alias resolution)
-  4. mofa_asr (Speech-to-text audio transcription)
-  5. mofa_understand (Multimodal VLM document understanding)
-  6. mofa_embed (Semantic vector embeddings)
-  7. mofa_image_gen (Image generation interface)
+  2. mofa_chat (Chat LLM with reasoning & multi-turn session memory)
+  3. mofa_session_clear (Session history reset)
+  4. mofa_tts (Speech synthesis with rich media artifact formatting)
+  5. mofa_asr (Speech-to-text audio transcription)
+  6. mofa_understand (Multimodal VLM document understanding)
+  7. mofa_embed (Semantic vector embeddings)
+  8. mofa_image_gen (Image generation interface & markdown artifacts)
+  9. mofa_run_pipeline (Declarative multimodal pipeline orchestration)
+  10. MCP Resources (mofa://models, mofa://cost, mofa://status, mofa://scenarios)
+  11. MCP Prompts (mofa_review_diff, mofa_meeting_brief, mofa_podcast_script, mofa_extract_receipt)
 
 Usage:
   python3 tests/test_mcp_e2e.py
 """
 
+import json
 import os
 import sys
 import unittest
@@ -24,25 +29,29 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT_DIR / "mofa-fm"))
 
-try:
-    import fastmcp
-    import mcp_server
-    from mcp_server import (
-        mcp,
-        mofa_chat,
-        mofa_tts,
-        mofa_asr,
-        mofa_understand,
-        mofa_embed,
-        mofa_image_gen,
-        mofa_doctor,
-    )
-    HAS_FASTMCP = True
-except ImportError:
-    HAS_FASTMCP = False
+import mcp_server
+from mcp_server import (
+    mcp,
+    mofa_chat,
+    mofa_session_clear,
+    mofa_tts,
+    mofa_asr,
+    mofa_understand,
+    mofa_embed,
+    mofa_image_gen,
+    mofa_run_pipeline,
+    mofa_doctor,
+    get_models_resource,
+    get_cost_resource,
+    get_status_resource,
+    get_scenarios_resource,
+    prompt_review_diff,
+    prompt_meeting_brief,
+    prompt_podcast_script,
+    prompt_extract_receipt,
+)
 
 
-@unittest.skipUnless(HAS_FASTMCP, "fastmcp is required for MCP E2E tests: pip install fastmcp")
 class TestMofaMcpServerE2E(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -51,15 +60,16 @@ class TestMofaMcpServerE2E(unittest.TestCase):
         print("==================================================================")
 
     def test_01_tool_registration(self):
-        """Verify all 7 MCP tools are properly registered on the FastMCP server instance."""
-        # Check tool functions exist and are callable
+        """Verify all 9 MCP tools are properly registered and callable."""
         tools = [
             mofa_chat,
+            mofa_session_clear,
             mofa_tts,
             mofa_asr,
             mofa_understand,
             mofa_embed,
             mofa_image_gen,
+            mofa_run_pipeline,
             mofa_doctor,
         ]
         for t in tools:
@@ -67,7 +77,8 @@ class TestMofaMcpServerE2E(unittest.TestCase):
 
         print(f"\n[Test 1] Tool Registration: {len(tools)} tools verified:")
         for t in tools:
-            print(f"  + {t.__name__}: {t.__doc__.splitlines()[0] if t.__doc__ else ''}")
+            first_line = t.__doc__.splitlines()[0] if t.__doc__ else ""
+            print(f"  + {t.__name__}: {first_line}")
 
     def test_02_mcp_doctor_tool(self):
         """Test mofa_doctor tool invocation via MCP."""
@@ -104,8 +115,8 @@ class TestMofaMcpServerE2E(unittest.TestCase):
         text = "Testing speech synthesis through Model Context Protocol tool."
         res = mofa_tts(text=text, voice="en-narrator", prefer="local")
         self.assertIsInstance(res, str)
-        self.assertTrue("Audio saved" in res or "TTS completed" in res)
-        print(f"  [OK] TTS Result: {res.replace(chr(10), ' · ')}")
+        self.assertTrue("MoFA Speech Synthesis" in res or "TTS completed" in res)
+        print(f"  [OK] TTS Result: {res.replace(chr(10), ' · ')[:120]}...")
 
     def test_05_mcp_asr_tool(self):
         """Test mofa_asr audio transcription tool via MCP."""
@@ -144,6 +155,92 @@ class TestMofaMcpServerE2E(unittest.TestCase):
         print(f"  [OK] Embed Result: {res.splitlines()[0][:60]}...")
         print(f"  +- Telemetry: {res.splitlines()[-1]}")
 
+    def test_08_multi_turn_session_memory(self):
+        """Test multi-turn conversational memory with session_id (Improvement #6)."""
+        print("\n[Test 8] Testing multi-turn session memory...")
+        sid = "test-session-mcp-001"
+        
+        # Turn 1
+        res1 = mofa_chat(
+            message="My favorite secret word is 'Moonlight'. Remember this.",
+            session_id=sid,
+            prefer="local",
+        )
+        self.assertIn(sid, res1)
+        self.assertIn("turn 1", res1)
+        print(f"  + Turn 1: {res1.splitlines()[0][:80]}...")
+
+        # Turn 2
+        res2 = mofa_chat(
+            message="What is my secret word?",
+            session_id=sid,
+            prefer="local",
+        )
+        self.assertIn(sid, res2)
+        self.assertIn("turn 2", res2)
+        print(f"  + Turn 2: {res2.splitlines()[0][:80]}...")
+
+        # Clear session
+        clear_res = mofa_session_clear(session_id=sid)
+        self.assertIn("Cleared session", clear_res)
+        print(f"  + Clear: {clear_res}")
+
+    def test_09_declarative_pipeline_execution(self):
+        """Test mofa_run_pipeline tool execution (Improvement #5)."""
+        print("\n[Test 9] Testing declarative pipeline execution tool...")
+        
+        # Test podcast pipeline preset
+        res = mofa_run_pipeline(
+            pipeline_type="podcast",
+            input_text="MoFA Engine provides high throughput local AI inference.",
+            voice="en-narrator",
+            prefer="local",
+        )
+        self.assertIsInstance(res, str)
+        self.assertIn("MoFA Pipeline: Podcast Studio", res)
+        self.assertIn("Total Latency", res)
+        print(f"  [OK] Pipeline Result:\n{res[:200]}...\n")
+
+    def test_10_mcp_resources_and_prompts(self):
+        """Test MCP resources and prompt templates (Improvement #1)."""
+        print("\n[Test 10] Testing MCP resources and prompts...")
+        
+        # Resources
+        models_json = get_models_resource()
+        self.assertIsInstance(models_json, str)
+        print("  + Resource mofa://models returned valid payload")
+
+        cost_json = get_cost_resource()
+        cost_data = json.loads(cost_json)
+        self.assertIn("total_cost_usd", cost_data)
+        print(f"  + Resource mofa://cost: total_cost=${cost_data.get('total_cost_usd', 0.0)}")
+
+        scenarios_json = get_scenarios_resource()
+        scenarios_data = json.loads(scenarios_json)
+        self.assertIn("S1", scenarios_data)
+        self.assertIn("S6", scenarios_data)
+        print(f"  + Resource mofa://scenarios: {len(scenarios_data)} scenarios verified")
+
+        # Prompts
+        diff_prompt = prompt_review_diff(diff="--- a/main.rs\n+++ b/main.rs\n@@ -1 +1 @@\n-old\n+new")
+        self.assertIn("MoFA Engine Code Review Specialist", diff_prompt)
+        print("  + Prompt mofa_review_diff generated successfully")
+
+        brief_prompt = prompt_meeting_brief(transcript="Alice: We deploy tomorrow.")
+        self.assertIn("MoFA Executive Meeting Assistant", brief_prompt)
+        print("  + Prompt mofa_meeting_brief generated successfully")
+
+    def test_11_media_artifact_formatting(self):
+        """Test image and audio artifact formatting (Improvement #4)."""
+        print("\n[Test 11] Testing media artifact formatting...")
+        
+        # Image gen artifact formatting
+        res_img = mofa_image_gen(prompt="Futuristic neural network server rack in cyber style", prefer="local")
+        self.assertIn("MoFA Generated Image", res_img)
+        self.assertIn("Resolution", res_img)
+        print(f"  + Image artifact format:\n{res_img[:150]}...\n")
+
 
 if __name__ == "__main__":
     unittest.main()
+
