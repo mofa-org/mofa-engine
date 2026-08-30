@@ -13,7 +13,7 @@
         "mcpServers": {
           "mofa-engine": {
             "command": "python3",
-            "args": ["/Users/ashum9/mofa/mofa-engine/mofa-fm/mcp_server.py"]
+            "args": ["<PATH_TO_MOFA_ENGINE>/mofa-fm/mcp_server.py"]
           }
         }
       }

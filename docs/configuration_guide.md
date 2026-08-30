@@ -280,11 +280,11 @@ priority = 7
 enabled = true
 
 [[providers.models]]
-name = "gemini-2.5-flash"
+name = "gemini-3.6-flash"
 capability = "chat"
 
 [[providers.models]]
-name = "gemini-2.5-pro"
+name = "gemini-flash-latest"
 capability = "chat"
 ```
 
@@ -444,11 +444,11 @@ priority = 10
 cost_tier = "low"
 
 [[providers.models]]
-name = "gemini-2.5-flash"
+name = "gemini-3.6-flash"
 capability = "chat"
 
 [[providers.models]]
-name = "gemini-2.5-pro"
+name = "gemini-flash-latest"
 capability = "chat"
 
 # 4. Image Generation Adapter (Priority 10)

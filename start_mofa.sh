@@ -6,14 +6,14 @@
 
 set -e
 
-ENGINE_DIR="$HOME/mofa/mofa-engine"
+ENGINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "[LAUNCH] Starting MoFA Full Stack..."
 
 # 1. Observability (Grafana & Prometheus Docker)
 echo "1⃣  Starting Observability (Grafana & Prometheus)..."
 cd "$ENGINE_DIR/mofa-observability/docker"
-docker-compose up -d
+docker compose up -d 2>/dev/null || docker-compose up -d
 
 # 2. Check/Start Ollama
 echo "2⃣  Checking Ollama status..."

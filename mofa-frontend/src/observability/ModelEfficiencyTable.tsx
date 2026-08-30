@@ -25,8 +25,8 @@ export function ModelEfficiencyTable({ capabilities = [] }: ModelEfficiencyTable
           status: 'hot',
         },
         {
-          id: 'gemini/gemini-2.5-flash',
-          name: 'Gemini 2.5 Flash',
+          id: 'gemini/gemini-3.6-flash',
+          name: 'Gemini 3.6 Flash',
           provider: 'Google Gemini',
           cost_tier: 'low',
           status: 'hot',

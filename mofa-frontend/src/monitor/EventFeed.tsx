@@ -80,9 +80,20 @@ function formatRelativeTime(ts: number, now: number): string {
   return new Date(ts).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
+const COLOR_STYLES: Record<string, { border: string; text: string }> = {
+  'accent-yellow': { border: 'border-l-accent-yellow', text: 'text-accent-yellow' },
+  'accent-purple': { border: 'border-l-accent-purple', text: 'text-accent-purple' },
+  'accent-red': { border: 'border-l-accent-red', text: 'text-accent-red' },
+  'accent-blue': { border: 'border-l-accent-blue', text: 'text-accent-blue' },
+  'accent-green': { border: 'border-l-accent-green', text: 'text-accent-green' },
+  'accent-cyan': { border: 'border-l-accent-cyan', text: 'text-accent-cyan' },
+  'text-dim': { border: 'border-l-text-dim', text: 'text-text-dim' },
+};
+
 function EventCard({ evt, now }: { evt: EngineEvent; now: number }) {
   const { icon, color, title, desc } = formatEvent(evt);
   const timeStr = new Date(evt.timestamp).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const styles = COLOR_STYLES[color] || { border: 'border-l-text-dim', text: 'text-text-dim' };
   
   return (
     <motion.div
@@ -90,14 +101,14 @@ function EventCard({ evt, now }: { evt: EngineEvent; now: number }) {
       initial={{ opacity: 0, y: -10 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.2 }}
-      className={`border border-border-subtle rounded-[var(--radius-small)] p-2.5 text-xs bg-background-card shadow-sm flex items-start gap-3 shrink-0 border-l-[3px] border-l-${color}`}
+      className={`border border-border-subtle rounded-[var(--radius-small)] p-2.5 text-xs bg-background-card shadow-sm flex items-start gap-3 shrink-0 border-l-[3px] ${styles.border}`}
     >
-      <div className={`mt-0.5 text-${color}`}>
+      <div className={`mt-0.5 ${styles.text}`}>
         {icon}
       </div>
       <div className="flex-1 min-w-0">
         <div className="flex justify-between items-start gap-2 mb-0.5">
-          <span className={`font-medium text-${color} truncate`}>{title}</span>
+          <span className={`font-medium truncate ${styles.text}`}>{title}</span>
           <span 
             className="text-[10px] font-mono text-text-dim whitespace-nowrap shrink-0 hover:text-text-secondary cursor-default"
             title={`Event recorded at ${timeStr}`}

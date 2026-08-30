@@ -5,7 +5,7 @@ services:
     image: ollama/ollama:latest
     container_name: mofa-ollama
     ports:
-      - "11434:11434"
+      - "127.0.0.1:11434:11434"
     volumes:
       - ollama_storage:/root/.ollama
     restart: unless-stopped
@@ -16,7 +16,7 @@ services:
       dockerfile: Dockerfile
     container_name: mofa-engine
     ports:
-      - "8420:8420"
+      - "127.0.0.1:8420:8420"
     environment:
       - OLLAMA_BASE_URL=http://ollama:11434
       - RUST_LOG=info
@@ -31,7 +31,7 @@ services:
       dockerfile: Dockerfile
     container_name: mofa-frontend
     ports:
-      - "3000:80"
+      - "127.0.0.1:3000:80"
     depends_on:
       - engine
     restart: unless-stopped

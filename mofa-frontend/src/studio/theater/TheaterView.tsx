@@ -94,11 +94,11 @@ export function TheaterView({ phase, onRetryTts, onReset }: TheaterViewProps) {
                    {(phase as any).partialScript}
                  </motion.div>
                ) : (
-                 <div className="space-y-4 max-w-2xl mx-auto">
-                   {[...Array(6)].map((_, i) => (
-                     <div key={i} className={`h-4 bg-background-hover rounded animate-pulse w-${['3/4', 'full', '5/6', 'full', '2/3', '1/2'][i]}`} />
-                   ))}
-                 </div>
+                  <div className="space-y-4 max-w-2xl mx-auto">
+                    {['w-3/4', 'w-full', 'w-5/6', 'w-full', 'w-2/3', 'w-1/2'].map((w, i) => (
+                      <div key={i} className={`h-4 bg-background-hover rounded animate-pulse ${w}`} />
+                    ))}
+                  </div>
                )
              ) : (
                <motion.div 

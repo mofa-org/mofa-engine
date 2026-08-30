@@ -61,7 +61,7 @@ export FIREWORKS_API_KEY=your_key_here
 
 ## 5. How to Run
 
-The scenario is executed using the Python benchmark script [`examples/01_provider_race.py`](file:///Users/ashum9/mofa/mofa-engine/examples/01_provider_race.py).
+The scenario is executed using the Python benchmark script [`examples/01_provider_race.py`](../../examples/01_provider_race.py).
 
 ### 5a. Provider comparison (needs both local and cloud)
 Run the full benchmark to race the local model against the cloud provider:
@@ -94,7 +94,7 @@ The script outputs an ANSI-colored matrix to the console and generates a side-by
 
 ## 7. Technical Detail
 
-- The benchmark utilizes the `engine.chat()` method from the [MoFA SDK](file:///Users/ashum9/mofa/mofa-engine/mofa-fm/mofa_sdk.py), injecting `prefer="local"` and `prefer="cloud"` separately for the two competing runs.
+- The benchmark utilizes the `engine.chat()` method from the [MoFA SDK](../../mofa-fm/mofa_sdk.py), injecting `prefer="local"` and `prefer="cloud"` separately for the two competing runs.
 - **Metrics Collected:** Total latency, Time To First Token (TTFT), token usage, velocity (tokens/sec), and estimated cost.
 - **Routing Intelligence:** This scenario proves the gateway's ability to abstract backend differences.
 - **Scoring Engine:** If `prefer` is omitted, MoFA evaluates providers using a 7-dimensional score: residency×1000, health×800, capability×200, locality×100, cost×50, priority×25, capacity×20.
@@ -103,7 +103,7 @@ The script outputs an ANSI-colored matrix to the console and generates a side-by
 
 | Criterion | Test | Expected |
 |-----------|------|----------|
-| Multi-vendor config | Check [`mofa_hybrid.toml`](file:///Users/ashum9/mofa/mofa-engine/mofa_hybrid.toml) | ≥3 vendors configurable |
+| Multi-vendor config | Check [`mofa_hybrid.toml`](../../mofa_hybrid.toml) | ≥3 vendors configurable |
 | `prefer=local` | Run with `--prefer local` | Routes **only** to local providers |
 | `prefer=cloud` | Run with `--prefer cloud` | Routes **only** to cloud providers |
 | Scoring fallback | Run without `--prefer` | Follows 7-dimensional scoring |
@@ -119,7 +119,7 @@ The script outputs an ANSI-colored matrix to the console and generates a side-by
 
 ## 10. Provider Configuration
 
-Providers are managed declaratively in [`mofa_hybrid.toml`](file:///Users/ashum9/mofa/mofa-engine/mofa_hybrid.toml). To add a new provider (e.g., Fireworks AI), use the `openai_compatible` kind:
+Providers are managed declaratively in [`mofa_hybrid.toml`](../../mofa_hybrid.toml). To add a new provider (e.g., Fireworks AI), use the `openai_compatible` kind:
 
 ```toml
 [[providers]]

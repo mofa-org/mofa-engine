@@ -109,8 +109,8 @@ The script produces console output detailing step-by-step progress, including ex
 ==========================================================================
  SCENARIO S1 MEETING BRIEF COMPLETED SUCCESSFULLY!
  Output Artifacts:
- ├─ Minutes Document : /Users/ashum9/mofa/mofa-engine/output/meeting_minutes.md
- └─ Audio Brief (.mp3): /Users/ashum9/mofa/mofa-engine/output/meeting_brief.mp3
+ ├─ Minutes Document : output/meeting_minutes.md
+ └─ Audio Brief (.mp3): output/meeting_brief.mp3
  Total Pipeline Time : 3.91s
  Total Inference Cost : $0.000000 (100% Free)
 ==========================================================================

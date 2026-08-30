@@ -325,7 +325,7 @@ export function ComposeView({ onStart }: ComposeViewProps) {
            'Generate Content'}
         </Button>
         <span className="text-[13px] text-text-dim">
-          {providerOption === 'cloud' ? '[CLOUD] Google Gemini 2.5 Flash · Cloud Burst' : '~18 seconds · fully local · Cmd ↵'}
+          {providerOption === 'cloud' ? '[CLOUD] Google Gemini 3.6 Flash · Cloud Burst' : '~18 seconds · fully local · Cmd ↵'}
         </span>
       </div>
       </div>
