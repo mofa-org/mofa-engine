@@ -484,46 +484,36 @@ impl Engine {
                     }
 
                     let count = cards.len();
-                    let mut freed = false;
                     for mut card in cards {
-                        // Reconcile with the engine's current view. Capture the
-                        // residency *and* the live execution counters so a
-                        // rediscovery that lands mid-request does not reset an
-                        // in-flight model's `active_requests` (which would corrupt
-                        // its Busy status and capacity score, and let a later
-                        // `end_execution` saturate to zero). `.map` drops the shard
-                        // guard immediately so the later insert cannot deadlock.
                         let previous = self
                             .models
                             .get(&card.id)
                             .map(|c| (c.residency, c.execution.active_requests));
                         if let Some((prev_residency, active_requests)) = previous {
-                            // Freshly discovered cards start with zero in-flight
-                            // requests; carry the live count forward. The new card's
-                            // `max_concurrency` is kept so config changes still apply.
                             card.execution.active_requests = active_requests;
                             match prev_residency {
-                                // A load is in flight; don't let discovery regress it.
                                 ModelResidency::Loading => {
                                     card.residency = ModelResidency::Loading;
                                 }
-                                // The backend reports the model is no longer resident,
-                                // so release the reservation we still held for it.
                                 ModelResidency::Loaded
                                     if !matches!(card.residency, ModelResidency::Loaded) =>
                                 {
                                     self.memory.deallocate(&card.id);
-                                    freed = true;
                                 }
                                 _ => {}
                             }
                         }
+                        if matches!(card.residency, ModelResidency::Loaded)
+                            && card.memory_estimate_bytes > 0
+                        {
+                            self.memory
+                                .try_reserve(&card.id, card.memory_estimate_bytes);
+                            self.memory.touch(&card.id);
+                        }
                         card.refresh_status();
                         self.models.insert(card.id.clone(), card);
                     }
-                    if freed {
-                        self.emit_memory_changed();
-                    }
+                    self.emit_memory_changed();
                     let _ = self.event_tx.send(EngineEvent::DiscoveryCompleted {
                         provider: name.clone(),
                         models: count,
@@ -799,7 +789,13 @@ impl Engine {
         self.providers
             .iter()
             .find(|p| p.name == provider)
-            .is_some_and(|p| p.kind.is_local())
+            .is_some_and(|p| {
+                p.kind.is_local()
+                    || self
+                        .models
+                        .iter()
+                        .any(|m| m.provider == provider && m.residency == ModelResidency::Loaded)
+            })
     }
 
     /// Emit the S5 data-flow audit record for one served request: where it ran
@@ -1505,8 +1501,18 @@ impl Engine {
         if let Some((_, predicted)) = self.pending_predictions.remove(&scope) {
             if predicted == cap {
                 self.preflight_metrics.hit();
+                // Broadcast hit so the observability bridge can forward to the collector.
+                let _ = self.event_tx.send(EngineEvent::PreflightWarmCompleted {
+                    model_id: format!("preflight_hit:{}", predicted),
+                    success: true,
+                });
             } else {
                 self.preflight_metrics.miss();
+                // Broadcast miss so the observability bridge can forward to the collector.
+                let _ = self.event_tx.send(EngineEvent::PreflightWarmCompleted {
+                    model_id: format!("preflight_miss:{}→{}", predicted, cap),
+                    success: false,
+                });
             }
         }
     }
@@ -1545,6 +1551,9 @@ impl Engine {
             .as_deref()
             .and_then(Capability::from_str_loose)
         {
+            let scope = Self::scope_key(req);
+            self.preflight_metrics.prediction();
+            self.remember_prediction(scope, hint);
             return Some((hint, "hint"));
         }
         if let Some(cap) = self.first_subscribed_without_resident() {
@@ -1598,6 +1607,12 @@ impl Engine {
             return;
         }
         if let Some((cap, source)) = self.select_warm_capability(req) {
+            // Broadcast prediction event so the observability bridge can forward it.
+            // This fires for every prediction, even if the model is already warm.
+            let _ = self.event_tx.send(EngineEvent::PreflightWarmStarted {
+                model_id: cap.to_string(),
+                source: source.to_string(),
+            });
             self.warm_capability(cap, source, req.app_id.clone(), req.session_id.clone());
         }
     }
@@ -2202,6 +2217,7 @@ mod tests {
             preflight: PreflightConfig::default(),
             artifacts: Default::default(),
             security: Default::default(),
+            observability: Default::default(),
             providers: vec![],
         }
     }
@@ -2603,6 +2619,7 @@ mod tests {
             preflight: PreflightConfig::default(),
             artifacts: Default::default(),
             security: Default::default(),
+            observability: Default::default(),
             providers: vec![ProviderConfig {
                 name: "disabled-ollama".into(),
                 kind: "ollama".into(),

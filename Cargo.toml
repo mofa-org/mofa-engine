@@ -5,6 +5,7 @@ members = [
     "mofa-engine-core",
     "mofa-engine-sdk",
     "mofa-engine-app",
+    "mofa-observability",
     "mofa-podcast",
     "mofa-explainer",
     "mofa-review",
@@ -28,7 +29,7 @@ toml = "0.8"
 
 # HTTP
 reqwest = { version = "0.12", features = ["json", "multipart"] }
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", features = ["ws", "multipart"] }
 axum-extra = { version = "0.10", features = ["typed-header"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
@@ -40,6 +41,10 @@ anyhow = "1"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+opentelemetry = "0.28.0"
+opentelemetry_sdk = { version = "0.28.0", features = ["rt-tokio"] }
+tracing-opentelemetry = "0.29.0"
+opentelemetry-otlp = { version = "0.28.0", features = ["grpc-tonic", "trace"] }
 
 # Utilities
 uuid = { version = "1", features = ["v4"] }

@@ -11,6 +11,7 @@
 //! exposes.
 
 pub mod client;
+pub mod observability_bridge;
 pub mod server;
 
 // Internal: the embedded dashboard HTML, served by `server`.

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mofa-sdk"
+version = "0.1.0"
+description = "MoFA Engine Python SDK & Unified CLI — High Performance Intelligent Gateway"
+readme = "README.md"
+authors = [
+    { name = "Ashutosh Mishra", email = "ashum9@github.com" }
+]
+license = { text = "MIT" }
+dependencies = [
+    "requests>=2.28.0",
+]
+requires-python = ">=3.9"
+
+[project.scripts]
+mofa = "mofa_cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+]
+async = [
+    "httpx>=0.24.0",
+]
+
+[tool.setuptools.py_modules]
+modules = ["mofa_sdk", "mofa_cli", "mofa_doctor"]

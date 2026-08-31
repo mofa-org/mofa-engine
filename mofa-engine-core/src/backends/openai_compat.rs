@@ -320,6 +320,16 @@ impl Provider for OpenAiCompatProvider {
     }
 
     async fn discover(&self) -> Result<Vec<ModelCard>, EngineError> {
+        let is_local = self.base_url.contains("127.0.0.1")
+            || self.base_url.contains("localhost")
+            || self.base_url.contains("0.0.0.0")
+            || self.api_key == "local";
+        let residency = if is_local {
+            ModelResidency::Loaded
+        } else {
+            ModelResidency::Remote
+        };
+
         let cards = self
             .models
             .iter()
@@ -329,7 +339,7 @@ impl Provider for OpenAiCompatProvider {
                     ModelCard::new(self.name.clone(), m.name.clone(), cap, self.cost_tier);
                 card.id = ModelId::canonical(&self.name, &m.name);
                 card.availability = ModelAvailability::Configured;
-                card.residency = ModelResidency::Remote;
+                card.residency = residency;
                 card.context_window = m.context_window.unwrap_or(4096);
                 card.memory_estimate_bytes = m.memory_mb.unwrap_or(0) * 1024 * 1024;
                 card.execution.max_concurrency = 32;
@@ -378,18 +388,36 @@ impl Provider for OpenAiCompatProvider {
     }
 
     async fn load(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
+        let is_local = self.base_url.contains("127.0.0.1")
+            || self.base_url.contains("localhost")
+            || self.base_url.contains("0.0.0.0")
+            || self.api_key == "local";
+        let residency = if is_local {
+            ModelResidency::Loaded
+        } else {
+            ModelResidency::Remote
+        };
         Ok(LifecycleResult {
             model_id: ModelId::canonical(&self.name, ModelId::name(model_id)),
-            residency: ModelResidency::Remote,
+            residency,
             memory_bytes: Some(0),
             changed: false,
         })
     }
 
     async fn unload(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
+        let is_local = self.base_url.contains("127.0.0.1")
+            || self.base_url.contains("localhost")
+            || self.base_url.contains("0.0.0.0")
+            || self.api_key == "local";
+        let residency = if is_local {
+            ModelResidency::Loaded
+        } else {
+            ModelResidency::Remote
+        };
         Ok(LifecycleResult {
             model_id: ModelId::canonical(&self.name, ModelId::name(model_id)),
-            residency: ModelResidency::Remote,
+            residency,
             memory_bytes: Some(0),
             changed: false,
         })

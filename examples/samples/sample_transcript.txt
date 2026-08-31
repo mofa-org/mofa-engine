@@ -1,0 +1,8 @@
+[00:00:01] Alice: Good morning everyone. Let's get started on the Q3 sprint planning.
+[00:00:05] Bob: Morning Alice. I have completed the database migration benchmarks.
+[00:00:10] Alice: Excellent. What were the latency numbers on the new indexes?
+[00:00:15] Bob: P99 query latency dropped from 240ms down to 18ms under 5,000 concurrent requests.
+[00:00:23] Charlie: That's a huge win for the API gateway. What about the memory footprint?
+[00:00:28] Bob: Memory remains bounded under 4GB across all replicas. No memory leak detected.
+[00:00:35] Alice: Great. Action items for this week: Bob will deploy the new schema to staging by Wednesday, Charlie will finalize the frontend integration by Thursday, and I will prepare the client release notes.
+[00:00:48] Charlie: Sounds good, let's ship it.

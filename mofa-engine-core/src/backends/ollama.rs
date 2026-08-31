@@ -121,7 +121,19 @@ struct OllamaChatRequest {
     messages: Vec<OllamaMessage>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    keep_alive: Option<String>,
+    keep_alive: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<OllamaOptions>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct OllamaOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    num_ctx: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    num_predict: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -313,6 +325,37 @@ impl OllamaProvider {
             }
         }
     }
+
+    /// Extract or default Ollama options (num_ctx, num_predict, temperature)
+    /// to support long documents and full meeting transcripts up to 32K tokens.
+    fn resolve_options(request: &InferenceRequest) -> Option<OllamaOptions> {
+        let num_ctx = request
+            .params
+            .get("num_ctx")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+            .or(Some(32768));
+
+        let num_predict = request
+            .params
+            .get("max_tokens")
+            .or_else(|| request.params.get("num_predict"))
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+            .or(Some(4096));
+
+        let temperature = request
+            .params
+            .get("temperature")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32);
+
+        Some(OllamaOptions {
+            num_ctx,
+            num_predict,
+            temperature,
+        })
+    }
 }
 
 #[async_trait]
@@ -386,6 +429,19 @@ impl Provider for OllamaProvider {
                 // is deferred.
                 let capability = if lower.contains("embed") {
                     Capability::Embedding
+                } else if lower.contains("llava")
+                    || lower.contains("qwen2-vl")
+                    || lower.contains("bakllava")
+                    || lower.contains("moondream")
+                    || lower.contains("vision")
+                {
+                    Capability::Vlm
+                } else if lower.contains("flux")
+                    || lower.contains("diffusion")
+                    || lower.contains("sdxl")
+                    || lower.contains("image")
+                {
+                    Capability::ImageGen
                 } else {
                     Capability::Chat
                 };
@@ -395,6 +451,9 @@ impl Provider for OllamaProvider {
                     capability,
                     CostTier::Free,
                 );
+                if capability == Capability::Vlm {
+                    card.capabilities = vec![Capability::Vlm, Capability::Chat];
+                }
                 card.id = ModelId::canonical(&self.name, &model_name);
                 card.availability = ModelAvailability::Discovered;
                 card.residency = if loaded.contains(&model_name) {
@@ -430,6 +489,51 @@ impl Provider for OllamaProvider {
 
     async fn load(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
         let model_name = ModelId::name(model_id);
+        let lower = model_name.to_lowercase();
+
+        // Non-chat models (e.g. diffusion / flux) in Ollama do not support `/api/chat`.
+        if lower.contains("flux") || lower.contains("diffusion") || lower.contains("sdxl") {
+            return Ok(LifecycleResult {
+                model_id: ModelId::canonical(&self.name, model_name),
+                residency: ModelResidency::Loaded,
+                memory_bytes: None,
+                changed: false,
+            });
+        }
+
+        if lower.contains("embed") {
+            let body = serde_json::json!({
+                "model": model_name,
+                "input": " ",
+                "keep_alive": -1,
+            });
+            let url = format!("{}/api/embed", self.base_url);
+            let resp = self
+                .client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| EngineError::ProviderError {
+                    provider: self.name.clone(),
+                    detail: format!("load embed failed: {e}"),
+                })?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(EngineError::ProviderError {
+                    provider: self.name.clone(),
+                    detail: format!("load embed HTTP {status}: {text}"),
+                });
+            }
+            return Ok(LifecycleResult {
+                model_id: ModelId::canonical(&self.name, model_name),
+                residency: ModelResidency::Loaded,
+                memory_bytes: None,
+                changed: true,
+            });
+        }
+
         let body = OllamaChatRequest {
             model: model_name.to_string(),
             messages: vec![OllamaMessage {
@@ -438,7 +542,8 @@ impl Provider for OllamaProvider {
                 images: Vec::new(),
             }],
             stream: false,
-            keep_alive: Some("5m".into()),
+            keep_alive: Some(serde_json::json!(-1)),
+            options: None,
         };
         let url = format!("{}/api/chat", self.base_url);
         let resp = self
@@ -471,6 +576,50 @@ impl Provider for OllamaProvider {
 
     async fn unload(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
         let model_name = ModelId::name(model_id);
+        let lower = model_name.to_lowercase();
+
+        if lower.contains("flux") || lower.contains("diffusion") || lower.contains("sdxl") {
+            return Ok(LifecycleResult {
+                model_id: ModelId::canonical(&self.name, model_name),
+                residency: ModelResidency::Unloaded,
+                memory_bytes: None,
+                changed: false,
+            });
+        }
+
+        if lower.contains("embed") {
+            let body = serde_json::json!({
+                "model": model_name,
+                "input": " ",
+                "keep_alive": 0,
+            });
+            let url = format!("{}/api/embed", self.base_url);
+            let resp = self
+                .client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| EngineError::ProviderError {
+                    provider: self.name.clone(),
+                    detail: format!("unload embed failed: {e}"),
+                })?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(EngineError::ProviderError {
+                    provider: self.name.clone(),
+                    detail: format!("unload embed HTTP {status}: {text}"),
+                });
+            }
+            return Ok(LifecycleResult {
+                model_id: ModelId::canonical(&self.name, model_name),
+                residency: ModelResidency::Unloaded,
+                memory_bytes: None,
+                changed: true,
+            });
+        }
+
         let body = OllamaChatRequest {
             model: model_name.to_string(),
             messages: vec![OllamaMessage {
@@ -479,7 +628,8 @@ impl Provider for OllamaProvider {
                 images: Vec::new(),
             }],
             stream: false,
-            keep_alive: Some("0".into()),
+            keep_alive: Some(serde_json::json!(0)),
+            options: None,
         };
 
         let url = format!("{}/api/chat", self.base_url);
@@ -529,11 +679,13 @@ impl Provider for OllamaProvider {
             return Err(EngineError::InvalidRequest("no messages provided".into()));
         }
 
+        let options = Self::resolve_options(request);
         let body = OllamaChatRequest {
             model: model_name.to_string(),
             messages,
             stream: false,
             keep_alive: None,
+            options,
         };
 
         let url = format!("{}/api/chat", self.base_url);
@@ -611,11 +763,13 @@ impl Provider for OllamaProvider {
             return Err(EngineError::InvalidRequest("no messages provided".into()));
         }
 
+        let options = Self::resolve_options(request);
         let body = OllamaChatRequest {
             model: model_name.to_string(),
             messages,
             stream: true,
             keep_alive: None,
+            options,
         };
         let url = format!("{}/api/chat", self.base_url);
         let start = Instant::now();

@@ -34,6 +34,20 @@ pub struct EngineConfig {
     /// Provider definitions
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
+    /// Observability settings
+    #[serde(default)]
+    pub observability: ObservabilityConfig,
+}
+
+/// Observability configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ObservabilityConfig {
+    /// Whether observability is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The OpenTelemetry OTLP endpoint (e.g., http://localhost:4317)
+    #[serde(default)]
+    pub otlp_endpoint: Option<String>,
 }
 
 /// Retention policy for engine-generated artifacts (e.g. TTS audio files).
@@ -484,14 +498,8 @@ impl EngineConfig {
                 continue;
             }
             provider.provider_kind()?;
-            if provider.kind == "openai_compatible"
-                && provider.api_key.as_deref().unwrap_or_default().is_empty()
-            {
-                return Err(EngineError::Config(format!(
-                    "provider '{}' requires a non-empty api_key",
-                    provider.name
-                )));
-            }
+            // OpenAI-compatible providers with empty api_key are marked BackendHealth::Unavailable
+            // at runtime rather than rejecting config loading.
             // Every local process-adapter kind is spawned from a configured
             // `command` and serves an explicit model list, so validate all three
             // uniformly: catch a missing command or empty model list here (at
@@ -732,6 +740,7 @@ impl EngineConfig {
             artifacts: ArtifactConfig::default(),
             security: SecurityConfig::default(),
             providers,
+            observability: ObservabilityConfig::default(),
         }
     }
 }
@@ -835,6 +844,7 @@ mod tests {
     #[test]
     fn toml_roundtrip() {
         let cfg = EngineConfig {
+            observability: Default::default(),
             listen: ListenConfig::default(),
             memory: MemoryConfig::default(),
             timeouts: TimeoutConfig::default(),
@@ -945,6 +955,7 @@ mod tests {
     #[test]
     fn validate_rejects_unknown_provider_kind() {
         let cfg = EngineConfig {
+            observability: Default::default(),
             listen: ListenConfig::default(),
             memory: MemoryConfig::default(),
             timeouts: TimeoutConfig::default(),

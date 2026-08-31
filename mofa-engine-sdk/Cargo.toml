@@ -20,5 +20,6 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 tokio-stream = { workspace = true }
+mofa-observability = { path = "../mofa-observability" }
 uuid = { workspace = true }
 subtle = "2.6.1"

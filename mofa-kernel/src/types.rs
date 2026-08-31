@@ -384,6 +384,35 @@ pub struct Message {
     pub images: Vec<String>,
 }
 
+impl Message {
+    /// Create a new user message.
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: "user".into(),
+            content: content.into(),
+            images: Vec::new(),
+        }
+    }
+
+    /// Create a new system message.
+    pub fn system(content: impl Into<String>) -> Self {
+        Self {
+            role: "system".into(),
+            content: content.into(),
+            images: Vec::new(),
+        }
+    }
+
+    /// Create a new assistant message.
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self {
+            role: "assistant".into(),
+            content: content.into(),
+            images: Vec::new(),
+        }
+    }
+}
+
 /// Named-model fallback behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
