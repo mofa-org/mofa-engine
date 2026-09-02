@@ -34,6 +34,36 @@ pub struct EngineConfig {
     /// Provider definitions
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
+    /// Background provider re-discovery settings
+    #[serde(default)]
+    pub discovery: DiscoveryConfig,
+}
+
+/// Background re-discovery of provider models, so a provider that was
+/// unavailable at startup (e.g. Ollama started after the engine) is picked up
+/// without a manual `/v1/discovery/refresh` call or a restart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveryConfig {
+    /// Re-run discovery across all providers this often, in the background.
+    /// `0` disables the background refresh — discovery then only runs at
+    /// startup and via `POST /v1/discovery/refresh`.
+    #[serde(default = "DiscoveryConfig::default_refresh_secs")]
+    pub refresh_secs: u64,
+}
+
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            refresh_secs: Self::default_refresh_secs(),
+        }
+    }
+}
+
+impl DiscoveryConfig {
+    /// Re-check providers every 30 seconds by default.
+    fn default_refresh_secs() -> u64 {
+        30
+    }
 }
 
 /// Retention policy for engine-generated artifacts (e.g. TTS audio files).
@@ -732,6 +762,7 @@ impl EngineConfig {
             artifacts: ArtifactConfig::default(),
             security: SecurityConfig::default(),
             providers,
+            discovery: DiscoveryConfig::default(),
         }
     }
 }
@@ -852,6 +883,7 @@ mod tests {
                 enabled: true,
                 ..Default::default()
             }],
+            discovery: DiscoveryConfig::default(),
         };
         let toml_str = toml::to_string_pretty(&cfg).unwrap();
         let parsed: EngineConfig = toml::from_str(&toml_str).unwrap();
@@ -962,6 +994,7 @@ mod tests {
                 enabled: true,
                 ..Default::default()
             }],
+            discovery: DiscoveryConfig::default(),
         };
         assert!(cfg.validate().is_err());
     }

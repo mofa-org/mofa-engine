@@ -43,6 +43,12 @@ subscription_ttl_secs = 3600
 # dir = "/tmp"            # where generated audio/artifacts are scanned (default: system temp)
 retention_secs = 3600     # delete engine-generated artifacts older than this; 0 disables
 
+[discovery]
+# Background re-discovery: picks up a provider that was down at startup (e.g.
+# Ollama started after the engine) without a manual /v1/discovery/refresh
+# call or a restart.
+refresh_secs = 30   # 0 disables the background refresh
+
 [security]
 # Allowlist of directory roots that request `input_file` paths must fall under.
 # Empty (default) allows any local path — appropriate only on a trusted machine.
