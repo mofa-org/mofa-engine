@@ -534,7 +534,9 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
     use mofa_engine_core::EngineConfig;
-    use mofa_engine_core::config::{ListenConfig, MemoryConfig, PreflightConfig, TimeoutConfig};
+    use mofa_engine_core::config::{
+        DiscoveryConfig, ListenConfig, MemoryConfig, PreflightConfig, TimeoutConfig,
+    };
     use tower::ServiceExt; // for `oneshot`
 
     #[test]
@@ -597,6 +599,7 @@ mod tests {
             artifacts: Default::default(),
             security: Default::default(),
             providers: vec![],
+            discovery: DiscoveryConfig { refresh_secs: 0 },
         };
         AppState {
             engine: mofa_engine_core::Engine::new(config).await,

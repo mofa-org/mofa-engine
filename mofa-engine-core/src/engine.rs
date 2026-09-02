@@ -129,6 +129,10 @@ pub struct Engine {
     idle_task: Mutex<Option<JoinHandle<()>>>,
     /// Background artifact-cleanup task; aborted on drop.
     artifact_task: Mutex<Option<JoinHandle<()>>>,
+    /// Background provider re-discovery task; aborted on drop.
+    discovery_task: Mutex<Option<JoinHandle<()>>>,
+    /// Interval between background re-discovery passes; zero disables it.
+    discovery_interval: Duration,
     /// Weak self-reference for background tasks.
     weak_self: OnceLock<Weak<Engine>>,
     /// Event broadcast channel.
@@ -217,6 +221,7 @@ impl Engine {
         let circuit_breakers = CircuitBreakerRegistry::new(CircuitBreakerConfig::default());
         let preflight = PreflightPredictor::new();
         let idle_timeout = Duration::from_secs(config.memory.idle_timeout_secs);
+        let discovery_interval = Duration::from_secs(config.discovery.refresh_secs);
 
         let mut providers = Vec::new();
         for pc in &config.providers {
@@ -416,6 +421,8 @@ impl Engine {
             lifecycle_seq: AtomicU64::new(0),
             idle_task: Mutex::new(None),
             artifact_task: Mutex::new(None),
+            discovery_task: Mutex::new(None),
+            discovery_interval,
             weak_self: OnceLock::new(),
             event_tx,
             metrics: EngineMetrics::default(),
@@ -428,6 +435,7 @@ impl Engine {
         engine.refresh_resources().await;
         engine.spawn_idle_eviction();
         engine.spawn_artifact_sweep(artifact_sweeper);
+        engine.spawn_discovery_ticker();
         Ok(engine)
     }
 
@@ -1803,6 +1811,34 @@ impl Engine {
         *self.artifact_task.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
     }
 
+    /// Background task: periodically re-run provider discovery, so a provider
+    /// that was unavailable at startup (e.g. Ollama started after the engine)
+    /// is picked up without a manual `/v1/discovery/refresh` call or a restart.
+    fn spawn_discovery_ticker(&self) {
+        if self.discovery_interval.is_zero() {
+            return;
+        }
+        let Some(weak) = self.weak_self.get().cloned() else {
+            return;
+        };
+        let tick = self.discovery_interval;
+        let handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(tick);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticker.tick().await;
+                let Some(engine) = weak.upgrade() else {
+                    break;
+                };
+                engine.refresh_resources().await;
+            }
+        });
+        *self
+            .discovery_task
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(handle);
+    }
+
     /// Reject a request whose local file inputs fall outside the configured
     /// allowlist — `input_file` AND any `messages[].images` entry that names a
     /// local path. http(s)/data: image URLs are not local paths and skip the
@@ -2162,7 +2198,7 @@ impl Engine {
 
 impl Drop for Engine {
     fn drop(&mut self) {
-        for task in [&self.idle_task, &self.artifact_task] {
+        for task in [&self.idle_task, &self.artifact_task, &self.discovery_task] {
             if let Some(handle) = task.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 handle.abort();
             }
@@ -2182,11 +2218,11 @@ mod tests {
         BackendFeature, Capability, ExecutionState, LifecycleResult, Message, ModelAvailability,
         ModelId,
     };
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     use crate::config::{
-        EngineConfig, ListenConfig, MemoryConfig, ModelDef, PreflightConfig, ProviderConfig,
-        SecurityConfig, TimeoutConfig,
+        DiscoveryConfig, EngineConfig, ListenConfig, MemoryConfig, ModelDef, PreflightConfig,
+        ProviderConfig, SecurityConfig, TimeoutConfig,
     };
 
     const MB: u64 = 1024 * 1024;
@@ -2203,6 +2239,9 @@ mod tests {
             artifacts: Default::default(),
             security: Default::default(),
             providers: vec![],
+            // Disabled by default in tests; individual tests opt a short
+            // interval back in to exercise the ticker.
+            discovery: DiscoveryConfig { refresh_secs: 0 },
         }
     }
 
@@ -2381,13 +2420,14 @@ mod tests {
         budget_mb: u64,
         idle_secs: u64,
     ) -> Arc<Engine> {
-        build_engine_with_pricing(providers, budget_mb, idle_secs, HashMap::new())
+        build_engine_with_pricing(providers, budget_mb, idle_secs, 0, HashMap::new())
     }
 
     fn build_engine_with_pricing(
         providers: Vec<Arc<dyn Provider>>,
         budget_mb: u64,
         idle_secs: u64,
+        discovery_secs: u64,
         pricing: HashMap<String, (f64, f64)>,
     ) -> Arc<Engine> {
         let (event_tx, _) = broadcast::channel(256);
@@ -2425,6 +2465,8 @@ mod tests {
             lifecycle_seq: AtomicU64::new(0),
             idle_task: Mutex::new(None),
             artifact_task: Mutex::new(None),
+            discovery_task: Mutex::new(None),
+            discovery_interval: Duration::from_secs(discovery_secs),
             weak_self: OnceLock::new(),
             event_tx,
             metrics: EngineMetrics::default(),
@@ -2434,6 +2476,7 @@ mod tests {
         });
         let _ = engine.weak_self.set(Arc::downgrade(&engine));
         engine.spawn_idle_eviction();
+        engine.spawn_discovery_ticker();
         engine
     }
 
@@ -2614,6 +2657,7 @@ mod tests {
                 enabled: false,
                 ..Default::default()
             }],
+            discovery: DiscoveryConfig { refresh_secs: 0 },
         };
         let engine = Engine::new(config).await;
         assert_eq!(engine.status().await.providers, 0);
@@ -2903,7 +2947,7 @@ mod tests {
         // openai: $0.01/1k in, $0.03/1k out → default estimate (1 + 1024 tokens)
         // ≈ $0.0307, well above the $0.001 ceiling. ollama is free.
         let pricing = HashMap::from([("openai".to_string(), (0.01, 0.03))]);
-        let engine = build_engine_with_pricing(vec![local, cloud], 1000, 0, pricing);
+        let engine = build_engine_with_pricing(vec![local, cloud], 1000, 0, 0, pricing);
         engine.refresh_resources().await;
 
         let mut req = chat_request(None);
@@ -2940,7 +2984,7 @@ mod tests {
             ("openai".to_string(), (0.01, 0.03)),
             ("deepseek".to_string(), (0.005, 0.02)),
         ]);
-        let engine = build_engine_with_pricing(vec![cloud_a, cloud_b], 1000, 0, pricing);
+        let engine = build_engine_with_pricing(vec![cloud_a, cloud_b], 1000, 0, 0, pricing);
         engine.refresh_resources().await;
 
         let mut req = chat_request(None);
@@ -3465,6 +3509,88 @@ mod tests {
                 .iter()
                 .any(|r| r.event == "idle_unload")
         );
+    }
+
+    /// A provider whose `discover()` fails until externally flipped healthy —
+    /// simulates a backend (e.g. Ollama) that isn't up yet when the engine boots.
+    struct FlakyDiscoveryProvider {
+        name: String,
+        available: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl Provider for FlakyDiscoveryProvider {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn kind(&self) -> ProviderKind {
+            ProviderKind::Ollama
+        }
+        fn features(&self) -> Vec<BackendFeature> {
+            vec![BackendFeature::Discovery]
+        }
+        async fn discover(&self) -> Result<Vec<ModelCard>, EngineError> {
+            if !self.available.load(Ordering::SeqCst) {
+                return Err(EngineError::ProviderError {
+                    provider: self.name.clone(),
+                    detail: "not reachable yet".into(),
+                });
+            }
+            let mut card = ModelCard::new(&self.name, "qwen", Capability::Chat, CostTier::Free);
+            card.refresh_status();
+            Ok(vec![card])
+        }
+        async fn health(&self) -> Result<BackendHealth, EngineError> {
+            Ok(BackendHealth::Healthy)
+        }
+        async fn load(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
+            Ok(LifecycleResult {
+                model_id: model_id.into(),
+                residency: ModelResidency::Loaded,
+                memory_bytes: Some(0),
+                changed: true,
+            })
+        }
+        async fn unload(&self, model_id: &str) -> Result<LifecycleResult, EngineError> {
+            Ok(LifecycleResult {
+                model_id: model_id.into(),
+                residency: ModelResidency::Unloaded,
+                memory_bytes: Some(0),
+                changed: true,
+            })
+        }
+        async fn invoke(
+            &self,
+            _model_id: &str,
+            _request: &InferenceRequest,
+        ) -> Result<InferenceResponse, EngineError> {
+            unimplemented!("not exercised by this test")
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_ticker_picks_up_a_provider_that_was_down_at_startup() {
+        let available = Arc::new(AtomicBool::new(false));
+        let provider = Arc::new(FlakyDiscoveryProvider {
+            name: "ollama".into(),
+            available: Arc::clone(&available),
+        });
+        // 1s refresh interval — real enough to prove the ticker fires on its
+        // own, short enough that the test doesn't need to wait long.
+        let engine = build_engine_with_pricing(vec![provider], 1000, 0, 1, HashMap::new());
+
+        // Mirrors "engine boots while the provider is still down": startup
+        // discovery finds nothing.
+        engine.refresh_resources().await;
+        assert!(engine.capabilities().await.is_empty());
+
+        // Provider comes up later. From here on we never call
+        // `refresh_resources()` ourselves — only the background ticker can
+        // make this assertion pass.
+        available.store(true, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        assert!(!engine.capabilities().await.is_empty());
     }
 
     async fn collect_stream(mut rx: mpsc::Receiver<StreamChunk>) -> Vec<StreamChunk> {

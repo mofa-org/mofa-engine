@@ -443,7 +443,9 @@ impl DaemonClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mofa_engine_core::config::{ListenConfig, MemoryConfig, PreflightConfig, TimeoutConfig};
+    use mofa_engine_core::config::{
+        DiscoveryConfig, ListenConfig, MemoryConfig, PreflightConfig, TimeoutConfig,
+    };
 
     fn empty_config() -> EngineConfig {
         EngineConfig {
@@ -454,6 +456,7 @@ mod tests {
             artifacts: Default::default(),
             security: Default::default(),
             providers: vec![],
+            discovery: DiscoveryConfig { refresh_secs: 0 },
         }
     }
 
